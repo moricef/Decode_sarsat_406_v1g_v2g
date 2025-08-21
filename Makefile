@@ -1,3 +1,18 @@
+##############################################
+#
+## Licence
+#
+# Licence Creative Commons CC BY-NC-SA 
+#
+## Auteurs et contributions
+#
+# - **Code original dec406_v7** : F4EHY (2020)
+# - **Refactoring et support 2G** : Développement collaboratif (2025)
+# - **Conformité T.018** : Implémentation complète BCH + MID database
+#
+##############################################
+
+
 # Makefile pour le décodeur de balises 406 MHz
 # Support pour balises 1G et 2G avec capture audio
 
