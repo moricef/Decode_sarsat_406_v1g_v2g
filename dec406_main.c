@@ -1,200 +1,196 @@
-// dec406_main.c - Version corrigée
+/**********************************
+
+## Licence
+
+ Licence Creative Commons CC BY-NC-SA 
+
+## Auteurs et contributions
+
+- **Code original dec406_v7** : F4EHY (2020)
+- **Refactoring et support 2G** : Développement collaboratif (2025)
+- **Conformité T.018** : Implémentation complète BCH + MID database
+
+***********************************/
+
+
+// dec406_main.c - Standalone hex decoder
 #include "dec406.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 
-void decode_beacon(const uint8_t *bits, int length) {
-    if (!bits) {
-        fprintf(stderr, "Erreur: bits est NULL\n");
-        return;
+void hex_string_to_bits(const char* hex_str, uint8_t* bits, int bit_count) {
+    int hex_len = strlen(hex_str);
+    int data_bits = hex_len * 4;
+    
+    // Check if we need to add sync pattern (15 bits of '1' + 9 bits frame sync)
+    int needs_sync = 0;
+    int sync_offset = 0;
+    
+    if (bit_count == FRAME_1G_SHORT || bit_count == FRAME_1G_LONG) {
+        // For 1G frames, check if hex corresponds to data without sync
+        if ((bit_count == FRAME_1G_SHORT && data_bits == (FRAME_1G_SHORT - 24)) ||  // 112-24=88 bits
+            (bit_count == FRAME_1G_LONG && data_bits == (FRAME_1G_LONG - 24))) {   // 144-24=120 bits
+            needs_sync = 1;
+            sync_offset = 24; // 15 bits sync + 9 bits frame sync
+            printf("Detected hex data without sync pattern - adding sync bits\n");
+        }
     }
     
-    switch(length) {
-        case FRAME_1G_LENGTH:
-            printf("Démarrage du décodage 1G...\n");
-            decode_1g(bits, length);
-            break;
+    if (needs_sync) {
+        // Clear the entire bit array
+        memset(bits, 0, bit_count * sizeof(uint8_t));
+        
+        // Add 15 sync bits (all '1')
+        for (int i = 0; i < 15; i++) {
+            bits[i] = 1;
+        }
+        
+        // Add frame sync pattern (9 bits: 000101101)
+        bits[15] = 0; bits[16] = 0; bits[17] = 0;
+        bits[18] = 1; bits[19] = 0; bits[20] = 1;
+        bits[21] = 1; bits[22] = 0; bits[23] = 1;
+        
+        // Convert hex data starting at bit 24
+        for (int i = 0; i < hex_len; i++) {
+            char c = tolower(hex_str[i]);
+            int value;
+            if (c >= 'a' && c <= 'f') {
+                value = c - 'a' + 10;
+            } else if (c >= '0' && c <= '9') {
+                value = c - '0';
+            } else {
+                value = 0;
+                fprintf(stderr, "Avertissement: caractère non hexadécimal '%c' à la position %d\n", c, i);
+            }
             
-        case FRAME_2G_LENGTH:
-            printf("Démarrage du décodage 2G...\n");
-            decode_2g(bits);
-            break;
+            int bit_pos = 24 + i * 4;
+            if (bit_pos + 3 < bit_count) {
+                bits[bit_pos]   = (value >> 3) & 1;
+                bits[bit_pos+1] = (value >> 2) & 1;
+                bits[bit_pos+2] = (value >> 1) & 1;
+                bits[bit_pos+3] = (value >> 0) & 1;
+            }
+        }
+    } else {
+        // Original behavior for complete frames
+        if (data_bits < bit_count) {
+            fprintf(stderr, "Chaîne hexadécimale trop courte: %d bits < %d bits\n", data_bits, bit_count);
+            exit(EXIT_FAILURE);
+        }
+
+        // Special handling for 2G frames with padding
+        if (bit_count == FRAME_2G_LENGTH) {
+            // For 2G: expect 63 hex chars = 252 bits = 2 padding + 250 data
+            // Skip the first 2 padding bits
+            int bit_offset = 0;
             
-        default:
-            fprintf(stderr, "Erreur: Longueur de trame %d non supportée\n", length);
+            for (int i = 0; i < hex_len; i++) {
+                char c = tolower(hex_str[i]);
+                int value;
+                if (c >= 'a' && c <= 'f') {
+                    value = c - 'a' + 10;
+                } else if (c >= '0' && c <= '9') {
+                    value = c - '0';
+                } else {
+                    value = 0;
+                    fprintf(stderr, "Avertissement: caractère non hexadécimal '%c' à la position %d\n", c, i);
+                }
+                
+                // Extract 4 bits from this hex digit
+                for (int j = 3; j >= 0; j--) {
+                    int bit_pos = i * 4 + (3 - j);
+                    int bit_val = (value >> j) & 1;
+                    
+                    // Skip first 2 padding bits, then store the next 250 bits
+                    if (bit_pos >= 2 && bit_offset < bit_count) {
+                        bits[bit_offset++] = bit_val;
+                    }
+                }
+            }
+            printf("2G frame detected: skipped 2 padding bits, extracted %d data bits\n", bit_offset);
+        } else {
+            // Original 1G handling
+            for (int i = 0; i < hex_len; i++) {
+                char c = tolower(hex_str[i]);
+                int value;
+                if (c >= 'a' && c <= 'f') {
+                    value = c - 'a' + 10;
+                } else if (c >= '0' && c <= '9') {
+                    value = c - '0';
+                } else {
+                    value = 0;
+                    fprintf(stderr, "Avertissement: caractère non hexadécimal '%c' à la position %d\n", c, i);
+                }
+                
+                if (i*4 + 3 < bit_count) {
+                    bits[i*4]   = (value >> 3) & 1;
+                    bits[i*4+1] = (value >> 2) & 1;
+                    bits[i*4+2] = (value >> 1) & 1;
+                    bits[i*4+3] = (value >> 0) & 1;
+                }
+            }
+        }
     }
 }
 
-int main() {
-    printf("=== Tests du décodeur 406 MHz avec données réalistes ===\n");
-    
-    // Test 1: EPIRB française avec MMSI et position
-    uint8_t epirb_france[FRAME_1G_LENGTH] = {
-        // Sync pattern (24 bits) - Pattern standard COSPAS-SARSAT
-        1,0,1,1,0,0,1,0,1,1,0,0,1,0,1,0,0,1,1,0,0,1,0,1,
-        // Frame format (0 = short frame)
-        0,
-        // Fixed bits
-        1,
-        // Country code: France = 226 (0x0E2 = 001110010)
-        0,0,1,1,1,0,0,1,0,
-        // Protocol: Standard Location (010) + Customer Flag
-        0,1,0,1,
-        // Serial number (18 bits) - Exemple: 123456
-        0,0,0,1,1,1,1,0,0,0,1,0,0,1,0,0,0,0,
-        // Beacon type + autres données
-        // Position: Lat 43.5°N (Monaco), Lon 7.4°E
-        // NS=0 (North), Lat=43°, Min=30'
-        0,0,1,0,1,0,1,1,1,1,0,
-        // EW=0 (East), Lon=7°, Min=24'  
-        0,0,0,0,0,1,1,1,0,0,1,
-        // ID Type: MMSI (001)
-        0,0,1,
-        // MMSI: 227001234 (exemple français) - 30 bits
-        0,0,1,1,0,1,1,1,1,0,0,0,1,1,0,1,1,1,0,0,1,0,0,1,0,1,0,0,1,0
-    };
-    
-    // Remplir le reste avec des zéros (CRC et padding)
-    for (int i = 85; i < FRAME_1G_LENGTH; i++) {
-        epirb_france[i] = 0;
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <chaîne_hexadécimale>\n", argv[0]);
+        fprintf(stderr, "Formats supportés :\n");
+        fprintf(stderr, " - 28 caractères (112 bits) : Trame 1G courte\n");
+        fprintf(stderr, " - 36 caractères (144 bits) : Trame 1G longue\n");
+        fprintf(stderr, " - 63-64 caractères (250 bits) : Trame 2G\n");
+        return EXIT_FAILURE;
     }
-    
-    // Test 2: PLB Personnel avec call sign
-    uint8_t plb_callsign[FRAME_1G_LENGTH] = {
-        // Sync pattern
-        1,0,1,1,0,0,1,0,1,1,0,0,1,0,1,0,0,1,1,0,0,1,0,1,
-        // Short frame
-        0,1,
-        // Country: USA = 366 (0x16E = 101101110)
-        0,1,0,1,1,0,1,1,1,0,
-        // Protocol: User protocol (001)
-        0,0,1,1,
-        // Serial
-        0,0,1,0,0,1,1,0,1,0,0,1,1,0,1,0,0,0,
-        // Position non disponible (tous à 1)
-        1,1,1,1,1,1,1,1,1,1,1,
-        1,1,1,1,1,1,1,1,1,1,1,1,1,1,
-        // ID Type: Radio Call Sign (010)  
-        0,1,0,
-        // Call sign "N123AB" en Baudot (7 caractères × 6 bits = 42 bits)
-        1,0,0,1,1,0, // N
-        0,0,1,1,0,1, // 1
-        0,1,1,0,0,1, // 2
-        0,1,0,0,0,0, // 3
-        1,1,1,0,0,0, // A
-        1,1,0,0,1,1, // B
-        1,0,0,1,0,0  // Space/padding
-    };
-    
-    // Remplir le reste avec des zéros
-    for (int i = 85; i < FRAME_1G_LENGTH; i++) {
-        plb_callsign[i] = 0;
+
+    char* hex_str = argv[1];
+    int clean_len = 0;
+    char cleaned_hex[256] = {0};
+
+    // Nettoyer la chaîne
+    for (size_t i = 0; i < strlen(hex_str); i++) {
+        if (isxdigit(hex_str[i])) {
+            cleaned_hex[clean_len++] = tolower(hex_str[i]);
+        }
     }
-    
-    // Test 3: Trame 2G ELT avec position et données d'urgence
-    uint8_t elt_emergency[FRAME_2G_LENGTH] = {0};
-    
-    // Construction manuelle d'une trame 2G réaliste
-    // TAC: 12345 (16 bits) = 0x3039
-    elt_emergency[0] = 0; elt_emergency[1] = 0; elt_emergency[2] = 1; elt_emergency[3] = 1;
-    elt_emergency[4] = 0; elt_emergency[5] = 0; elt_emergency[6] = 0; elt_emergency[7] = 0;
-    elt_emergency[8] = 0; elt_emergency[9] = 0; elt_emergency[10] = 1; elt_emergency[11] = 1;
-    elt_emergency[12] = 1; elt_emergency[13] = 0; elt_emergency[14] = 0; elt_emergency[15] = 1;
-    
-    // Serial: 6789 (14 bits)
-    elt_emergency[16] = 0; elt_emergency[17] = 0; elt_emergency[18] = 0; elt_emergency[19] = 1;
-    elt_emergency[20] = 1; elt_emergency[21] = 0; elt_emergency[22] = 1; elt_emergency[23] = 0;
-    elt_emergency[24] = 0; elt_emergency[25] = 1; elt_emergency[26] = 1; elt_emergency[27] = 0;
-    elt_emergency[28] = 0; elt_emergency[29] = 1;
-    
-    // Country: 250 (10 bits) = 0x0FA
-    elt_emergency[30] = 0; elt_emergency[31] = 0; elt_emergency[32] = 1; elt_emergency[33] = 1;
-    elt_emergency[34] = 1; elt_emergency[35] = 1; elt_emergency[36] = 1; elt_emergency[37] = 0;
-    elt_emergency[38] = 1; elt_emergency[39] = 0;
-    
-    // Flags: Homing=1, RLS=0, Test=0
-    elt_emergency[40] = 1; elt_emergency[41] = 0; elt_emergency[42] = 0;
-    
-    // Position: 45.5°N, 2.3°E (simulé)
-    elt_emergency[43] = 1; // Position available flag
-    elt_emergency[44] = 0; // NS flag (0=North)
-    
-    // Latitude: 45° = 45 en 7 bits (0101101)
-    elt_emergency[45] = 0; elt_emergency[46] = 1; elt_emergency[47] = 0;
-    elt_emergency[48] = 1; elt_emergency[49] = 1; elt_emergency[50] = 0;
-    elt_emergency[51] = 1;
-    
-    // Fraction latitude (0.5° = 16384 en 15 bits)
-    elt_emergency[52] = 0; elt_emergency[53] = 1; elt_emergency[54] = 0;
-    elt_emergency[55] = 0; elt_emergency[56] = 0; elt_emergency[57] = 0;
-    elt_emergency[58] = 0; elt_emergency[59] = 0; elt_emergency[60] = 0;
-    elt_emergency[61] = 0; elt_emergency[62] = 0; elt_emergency[63] = 0;
-    elt_emergency[64] = 0; elt_emergency[65] = 0; elt_emergency[66] = 0;
-    
-    // EW flag (0=East)
-    elt_emergency[67] = 0;
-    
-    // Longitude: 2° = 2 en 8 bits (00000010)
-    elt_emergency[68] = 0; elt_emergency[69] = 0; elt_emergency[70] = 0;
-    elt_emergency[71] = 0; elt_emergency[72] = 0; elt_emergency[73] = 0;
-    elt_emergency[74] = 1; elt_emergency[75] = 0;
-    
-    // Fraction longitude (0.3° ≈ 9830 en 15 bits)
-    elt_emergency[76] = 0; elt_emergency[77] = 0; elt_emergency[78] = 1;
-    elt_emergency[79] = 0; elt_emergency[80] = 0; elt_emergency[81] = 1;
-    elt_emergency[82] = 1; elt_emergency[83] = 0; elt_emergency[84] = 0;
-    elt_emergency[85] = 1; elt_emergency[86] = 1; elt_emergency[87] = 0;
-    elt_emergency[88] = 0; elt_emergency[89] = 1; elt_emergency[90] = 1;
-    
-    // ID Type: MMSI (001)
-    elt_emergency[90] = 0; elt_emergency[91] = 0; elt_emergency[92] = 1;
-    
-    // MMSI: 250001234 (exemple)
-    uint32_t mmsi = 250001234;
-    for (int i = 0; i < 30; i++) {
-        elt_emergency[93 + i] = (mmsi >> (29 - i)) & 1;
+    cleaned_hex[clean_len] = '\0';
+
+    int bit_count;
+    if (clean_len == 28) {
+        bit_count = FRAME_1G_SHORT;  // 112 bits
+    } else if (clean_len == 36) {
+        bit_count = FRAME_1G_LONG;   // 144 bits
+    } else if (clean_len == 63 || clean_len == 64) {
+        bit_count = FRAME_2G_LENGTH; // 250 bits (63 ou 64 caractères hex)
+    } else if (clean_len == 22) {
+        // 22 hex chars = 88 bits = 112-24 bits (1G short sans sync)
+        bit_count = FRAME_1G_SHORT;  
+    } else if (clean_len == 30) {
+        // 30 hex chars = 120 bits = 144-24 bits (1G long sans sync) 
+        bit_count = FRAME_1G_LONG;   
+    } else {
+        fprintf(stderr, "Longueur hexadécimale non supportée : %d\n", clean_len);
+        fprintf(stderr, "Formats attendus :\n");
+        fprintf(stderr, " - 22 caractères pour trames 1G courtes sans sync (88 bits de données)\n");
+        fprintf(stderr, " - 28 caractères pour trames 1G courtes complètes (112 bits)\n");
+        fprintf(stderr, " - 30 caractères pour trames 1G longues sans sync (120 bits de données)\n");
+        fprintf(stderr, " - 36 caractères pour trames 1G longues complètes (144 bits)\n");
+        fprintf(stderr, " - 63-64 caractères pour trames 2G (250 bits)\n");
+        return EXIT_FAILURE;
     }
-    
-    // Beacon type: ELT(DT) = 3 (011)
-    elt_emergency[137] = 0; elt_emergency[138] = 1; elt_emergency[139] = 1;
-    
-    // Rotating field: In-Flight Emergency (ID=1)
-    elt_emergency[154] = 0; elt_emergency[155] = 0; elt_emergency[156] = 0; elt_emergency[157] = 1;
-    
-    // Time last location (17 bits) - exemple: 3600 secondes
-    uint32_t time_last = 3600;
-    for (int i = 0; i < 17; i++) {
-        elt_emergency[158 + i] = (time_last >> (16 - i)) & 1;
+
+    uint8_t* bits = malloc(bit_count * sizeof(uint8_t));
+    if (!bits) {
+        perror("Erreur d'allocation mémoire");
+        return EXIT_FAILURE;
     }
-    
-    // Altitude (10 bits) - exemple: 10000m -> (10000+400)/16 = 650
-    uint16_t alt_code = 650;
-    for (int i = 0; i < 10; i++) {
-        elt_emergency[175 + i] = (alt_code >> (9 - i)) & 1;
-    }
-    
-    // Triggering event: G-switch activation (0100)
-    elt_emergency[185] = 0; elt_emergency[186] = 1; elt_emergency[187] = 0; elt_emergency[188] = 0;
-    
-    // GNSS status: 3D fix (10)
-    elt_emergency[189] = 1; elt_emergency[190] = 0;
-    
-    // Battery capacity: 75% (11)
-    elt_emergency[191] = 1; elt_emergency[192] = 1;
-    
-    printf("\n=== Test 1: EPIRB française avec MMSI ===");
-    decode_beacon(epirb_france, FRAME_1G_LENGTH);
-    
-    printf("\n=== Test 2: PLB américain avec indicatif ===");
-    decode_beacon(plb_callsign, FRAME_1G_LENGTH);
-    
-    printf("\n=== Test 3: ELT d'urgence avec position ===");
-    decode_beacon(elt_emergency, FRAME_2G_LENGTH);
-    
-    printf("\n=== Tests terminés ===\n");
-    printf("\nℹ️  Les erreurs BCH sont normales avec des données de test.\n");
-    printf("💡 Pour des tests avec de vraies trames, utilisez des données\n");
-    printf("   capturées depuis un récepteur 406 MHz réel.\n");
-    
+
+    memset(bits, 0, bit_count * sizeof(uint8_t));
+    hex_string_to_bits(cleaned_hex, bits, bit_count);
+    decode_beacon(bits, bit_count);
+    free(bits);
+
     return EXIT_SUCCESS;
 }

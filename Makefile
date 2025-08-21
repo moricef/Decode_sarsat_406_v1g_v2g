@@ -1,127 +1,122 @@
-# Makefile pour le décodeur 406 MHz COSPAS-SARSAT
-# Usage: make, make clean, make install, make debug
+# Makefile pour le décodeur de balises 406 MHz
+# Support pour balises 1G et 2G avec capture audio
 
-# Configuration du compilateur
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -O2
+CFLAGS = -Wall -Wextra -O2 -g
 LDFLAGS = -lm
-DEBUG_FLAGS = -g -DDEBUG -O0
 
-# Fichiers sources et objets
-SOURCES = dec406_main.c dec406_v1g.c dec406_v2g.c display_utils.c
-OBJECTS = $(SOURCES:.c=.o)
-TARGET = dec406
-HEADERS = dec406.h display_utils.h
+# Fichiers sources
+SRCS_COMMON = dec406.c \
+              dec406_v1g.c \
+              dec406_v2g.c \
+              display_utils.c
 
-# Règle par défaut
-all: $(TARGET)
+HEADERS = dec406.h \
+          display_utils.h \
+          audio_capture.h
 
-# Compilation du programme principal
-$(TARGET): $(OBJECTS)
-	@echo "🔗 Linking $(TARGET)..."
-	$(CC) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
-	@echo "✅ Build successful! Run with: ./$(TARGET)"
+# Fichiers objets
+OBJS_COMMON = $(SRCS_COMMON:.c=.o)
 
-# Compilation des fichiers objets
+# Fichiers spécifiques à l'audio
+SRCS_AUDIO = audio_capture.c
+OBJS_AUDIO = $(SRCS_AUDIO:.c=.o)
+
+# Exécutables
+TARGETS = dec406 \
+          dec406_hex \
+          dec406_audio
+
+# Cible par défaut
+all: $(TARGETS)
+
+# Programme principal avec support audio complet
+dec406: main_audio.o $(OBJS_COMMON) $(OBJS_AUDIO)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Programme principal compilé: $@"
+
+# Version pour décodage hexadécimal uniquement
+dec406_hex: dec406_main.o $(OBJS_COMMON)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Décodeur hexadécimal compilé: $@"
+
+# Version audio uniquement (sans décodage hex direct)
+dec406_audio: main_audio.o $(OBJS_COMMON) $(OBJS_AUDIO)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Décodeur audio compilé: $@"
+
+# Règle générique pour les fichiers objets
 %.o: %.c $(HEADERS)
-	@echo "🔨 Compiling $<..."
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Version debug
-debug: CFLAGS += $(DEBUG_FLAGS)
-debug: clean $(TARGET)
-	@echo "🐛 Debug version built"
+# Installation (optionnel)
+install: dec406
+	@echo "Installation dans /usr/local/bin..."
+	@sudo cp dec406 /usr/local/bin/
+	@echo "✓ Installation terminée"
 
-# Version avec décodage avancé
-advanced: CFLAGS += -DADVANCED_DECODING
-advanced: clean $(TARGET)
-	@echo "🚀 Advanced decoding enabled"
+# Tests
+test: $(TARGETS)
+	@echo "=== Tests de compilation ==="
+	@echo "✓ Tous les exécutables compilés avec succès"
+	@echo ""
+	@echo "=== Test avec chaîne hexadécimale 1G longue ==="
+	./dec406_hex FFFED08E39048D158AC01E3AA482856824CE
+	@echo ""
+	@echo "=== Instructions pour tests audio ==="
+	@echo "Pour tester la capture audio temps réel:"
+	@echo "  sox -t alsa default -t wav - lowpass 3000 highpass 10 gain -l 6 2>/dev/null | ./dec406"
+	@echo ""
+	@echo "Pour tester avec un fichier WAV:"
+	@echo "  ./dec406 test.wav"
+
+# Script d'aide pour la capture audio
+audio_capture_script:
+	@echo '#!/bin/bash' > capture_audio.sh
+	@echo '# Script de capture audio pour balises 406 MHz' >> capture_audio.sh
+	@echo 'echo "Capture audio en cours... (Ctrl+C pour arrêter)"' >> capture_audio.sh
+	@echo 'sox -t alsa default -t wav - lowpass 3000 highpass 10 gain -l 6 2>/dev/null | ./dec406 --osm' >> capture_audio.sh
+	@chmod +x capture_audio.sh
+	@echo "✓ Script capture_audio.sh créé"
 
 # Nettoyage
 clean:
-	@echo "🧹 Cleaning build files..."
-	rm -f $(OBJECTS) $(TARGET) core *.core
+	rm -f *.o $(TARGETS) capture_audio.sh
+	@echo "✓ Nettoyage terminé"
 
-# Installation (optionnel)
-install: $(TARGET)
-	@echo "📦 Installing $(TARGET) to /usr/local/bin/"
-	sudo cp $(TARGET) /usr/local/bin/
-	sudo chmod 755 /usr/local/bin/$(TARGET)
+# Nettoyage complet (inclut les fichiers de sauvegarde)
+distclean: clean
+	rm -f *~ *.bak core
 
-# Désinstallation
-uninstall:
-	@echo "🗑️  Uninstalling $(TARGET)..."
-	sudo rm -f /usr/local/bin/$(TARGET)
-
-# Tests automatisés
-test: $(TARGET)
-	@echo "🧪 Running tests..."
-	./$(TARGET)
-	@echo "✅ Tests completed"
-
-# Vérification mémoire avec valgrind
-memcheck: debug
-	@echo "🔍 Running memory check..."
-	valgrind --leak-check=full --show-leak-kinds=all ./$(TARGET)
-
-# Affichage de l'aide
+# Documentation
 help:
-	@echo "📖 Makefile pour décodeur 406 MHz"
+	@echo "=== Makefile pour décodeur de balises 406 MHz ==="
 	@echo ""
 	@echo "Cibles disponibles:"
-	@echo "  all       - Compilation standard (défaut)"
-	@echo "  debug     - Compilation avec informations de debug"
-	@echo "  advanced  - Active le décodage avancé"
-	@echo "  clean     - Nettoie les fichiers de compilation"
-	@echo "  install   - Installe le programme dans /usr/local/bin"
-	@echo "  uninstall - Désinstalle le programme"
-	@echo "  test      - Lance les tests automatisés"
-	@echo "  memcheck  - Vérification mémoire avec valgrind"
-	@echo "  help      - Affiche cette aide"
+	@echo "  make all              - Compile tous les programmes"
+	@echo "  make dec406           - Compile le programme principal (audio + hex)"
+	@echo "  make dec406_hex       - Compile le décodeur hexadécimal seul"
+	@echo "  make dec406_audio     - Compile le décodeur audio seul"
+	@echo "  make test             - Lance les tests de base"
+	@echo "  make install          - Installe dec406 dans /usr/local/bin"
+	@echo "  make audio_capture_script - Crée un script de capture audio"
+	@echo "  make clean            - Supprime les fichiers compilés"
+	@echo "  make distclean        - Nettoyage complet"
+	@echo "  make help             - Affiche cette aide"
 	@echo ""
-	@echo "Exemples:"
-	@echo "  make              # Compilation standard"
-	@echo "  make debug        # Version debug"
-	@echo "  make clean all    # Nettoyage puis compilation"
+	@echo "Exemples d'utilisation:"
+	@echo "  ./dec406 --help                    # Affiche l'aide"
+	@echo "  ./dec406 test.wav                  # Décode un fichier WAV"
+	@echo "  ./dec406 FFFED08E39...             # Décode une chaîne hex"
+	@echo "  sox ... | ./dec406                 # Capture audio temps réel"
 
-# Vérification des dépendances
-check-deps:
-	@echo "🔍 Checking dependencies..."
-	@which gcc > /dev/null || (echo "❌ gcc not found" && exit 1)
-	@echo "✅ gcc found: $(shell gcc --version | head -n1)"
-	@which valgrind > /dev/null && echo "✅ valgrind available" || echo "⚠️  valgrind not found (optional)"
+# Dépendances spécifiques
+main_audio.o: main_audio.c $(HEADERS)
+dec406_main.o: dec406_main.c dec406.h display_utils.h
+dec406.o: dec406.c dec406.h
+dec406_v1g.o: dec406_v1g.c dec406.h display_utils.h
+dec406_v2g.o: dec406_v2g.c dec406.h display_utils.h
+display_utils.o: display_utils.c display_utils.h
+audio_capture.o: audio_capture.c audio_capture.h dec406.h
 
-# Affichage des informations système
-info:
-	@echo "ℹ️  Build Information:"
-	@echo "  CC:      $(CC)"
-	@echo "  CFLAGS:  $(CFLAGS)"
-	@echo "  LDFLAGS: $(LDFLAGS)"
-	@echo "  Sources: $(SOURCES)"
-	@echo "  Target:  $(TARGET)"
-	@echo "  System:  $(shell uname -s)"
-	@echo "  Arch:    $(shell uname -m)"
-
-# Sauvegarde du projet
-backup:
-	@echo "💾 Creating project backup..."
-	tar -czf dec406_backup_$(shell date +%Y%m%d_%H%M%S).tar.gz *.c *.h Makefile README*
-	@echo "✅ Backup created"
-
-# Archivage pour distribution
-dist: clean
-	@echo "📦 Creating distribution archive..."
-	mkdir -p dec406-dist
-	cp *.c *.h Makefile dec406-dist/
-	tar -czf dec406-v1.0.tar.gz dec406-dist/
-	rm -rf dec406-dist/
-	@echo "✅ Distribution archive created: dec406-v1.0.tar.gz"
-
-# Forces rebuild
-rebuild: clean all
-
-# Règles phony (pas de fichiers du même nom)
-.PHONY: all debug advanced clean install uninstall test memcheck help check-deps info backup dist rebuild
-
-# Couleurs pour le terminal (optionnel)
-.SILENT:
+.PHONY: all clean distclean install test help audio_capture_script

@@ -1,10 +1,27 @@
+/**********************************
+
+## Licence
+
+ Licence Creative Commons CC BY-NC-SA 
+
+## Auteurs et contributions
+
+- **Code original dec406_v7** : F4EHY (2020)
+- **Refactoring et support 2G** : Développement collaboratif (2025)
+- **Conformité T.018** : Implémentation complète BCH + MID database
+
+***********************************/
+
+
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 #include "dec406.h"
 #include "display_utils.h"
+#include "country_codes.h"
 
 // ===================================================
 // BCH Error Correction Implementation (T.018 Appendix B)
@@ -44,22 +61,19 @@ static void bch_decode_250_202(const uint8_t *msg, uint8_t *out) {
 }
 
 // ===================================================
-// Modified Baudot Decoding Table (Table 3.2)
+// Modified Baudot Decoding Table (Table 3.2 - T.018 Specification)
 // ===================================================
 static const char *baudot_table[64] = {
-    [0b111000] = "A", [0b110011] = "B", [0b101110] = "C", 
-    [0b110010] = "D", [0b110000] = "E", [0b110110] = "F",
-    [0b101011] = "G", [0b100101] = "H", [0b101100] = "I",
-    [0b111010] = "J", [0b111110] = "K", [0b101001] = "L",
-    [0b100111] = "M", [0b100110] = "N", [0b100011] = "O",
-    [0b101101] = "P", [0b111101] = "Q", [0b101010] = "R",
-    [0b110100] = "S", [0b100001] = "T", [0b111100] = "U",
-    [0b101111] = "V", [0b111001] = "W", [0b110111] = "X",
-    [0b110101] = "Y", [0b110001] = "Z", [0b100100] = " ",  // Space
-    [0b011000] = "-", [0b010111] = "/", [0b001101] = "0",
-    [0b011101] = "1", [0b011001] = "2", [0b010000] = "3",
-    [0b001010] = "4", [0b000001] = "5", [0b010101] = "6",
-    [0b011100] = "7", [0b001100] = "8", [0b000011] = "9"
+    [0b000001] = "5", [0b000011] = "9", [0b001010] = "4", [0b001100] = "8",
+    [0b001101] = "0", [0b010000] = "3", [0b010101] = "6", [0b010111] = "/",
+    [0b011000] = "-", [0b011001] = "2", [0b011100] = "7", [0b011101] = "1",
+    [0b100001] = "T", [0b100011] = "O", [0b100100] = " ",  [0b100101] = "H",
+    [0b100110] = "N", [0b100111] = "M", [0b101001] = "L", [0b101010] = "R",
+    [0b101011] = "G", [0b101100] = "I", [0b101101] = "P", [0b101110] = "C",
+    [0b101111] = "V", [0b110000] = "E", [0b110001] = "Z", [0b110010] = "D",
+    [0b110011] = "B", [0b110100] = "S", [0b110101] = "Y", [0b110110] = "F",
+    [0b110111] = "X", [0b111000] = "A", [0b111001] = "W", [0b111010] = "J",
+    [0b111100] = "U", [0b111101] = "Q", [0b111110] = "K"
 };
 
 // ===================================================
@@ -167,23 +181,40 @@ static uint32_t get_bits(const uint8_t *bits, int start, int len) {
  * with 3.4 meter resolution and default value handling.
  */
 static void decode_position(const uint8_t *bits, double *lat, double *lon) {
-    // Latitude decoding
-    int ns_flag = bits[44];
-    int lat_deg = get_bits(bits, 45, 7);
-    int lat_frac = get_bits(bits, 52, 15);
-    *lat = (lat_deg + lat_frac / 32768.0) * (ns_flag ? -1.0 : 1.0);
+    // Position decoding according to T.018 Section 3.2 (bits are 0-indexed)
+    // Latitude: bit 44 (N/S), bits 45-51 (degrees), bits 52-66 (decimal fraction)
+    // Longitude: bit 67 (E/W), bits 68-75 (degrees), bits 76-90 (decimal fraction)
     
-    // Check default value (no position available)
-    if (ns_flag == 1 && lat_deg == 127 && lat_frac == 0x1F80) {
-        *lat = 0;
-        *lon = 0;
+    int ns_flag = bits[43];  // bit 44 in T.018 = index 43 in 0-based array
+    int lat_deg = get_bits(bits, 44, 7);   // bits 45-51 in T.018
+    int lat_frac = get_bits(bits, 51, 15); // bits 52-66 in T.018
+    
+    int ew_flag = bits[66];  // bit 67 in T.018 = index 66 in 0-based array
+    int lon_deg = get_bits(bits, 67, 8);   // bits 68-75 in T.018  
+    int lon_frac = get_bits(bits, 75, 15); // bits 76-90 in T.018
+    
+    // Check for default values (T.018 Section 3.2) indicating no position capability
+    // Latitude default: 0 1111111 000001111100000
+    // Longitude default: 1 11111111 111110000011111
+    if (ns_flag == 0 && lat_deg == 0x7F && lat_frac == 0x07C0 &&
+        ew_flag == 1 && lon_deg == 0xFF && lon_frac == 0x783F) {
+        *lat = 0.0;
+        *lon = 0.0;
         return;
     }
     
-    // Longitude decoding
-    int ew_flag = bits[67];
-    int lon_deg = get_bits(bits, 68, 8);
-    int lon_frac = get_bits(bits, 76, 15);
+    // Check for alternate default values (no position available at this time)
+    // Latitude alternate: 1 1111111 000001111100000  
+    // Longitude alternate: 0 11111111 111110000011111
+    if (ns_flag == 1 && lat_deg == 0x7F && lat_frac == 0x07C0 &&
+        ew_flag == 0 && lon_deg == 0xFF && lon_frac == 0x783F) {
+        *lat = 0.0;
+        *lon = 0.0;
+        return;
+    }
+    
+    // Calculate actual position
+    *lat = (lat_deg + lat_frac / 32768.0) * (ns_flag ? -1.0 : 1.0);
     *lon = (lon_deg + lon_frac / 32768.0) * (ew_flag ? -1.0 : 1.0);
 }
 
@@ -199,23 +230,23 @@ static void decode_main(const uint8_t *bits, BeaconInfo *info) {
     // Store raw data for validation
     memcpy(info->raw_data, bits, 202);
     
-    // Decode fixed fields
-    info->tac = get_bits(bits, 0, 16);
-    info->serial = get_bits(bits, 16, 14);
-    info->country = get_bits(bits, 30, 10);
-    info->homing = bits[40];
-    info->rls = bits[41];
-    info->test = bits[42];
+    // Decode fixed fields (T.018 Section 3.2 - convert 1-based to 0-based indices)
+    info->tac = get_bits(bits, 0, 16);      // bits 1-16 in T.018
+    info->serial = get_bits(bits, 16, 14);  // bits 17-30 in T.018
+    info->country = get_bits(bits, 30, 10); // bits 31-40 in T.018
+    info->homing = bits[40];                // bit 41 in T.018
+    info->rls = bits[41];                   // bit 42 in T.018
+    info->test = bits[42];                  // bit 43 in T.018
     
     // Decode position
     decode_position(bits, &info->lat, &info->lon);
     
     info->has_position = (info->lat != 0.0 || info->lon != 0.0) ? 1 : 0;
     
-    // Vessel ID type
+    // Vessel ID type (bits 91-93 in T.018)
     info->vessel_id_type = get_bits(bits, 90, 3);
     
-    // Beacon type
+    // Beacon type (bits 138-140 in T.018)
     info->beacon_type = get_bits(bits, 137, 3);
 }
 
@@ -278,16 +309,17 @@ static void decode_rot_field(const uint8_t *rot_bits, BeaconInfo *info) {
             info->rot.rls_ack.rlm_data = get_bits(rot_bits, 17, 20);
             break;
         
-        case 4:  // Two-Way Communication
+        case 4:  // Two-Way Communication (T.018 Table 3.7)
             info->rot.twc.twc_provider = get_bits(rot_bits, 4, 3);
             info->rot.twc.version_id = get_bits(rot_bits, 7, 5);
             info->rot.twc.twc_ack_received = rot_bits[12];
-            info->rot.twc.questionA = get_bits(rot_bits, 15, 7);
-            info->rot.twc.answerA = get_bits(rot_bits, 22, 4);
-            info->rot.twc.questionB = get_bits(rot_bits, 26, 7);
-            info->rot.twc.answerB = get_bits(rot_bits, 33, 4);
-            info->rot.twc.questionC = get_bits(rot_bits, 37, 7);
-            info->rot.twc.answerC = get_bits(rot_bits, 44, 4);
+            // Spare bits 13-14 (2 bits)
+            info->rot.twc.questionA = get_bits(rot_bits, 15, 7);  // bits 16-22 in message
+            info->rot.twc.answerA = get_bits(rot_bits, 22, 4);    // bits 23-26 in message
+            info->rot.twc.questionB = get_bits(rot_bits, 26, 7);  // bits 27-33 in message
+            info->rot.twc.answerB = get_bits(rot_bits, 33, 4);    // bits 34-37 in message
+            info->rot.twc.questionC = get_bits(rot_bits, 37, 7);  // bits 38-44 in message
+            info->rot.twc.answerC = get_bits(rot_bits, 44, 4);    // bits 45-48 in message
             break;
         
         case 15:  // Cancellation Message
@@ -313,62 +345,110 @@ static void decode_vessel_id(const uint8_t *bits, int type, char *output) {
             strcpy(output, "None");
             break;
             
-        case 1:  // Maritime MMSI
+        case 1:  // Maritime MMSI (T.018 Section 3.2)
             {
-                uint32_t mmsi = get_bits(bits, 93, 30);
-                if (mmsi == 0x3F) {  // Default value
-                    strcpy(output, "Default MMSI");
+                uint32_t mmsi = get_bits(bits, 93, 30);  // 30-bit MMSI from bits 94-123
+                uint16_t ais_suffix = get_bits(bits, 123, 14);  // AIS suffix from bits 124-137
+                
+                if (mmsi == 0x1FFFF) {  // Default decimal 000111111 for no MMSI
+                    strcpy(output, "No MMSI Available");
                 } else if (mmsi > 999999999) {
                     strcpy(output, "Invalid MMSI");
                 } else {
                     sprintf(output, "MMSI:%09u", mmsi);
+                    // Check for AIS suffix (EPIRB-AIS format 917243YYYY)
+                    if (ais_suffix != 10922) {  // Not default value (10101010101010)
+                        sprintf(output + strlen(output), " AIS:%04u", ais_suffix);
+                    }
                 }
             }
             break;
             
-        case 2:  // Radio Call Sign
-        case 3:  // Aircraft Registration Marking
+        case 2:  // Radio Call Sign (T.018 Section 3.2)
+        case 3:  // Aircraft Registration Marking (T.018 Section 3.2)
             {
                 char decoded[8] = {0};
                 int valid_chars = 0;
+                bool all_spaces = true;
                 
                 for (int i = 0; i < 7; i++) {
                     int start_bit = 93 + i * 6;
                     int code = get_bits(bits, start_bit, 6);
                     
-                    // Look up in Baudot table
+                    // Look up in Modified Baudot table
                     const char *ch = baudot_table[code];
-                    if (!ch) ch = "?";  // Replacement character for invalid codes
+                    if (!ch) ch = "?";  // Invalid code
                     
                     strcat(decoded, ch);
-                    if (*ch != '?' && *ch != ' ') valid_chars++;
+                    if (*ch != '?' && *ch != ' ') {
+                        valid_chars++;
+                        all_spaces = false;
+                    }
                 }
                 
-                // Validate output
-                if (valid_chars >= 3) {
-                    strcpy(output, decoded);
+                // Check for default (all spaces = no call sign/registration available)
+                if (all_spaces || valid_chars < 1) {
+                    if (type == 2) {
+                        strcpy(output, "No Call Sign");
+                    } else {
+                        strcpy(output, "No Registration");
+                    }
                 } else {
-                    strcpy(output, "Invalid ID");
+                    // Trim trailing spaces for display
+                    int len = strlen(decoded);
+                    while (len > 0 && decoded[len-1] == ' ') {
+                        decoded[--len] = '\0';
+                    }
+                    strcpy(output, decoded);
                 }
             }
             break;
             
-        case 4:  // Aircraft 24-bit Address
+        case 4:  // Aircraft 24-bit Address (T.018 Section 3.2)
             {
-                uint32_t addr = get_bits(bits, 93, 24);
+                uint32_t addr = get_bits(bits, 93, 24);  // bits 94-117
+                uint32_t operator_3ld = get_bits(bits, 117, 15);  // bits 118-132 (3x5 bits)
+                uint8_t spare = get_bits(bits, 132, 5);  // bits 133-137 spare
+                
                 sprintf(output, "ICAO24:%06X", addr);
+                
+                // Check if 3LD operator designator is present (not all zeros or default ZGA)
+                if (operator_3ld != 0 && operator_3ld != 0x4583) {  // ZGA = 10001 01011 11000
+                    // Decode 3-letter operator designator
+                    char op_code[4] = {0};
+                    op_code[0] = 'A' + ((operator_3ld >> 10) & 0x1F);
+                    op_code[1] = 'A' + ((operator_3ld >> 5) & 0x1F);
+                    op_code[2] = 'A' + (operator_3ld & 0x1F);
+                    sprintf(output + strlen(output), " OP:%s", op_code);
+                } else if (operator_3ld == 0x4583) {
+                    strcat(output, " OP:ZGA");  // Default for no 3LD
+                }
             }
             break;
             
-        case 5:  // Aircraft Operator + Serial
+        case 5:  // Aircraft Operator + Serial (T.018 Section 3.2)
             {
-                char op[4] = {0};
-                for (int i = 0; i < 3; i++) {
-                    int code = get_bits(bits, 93 + i * 5, 5);
-                    op[i] = 'A' + code;  // Simple conversion
-                }
+                // 3-letter operator designator (bits 94-108, 3x5 bits)
+                uint32_t operator_3ld = get_bits(bits, 93, 15);
+                // Serial number (bits 109-120, 12 bits)
                 uint16_t serial = get_bits(bits, 108, 12);
-                sprintf(output, "%s-%u", op, serial);
+                // Spare bits (bits 121-137, 17 bits) should be all 1's
+                uint32_t spare = get_bits(bits, 120, 17);
+                
+                if (operator_3ld != 0) {
+                    char op_code[4] = {0};
+                    op_code[0] = 'A' + ((operator_3ld >> 10) & 0x1F);
+                    op_code[1] = 'A' + ((operator_3ld >> 5) & 0x1F);
+                    op_code[2] = 'A' + (operator_3ld & 0x1F);
+                    sprintf(output, "%s-%u", op_code, serial);
+                    
+                    // Validate spare bits pattern
+                    if (spare != 0x1FFFF) {
+                        strcat(output, " [WARN:Spare]");
+                    }
+                } else {
+                    strcpy(output, "No Operator ID");
+                }
             }
             break;
             
@@ -529,11 +609,12 @@ void decode_2g(const uint8_t *rx_bits) {
 void print_beacon_info(const BeaconInfo *info) {
     char coord_buf[50];
     
-    printf("\n=== 406 MHz BEACON DECODE (2G) ===");
+    printf("\n=== 406 MHz SECOND GENERATION BEACON (SGB) ===");
     printf("\n[IDENTIFICATION]");
     printf("\n 23 Hex ID: %s", info->hex_id);
-    printf("\n TAC: %u, Serial: %u, Country: %u", 
-           info->tac, info->serial, info->country);
+    printf("\n TAC Number: %u (0x%04X)", info->tac, info->tac);
+    printf("\n Serial Number: %u (0x%04X)", info->serial, info->serial);
+    printf("\n Country Code: %u (%s)", info->country, get_country_name(info->country));
     printf("\n Type: ");
     switch(info->beacon_type) {
         case 0: printf("ELT"); break;
@@ -546,19 +627,21 @@ void print_beacon_info(const BeaconInfo *info) {
     printf("\n Vessel ID: %s", info->vessel_id);
     
     printf("\n\n[STATUS]");
-    printf("\n Homing: %s, RLS: %s, Test: %s",
-           info->homing ? "Active" : "Inactive",
-           info->rls ? "Enabled" : "Disabled",
-           info->test ? "Yes" : "No");
+    printf("\n Homing Device: %s", info->homing ? "Available/Active" : "Not Available/Disabled");
+    printf("\n RLS Capability: %s", info->rls ? "Enabled" : "Disabled");
+    printf("\n Test Protocol: %s", info->test ? "Active (Non-operational)" : "Normal Operation");
     
     
-    printf("\n\n[POSITION]");
-    if (info->lat != 0.0 || info->lon != 0.0) {
+    printf("\n\n[ENCODED GNSS LOCATION]");
+    if (info->has_position && (info->lat != 0.0 || info->lon != 0.0)) {
         format_coordinates(info->lat, info->lon, coord_buf, sizeof(coord_buf));
         printf("\n Position: %s", coord_buf);
+        printf("\n Coordinates: %.5f°N, %.5f°E", info->lat, info->lon);
+        printf("\n Resolution: ~3.4 meters maximum");
         open_osm_map(info->lat, info->lon);
     } else {
-        printf("\n No position available");
+        printf("\n Status: No position data available");
+        printf("\n (Beacon not equipped with GNSS or position encoding disabled)");
     }
     
     /*printf("\n\n[POSITION]");
@@ -580,9 +663,67 @@ void print_beacon_info(const BeaconInfo *info) {
             } else {
                 printf("\n Altitude: Not available");
             }
-            printf("\n HDOP: Category %d, VDOP: Category %d", 
-                   info->rot.g008_obj.hdop, info->rot.g008_obj.vdop);
-            printf("\n Battery: %d%%", info->rot.g008_obj.battery_capacity * 25);
+            // DOP values according to T.018 Table 3.3
+            printf("\n HDOP: ");
+            switch(info->rot.g008_obj.hdop) {
+                case 0: printf("DOP ≤1"); break;
+                case 1: printf("DOP >1 and ≤2"); break;
+                case 2: printf("DOP >2 and ≤3"); break;
+                case 3: printf("DOP >3 and ≤4"); break;
+                case 4: printf("DOP >4 and ≤5"); break;
+                case 5: printf("DOP >5 and ≤6"); break;
+                case 6: printf("DOP >6 and ≤7"); break;
+                case 7: printf("DOP >7 and ≤8"); break;
+                case 8: printf("DOP >8 and ≤10"); break;
+                case 9: printf("DOP >10 and ≤12"); break;
+                case 10: printf("DOP >12 and ≤15"); break;
+                case 11: printf("DOP >15 and ≤20"); break;
+                case 12: printf("DOP >20 and ≤30"); break;
+                case 13: printf("DOP >30 and ≤50"); break;
+                case 14: printf("DOP >50"); break;
+                case 15: printf("DOP not available"); break;
+            }
+            printf("\n VDOP: ");
+            switch(info->rot.g008_obj.vdop) {
+                case 0: printf("DOP ≤1"); break;
+                case 1: printf("DOP >1 and ≤2"); break;
+                case 2: printf("DOP >2 and ≤3"); break;
+                case 3: printf("DOP >3 and ≤4"); break;
+                case 4: printf("DOP >4 and ≤5"); break;
+                case 5: printf("DOP >5 and ≤6"); break;
+                case 6: printf("DOP >6 and ≤7"); break;
+                case 7: printf("DOP >7 and ≤8"); break;
+                case 8: printf("DOP >8 and ≤10"); break;
+                case 9: printf("DOP >10 and ≤12"); break;
+                case 10: printf("DOP >12 and ≤15"); break;
+                case 11: printf("DOP >15 and ≤20"); break;
+                case 12: printf("DOP >20 and ≤30"); break;
+                case 13: printf("DOP >30 and ≤50"); break;
+                case 14: printf("DOP >50"); break;
+                case 15: printf("DOP not available"); break;
+            }
+            // Battery capacity according to T.018 Table 3.3
+            printf("\n Battery: ");
+            switch(info->rot.g008_obj.battery_capacity) {
+                case 0: printf("<=5%% remaining"); break;
+                case 1: printf(">5%% and <=10%% remaining"); break;
+                case 2: printf(">10%% and <=25%% remaining"); break;
+                case 3: printf(">25%% and <=50%% remaining"); break;
+                case 4: printf(">50%% and <=75%% remaining"); break;
+                case 5: printf(">75%% and <=100%% remaining"); break;
+                case 6: printf("Reserved for future use"); break;
+                case 7: printf("Battery capacity not available"); break;
+                default: printf("Unknown (%d)", info->rot.g008_obj.battery_capacity);
+            }
+            // GNSS Status according to T.018 Table 3.3
+            printf("\n GNSS Status: ");
+            switch(info->rot.g008_obj.gnss_status) {
+                case 0: printf("No fix"); break;
+                case 1: printf("2D location only"); break;
+                case 2: printf("3D location"); break;
+                case 3: printf("Reserved for future use"); break;
+                default: printf("Unknown (%d)", info->rot.g008_obj.gnss_status);
+            }
             break;
         
         case 1:
@@ -601,16 +742,43 @@ void print_beacon_info(const BeaconInfo *info) {
             break;
         
         case 2:
-            printf("\n Type: RLS Acknowledgement");
+            printf("\n Type: RLS Type 1 & 2 Acknowledgement");
             printf("\n Provider: ");
             switch(info->rot.rls_ack.rls_provider) {
                 case 1: printf("Galileo"); break;
                 case 2: printf("GLONASS"); break;
                 case 3: printf("BDS"); break;
-                default: printf("Unknown");
+                default: printf("Unknown (%d)", info->rot.rls_ack.rls_provider);
             }
-            printf("\n Type-1 ACK: %s", info->rot.rls_ack.feedback_type1 ? "Yes" : "No");
-            printf("\n Type-2 ACK: %s", info->rot.rls_ack.feedback_type2 ? "Yes" : "No");
+            printf("\n Auto ACK Capability: %s", info->rot.rls_ack.capability_auto_ack ? "Yes" : "No");
+            printf("\n Manual ACK Capability: %s", info->rot.rls_ack.capability_manual_ack ? "Yes" : "No");
+            printf("\n Type-1 RLM Received: %s", info->rot.rls_ack.feedback_type1 ? "Yes" : "No");
+            printf("\n Type-2 RLM Received: %s", info->rot.rls_ack.feedback_type2 ? "Yes" : "No");
+            if (info->rot.rls_ack.rlm_data != 0) {
+                printf("\n RLM Data: 0x%05X", info->rot.rls_ack.rlm_data);
+            }
+            break;
+        
+        case 4:
+            printf("\n Type: RLS Type 3 TWC (Two-Way Communication)");
+            printf("\n Provider: ");
+            switch(info->rot.twc.twc_provider) {
+                case 1: printf("Galileo"); break;
+                case 2: printf("GLONASS"); break;
+                case 3: printf("BDS"); break;
+                default: printf("Unknown (%d)", info->rot.twc.twc_provider);
+            }
+            printf("\n Database Version: %d", info->rot.twc.version_id);
+            printf("\n TWC ACK Received: %s", info->rot.twc.twc_ack_received ? "Yes" : "No");
+            if (info->rot.twc.questionA != 0 || info->rot.twc.answerA != 0) {
+                printf("\n Question A: %d, Answer A: %d", info->rot.twc.questionA, info->rot.twc.answerA);
+            }
+            if (info->rot.twc.questionB != 0 || info->rot.twc.answerB != 0) {
+                printf("\n Question B: %d, Answer B: %d", info->rot.twc.questionB, info->rot.twc.answerB);
+            }
+            if (info->rot.twc.questionC != 0 || info->rot.twc.answerC != 0) {
+                printf("\n Question C: %d, Answer C: %d", info->rot.twc.questionC, info->rot.twc.answerC);
+            }
             break;
         
         case 15:
@@ -619,12 +787,16 @@ void print_beacon_info(const BeaconInfo *info) {
             switch(info->rot.cancellation.deactivation_method) {
                 case 1: printf("Manual deactivation"); break;
                 case 2: printf("Automatic deactivation"); break;
-                default: printf("Unknown");
+                default: printf("Unknown (%d)", info->rot.cancellation.deactivation_method);
             }
             break;
             
         default:
             printf("\n Type: %d (Reserved/Spare)", info->rot.id);
     }
-    printf("\n=================================\n");
+    printf("\n\n[COMPLIANCE]");
+    printf("\n Standard: COSPAS-SARSAT T.018 Second Generation Beacon");
+    printf("\n BCH Error Correction: BCH(250,202) - 48 bits");
+    printf("\n Data Rate: 300 bps, Spread Spectrum: DSSS-OQPSK");
+    printf("\n====================================================\n");
 }

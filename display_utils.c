@@ -1,3 +1,18 @@
+/**********************************
+
+## Licence
+
+ Licence Creative Commons CC BY-NC-SA 
+
+## Auteurs et contributions
+
+- **Code original dec406_v7** : F4EHY (2020)
+- **Refactoring et support 2G** : Développement collaboratif (2025)
+- **Conformité T.018** : Implémentation complète BCH + MID database
+
+***********************************/
+
+
 // display_utils.c
 #include "display_utils.h"
 #include <stdio.h>
@@ -10,23 +25,11 @@
 #endif
 
 // =================================================================
-// 1. open_osm_map() - Remplacement de afficher_carte_osm()
+// 1. open_osm_map() - Affiche un lien cliquable dans le terminal
 // =================================================================
 void open_osm_map(double lat, double lon) {
-    #ifdef _WIN32
-        const char* browser = "start";
-    #elif __APPLE__
-        const char* browser = "open";
-    #else
-        const char* browser = "xdg-open";
-    #endif
-
-    char command[256];
-    snprintf(command, sizeof(command),
-             "%s \"https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\" >/dev/null 2>&1",
-             browser, lat, lon, lat, lon);
-    
-    system(command);
+    printf("📍 OpenStreetMap: \033]8;;https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\033\\https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\033]8;;\033\\\n",
+           lat, lon, lat, lon, lat, lon, lat, lon);
 }
 
 // =================================================================
