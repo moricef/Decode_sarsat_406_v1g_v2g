@@ -24,13 +24,14 @@ Décodeur complet pour les balises de détresse COSPAS-SARSAT 406 MHz avec suppo
 ```bash
 # Ubuntu/Debian
 sudo apt-get update
-sudo apt-get install build-essential sox libmath-dev
+sudo apt-get install build-essential sox libmath-dev sendemail
 
 # CentOS/RHEL
-sudo yum install gcc make sox
+sudo yum install gcc make sox sendemail
 
 # macOS (avec Homebrew)
 brew install sox
+# Pour sendemail: installer manuellement ou utiliser un client SMTP alternatif
 ```
 
 
@@ -73,11 +74,16 @@ make dec406_audio  # Décodeur audio seul
 # Capture depuis microphone avec filtrage optimal
 sox -t alsa default -t wav - lowpass 3000 highpass 10 gain -l 6 2>/dev/null | ./dec406
 
-# Avec timeout de 55 secondes (intégration scan406)
-sox -t alsa default -t wav - lowpass 3000 highpass 10 | ./dec406 --une_minute
+# Avec timeout de 55 secondes (intégration scan406) - OBSOLÈTE depuis v10.2
+# sox -t alsa default -t wav - lowpass 3000 highpass 10 | ./dec406 --une_minute
 
-# Ajuster le seuil de détection (coefficient 2-100)
-sox -t alsa default -t wav - | ./dec406 --50
+# Ajuster le seuil de détection pour signaux faibles
+sox -t alsa default -t wav - | ./dec406 --20  # Plus sensible
+sox -t alsa default -t wav - | ./dec406 --50  # Compromis
+sox -t alsa default -t wav - | ./dec406 --100 # Défaut (robuste)
+
+# Capture en temps réel avec timeout adaptatif (RECOMMANDÉ)
+./decode_MIC_email_406.pl
 ```
 
 
@@ -91,6 +97,38 @@ sox -t alsa default -t wav - | ./dec406 --50
 ./dec406 --une_minute --canal1 enregistrement_stereo.wav
 ```
 
+### 4. Scripts automatisés
+
+#### Configuration email
+```bash
+# Configuration interactive des paramètres mail
+./config_mail.pl
+```
+
+#### Décodage avec notification email et timeout adaptatif
+```bash
+# Décodage automatique avec adaptation intelligente aux différents types de balises
+./decode_MIC_email_406.pl
+
+# Version avec liens OpenStreetMap
+./decode_MIC_email_406.pl osm
+
+# Timeout manuel pour balises spécifiques
+./decode_MIC_email_406.pl timeout 90
+
+# Combinaison timeout + OSM
+./decode_MIC_email_406.pl osm 60
+```
+
+#### Scripts de décodage rapide
+```bash
+# Décodage simple depuis microphone
+./decode.sh
+
+# Décodage avec liens OpenStreetMap
+./decode_osm.sh
+```
+
 
 ## Options de ligne de commande
 
@@ -98,9 +136,11 @@ sox -t alsa default -t wav - | ./dec406 --50
 | Option | Description |
 |--------|-------------|
 | `--help` | Affiche l'aide complète |
-| `--une_minute` | Timeout de 55 secondes pour scan automatique |
+| `--une_minute` | ⚠️ OBSOLÈTE v10.2 - Timeout fixe 55s (remplacé par timeout adaptatif) |
 | `--canal1` | Utilise le canal droit pour les fichiers stéréo |
-| `--2` à `--100` | Coefficient pour le seuil de détection (défaut: 100) |
+| `--2` à `--100` | Coefficient seuil détection (2=très sensible, 100=robuste) |
+| `--osm` | Génère des liens OpenStreetMap cliquables |
+| `timeout XX` | *(Script Perl)* Timeout manuel en secondes (30-120s) |
 
 
 
@@ -119,6 +159,10 @@ dec406_v10.2/
 ├── audio_capture.c         # Module capture audio
 ├── display_utils.c         # Utilitaires affichage/cartes
 ├── country_codes.h         # Base de données MID
+├── config_mail.pl          # Configuration email interactive
+├── decode_MIC_email_406.pl # Décodage automatique avec email
+├── decode.sh              # Script de décodage simple
+├── decode_osm.sh          # Script avec liens OpenStreetMap
 └── Makefile               # Compilation automatisée
 ```
 
@@ -168,6 +212,20 @@ dec406_v10.2/
 - **BCH Error Correction** : BCH(250,202) avec polynôme officiel
 - **Vessel ID** : MMSI, Call Signs, Aircraft Address, Modified Baudot
 - **23 Hex ID** : Génération selon Table 3.11 de T.018
+
+## Rythmes de transmission des balises
+
+### Types de balises et intervalles de répétition
+- **🔧 Balises de test** : **5 secondes** - Pour vérification et développement
+- **📋 Balises d'exercice** : **50 secondes** - Exercices CROSS/ADRASEC  
+- **🚨 Vraies balises de détresse** : **50 secondes** - Norme COSPAS-SARSAT officielle
+
+### Système adaptatif intelligent
+Le script `decode_MIC_email_406.pl` s'adapte automatiquement :
+- **Démarre en mode test** (15s) pour une réactivité maximale
+- **Auto-détecte le type** et passe en mode balise réelle (55s) si nécessaire
+- **Recherche approfondie** (jusqu'à 120s) pour signaux faibles
+- **Maintient le mode optimal** une fois le type de balise identifié
 
 
 
@@ -285,6 +343,23 @@ sox -t alsa default test.wav trim 0 5
 - Interférences : Ajuster `--2` à `--100` pour modifier le seuil
 - Vérifier la fréquence de réception (406.025 MHz pour tests)
 
+### Problèmes avec les scripts automatisés
+
+**"sendemail: command not found"**
+```bash
+sudo apt-get install sendemail  # Linux
+# macOS: installer manuellement
+```
+
+**Configuration email**
+- Exécuter `./config_mail.pl` avant le premier usage
+- Vérifier les paramètres SMTP dans `config_mail.txt`
+- Pour Gmail : utiliser un mot de passe d'application
+
+**Scripts ne trouvent pas dec406**
+- Vérifier que `make all` a été exécuté
+- Décompresser si nécessaire : `decode_osm.sh` référence `./dec406_V7` (version obsolète)
+
 
 ### Problèmes de décodage
 
@@ -314,7 +389,24 @@ make test
 
 ## Licence
 
- Licence Creative Commons CC BY-NC-SA - Voir LICENSE pour les détails complets.
+Ce projet est sous licence Creative Commons Attribution - Pas d'Utilisation Commerciale - Partage dans les Mêmes Conditions 4.0 International (CC BY-NC-SA 4.0).
+
+[![Licence Creative Commons](https://i.creativecommons.org/l/by-nc-sa/4.0/88x31.png)](http://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+### Vous êtes autorisé à :
+
+- **Partager** : copier, distribuer et communiquer le matériel par tous moyens et sous tous formats
+- **Adapter** : remixer, transformer et créer à partir du matériel
+
+### Selon les conditions suivantes :
+
+- **Attribution** : Vous devez créditer l'œuvre, intégrer un lien vers la licence et indiquer si des modifications ont été effectuées
+- **Pas d'Utilisation Commerciale** : Vous n'êtes pas autorisé à faire un usage commercial de cette œuvre
+- **Partage dans les Mêmes Conditions** : Dans le cas où vous remixez, transformez ou créez à partir du matériel composant l'œuvre originale, vous devez diffuser l'œuvre modifiée dans les mêmes conditions
+
+**Avertissement** : Cette licence ne s'applique pas aux données de décodage des balises de détresse réelles, qui restent soumises aux réglementations nationales et internationales sur les communications d'urgence.
+
+Pour plus de détails, consultez le texte complet de la licence : https://creativecommons.org/licenses/by-nc-sa/4.0/deed.fr
 
 
 ## Auteurs et contributions
