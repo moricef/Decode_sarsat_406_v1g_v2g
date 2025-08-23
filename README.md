@@ -411,6 +411,7 @@ Pour plus de détails, consultez le texte complet de la licence : https://creati
 
 ## Auteurs et contributions
 
+- **Auteurs ADRASEC09**
 - **Code original dec406_v7** : F4EHY (2020)
 - **Refactoring et support 2G** : Développement collaboratif (2025)
 - **Conformité T.018** : Implémentation complète BCH + MID database
