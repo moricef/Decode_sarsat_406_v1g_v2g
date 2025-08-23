@@ -427,4 +427,3 @@ Pour plus de détails, consultez le texte complet de la licence : https://creati
 ---
 
 ⚠️ **Important** : Ce décodeur est destiné uniquement à des fins éducatives et de recherche. L'utilisation pour le décodage de vraies balises de détresse doit respecter la réglementation locale sur les radiocommunications d'urgence.
-\ No newline at end of file
