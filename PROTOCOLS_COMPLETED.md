@@ -66,4 +66,5 @@ Le décodeur dec406_v10.2 implémente maintenant:
 - **Limitation** : Validation complète nécessiterait échantillons de tous types balises
 
 Date de finalisation: 4 septembre 2025  
-Auteur: F4EHY avec assistance Claude Code
+Code original: F4EHY (dec406_v7)
+Version 10.2: F4MLV/ADRASEC09 avec assistance Claude Code

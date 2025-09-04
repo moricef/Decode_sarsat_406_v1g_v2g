@@ -419,10 +419,14 @@ Pour plus de détails, consultez le texte complet de la licence : https://creati
 
 ## Auteurs et contributions
 
-- **Auteurs ADRASEC09**
-- **Code original dec406_v7** : F4EHY (2020)
-- **Refactoring et support 2G** : Développement collaboratif (2025)
-- **Conformité T.018** : Implémentation complète BCH + MID database
+- **Code original** : F4EHY (2020)
+  - Décodeur 1G initial (dec406_v7)
+  - Algorithmes de décodage COSPAS-SARSAT de base
+- **Version 10.2** : F4MLV/ADRASEC09 avec assistance Claude (2025)
+  - Refactoring complet et modularisation
+  - Support 2G avec correction BCH
+  - Intégration complète protocoles T.001
+  - Scripts SDR et base de données MID étendue
 
 
 ## Références techniques
