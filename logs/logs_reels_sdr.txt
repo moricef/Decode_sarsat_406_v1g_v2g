@@ -1,0 +1,85 @@
+Avec dec406_V7: 
+-----------------
+
+Scan 406M...406.1M  Date: 04 09 2025   10h27m19s UTC
+...PATIENTER...
+
+
+Scan 406M...406.1M  Date: 04 09 2025   10h28m14s UTC
+...PATIENTER...
+
+Fréquence: 406.022MHz Niveau: -47.9dB Moyenne: -56.6dB 
+
+
+Lancement du Decodage    UTC  04 09 2025   10h29m09s
+****Attente de Trames****
+
+ CRC_1 OK
+Contenu hexadécimal: 
+ce3000000000000dbd0e4024710293
+Trame d'alerte... 
+Trame longue 144 bits
+
+User Protocole-Localisation
+Orbitography: 00000000001
+Code Pays : 227
+🔇 Email supprimé pour 406.022 MHz (canal filtré selon T.012)
+
+===========================================================
+
+Avec dec406_v10.2
+-------------------
+
+Scan 406M...406.1M  Date: 04 09 2025   10h54m31s UTC
+...PATIENTER...
+
+Fréquence: 406.022MHz Niveau: -49.0dB Moyenne: -63.3dB 
+
+
+Lancement du Decodage    UTC  04 09 2025   10h55m26sThreshold coefficient set to 100
+Max level set to 10^3
+Reading from stdin (waiting for audio data)...
+Press Ctrl+C to stop
+
+Sync found: 14 ones
+Long frame captured (144 bits)
+Hexadecimal content: ce3000000000000dbd0e4024710553
+Warning: Unknown frame sync pattern: 02F
+CRC ERROR: CRC1=OK CRC2=FAIL
+
+!!! CRC ERROR - DATA MAY BE CORRUPTED !!!
+
+=== 406 MHz BEACON DECODE (1G LONG) ===
+Protocol: 0 (User-Location Protocol)
+Country: 227
+Hex ID: LG-USR-00E3-00000000
+Identification: Orbitography
+Position (PDF-1): 1.13333°N, 113.00000°E
+OpenStreetMap: https://www.openstreetmap.org/?mlat=1.133333&mlon=113.000000#map=10/1.133333/113.000000
+[12:55:30] 1G decoding completed
+
+--- Frame 1 decoded ---
+Sync found: 13 ones
+Long frame captured (144 bits)
+Hexadecimal content: ffffffff17e718000000000006de87
+Warning: Unknown frame sync pattern: 0B5
+CRC ERROR: CRC1=OK CRC2=FAIL
+
+!!! CRC ERROR - DATA MAY BE CORRUPTED !!!
+
+=== 406 MHz BEACON DECODE (1G LONG) ===
+Protocol: 15 (User-Location Protocol)
+Country: 1023
+Hex ID: LG-USR-03FF-00003F17
+Identification: Test User
+Position (PDF-1): 0.00000°N, 6.86667°E
+OpenStreetMap: https://www.openstreetmap.org/?mlat=0.000000&mlon=6.866667#map=10/0.000000/6.866667
+[12:56:00] 1G decoding completed
+
+--- Frame 2 decoded ---
+
+Total frames decoded: 2
+
+
+Scan 406M...406.1M  Date: 04 09 2025   10h56m22s UTC
+...PATIENTER...

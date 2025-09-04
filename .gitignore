@@ -1,0 +1,43 @@
+# Executables
+dec406
+dec406_hex
+dec406_audio
+generate_2g_frame
+generate_2g_fixed
+generate_2g_hex
+test_2g
+reset_usb
+
+# Object files
+*.o
+
+# Temporary files
+code
+trame
+trame.asc
+*.log
+email.log
+
+# Generated files
+log_power.csv
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+
+# Configuration sensitive (keep template only)
+# config_mail.txt contains credentials - keep example only

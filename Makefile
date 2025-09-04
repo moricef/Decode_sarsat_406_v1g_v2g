@@ -1,0 +1,137 @@
+##############################################
+#
+## Licence
+#
+# Licence Creative Commons CC BY-NC-SA 
+#
+## Auteurs et contributions
+#
+# - **Code original dec406_v7** : F4EHY (2020)
+# - **Refactoring et support 2G** : Développement collaboratif (2025)
+# - **Conformité T.018** : Implémentation complète BCH + MID database
+#
+##############################################
+
+
+# Makefile pour le décodeur de balises 406 MHz
+# Support pour balises 1G et 2G avec capture audio
+
+CC = gcc
+CFLAGS = -Wall -Wextra -O2 -g
+LDFLAGS = -lm
+
+# Fichiers sources
+SRCS_COMMON = dec406.c \
+              dec406_v1g.c \
+              dec406_v2g.c \
+              display_utils.c
+
+HEADERS = dec406.h \
+          display_utils.h \
+          audio_capture.h
+
+# Fichiers objets
+OBJS_COMMON = $(SRCS_COMMON:.c=.o)
+
+# Fichiers spécifiques à l'audio
+SRCS_AUDIO = audio_capture.c
+OBJS_AUDIO = $(SRCS_AUDIO:.c=.o)
+
+# Exécutables
+TARGETS = dec406 \
+          dec406_hex \
+          dec406_audio
+
+# Cible par défaut
+all: $(TARGETS)
+
+# Programme principal avec support audio complet
+dec406: main_audio.o $(OBJS_COMMON) $(OBJS_AUDIO)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Programme principal compilé: $@"
+
+# Version pour décodage hexadécimal uniquement
+dec406_hex: dec406_main.o $(OBJS_COMMON)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Décodeur hexadécimal compilé: $@"
+
+# Version audio uniquement (sans décodage hex direct)
+dec406_audio: main_audio.o $(OBJS_COMMON) $(OBJS_AUDIO)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ Décodeur audio compilé: $@"
+
+# Règle générique pour les fichiers objets
+%.o: %.c $(HEADERS)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Installation (optionnel)
+install: dec406
+	@echo "Installation dans /usr/local/bin..."
+	@sudo cp dec406 /usr/local/bin/
+	@echo "✓ Installation terminée"
+
+# Tests
+test: $(TARGETS)
+	@echo "=== Tests de compilation ==="
+	@echo "✓ Tous les exécutables compilés avec succès"
+	@echo ""
+	@echo "=== Test avec chaîne hexadécimale 1G longue ==="
+	./dec406_hex FFFED08E39048D158AC01E3AA482856824CE
+	@echo ""
+	@echo "=== Instructions pour tests audio ==="
+	@echo "Pour tester la capture audio temps réel:"
+	@echo "  sox -t alsa default -t wav - lowpass 3000 highpass 10 gain -l 6 2>/dev/null | ./dec406"
+	@echo ""
+	@echo "Pour tester avec un fichier WAV:"
+	@echo "  ./dec406 test.wav"
+
+# Script d'aide pour la capture audio
+audio_capture_script:
+	@echo '#!/bin/bash' > capture_audio.sh
+	@echo '# Script de capture audio pour balises 406 MHz' >> capture_audio.sh
+	@echo 'echo "Capture audio en cours... (Ctrl+C pour arrêter)"' >> capture_audio.sh
+	@echo 'sox -t alsa default -t wav - lowpass 3000 highpass 10 gain -l 6 2>/dev/null | ./dec406 --osm' >> capture_audio.sh
+	@chmod +x capture_audio.sh
+	@echo "✓ Script capture_audio.sh créé"
+
+# Nettoyage
+clean:
+	rm -f *.o $(TARGETS) capture_audio.sh
+	@echo "✓ Nettoyage terminé"
+
+# Nettoyage complet (inclut les fichiers de sauvegarde)
+distclean: clean
+	rm -f *~ *.bak core
+
+# Documentation
+help:
+	@echo "=== Makefile pour décodeur de balises 406 MHz ==="
+	@echo ""
+	@echo "Cibles disponibles:"
+	@echo "  make all              - Compile tous les programmes"
+	@echo "  make dec406           - Compile le programme principal (audio + hex)"
+	@echo "  make dec406_hex       - Compile le décodeur hexadécimal seul"
+	@echo "  make dec406_audio     - Compile le décodeur audio seul"
+	@echo "  make test             - Lance les tests de base"
+	@echo "  make install          - Installe dec406 dans /usr/local/bin"
+	@echo "  make audio_capture_script - Crée un script de capture audio"
+	@echo "  make clean            - Supprime les fichiers compilés"
+	@echo "  make distclean        - Nettoyage complet"
+	@echo "  make help             - Affiche cette aide"
+	@echo ""
+	@echo "Exemples d'utilisation:"
+	@echo "  ./dec406 --help                    # Affiche l'aide"
+	@echo "  ./dec406 test.wav                  # Décode un fichier WAV"
+	@echo "  ./dec406 FFFED08E39...             # Décode une chaîne hex"
+	@echo "  sox ... | ./dec406                 # Capture audio temps réel"
+
+# Dépendances spécifiques
+main_audio.o: main_audio.c $(HEADERS)
+dec406_main.o: dec406_main.c dec406.h display_utils.h
+dec406.o: dec406.c dec406.h
+dec406_v1g.o: dec406_v1g.c dec406.h display_utils.h
+dec406_v2g.o: dec406_v2g.c dec406.h display_utils.h
+display_utils.o: display_utils.c display_utils.h
+audio_capture.o: audio_capture.c audio_capture.h dec406.h
+
+.PHONY: all clean distclean install test help audio_capture_script

@@ -1,0 +1,255 @@
+Decoded Beacon Message
+
+Hexadecimal code: 3A9858B901C60C7AE08F8D49B0F87242691FFFC0C00A0E09121C3870E1C3870
+
+The code consists of 63 hexadecimal characters representing a 252 bit messgage format from a second generation beacon, including 48 bits of BCH error correcting bit as defined by T.018 Issue 1 - Rev.8.
+
+Errors in Message:
+80F7A9858B94D87C3921348
+
+    ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+    ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+
+Binary Range 	Binary Content 	Field Name 	Decoded Value
+Left pad 	00 		Normal mode transmission (i.e., operational mode)
+1-16 	1110101001100001 	Type Approval Cert No: 	TAC # 60001
+17-30 	01100010111001 	Beacon serial number: 	6329
+31-40 	0000000111 	Country code: 	7 Unknown MID
+41 	0 	Status of homing device: 	Beacon is not equipped with any homing signals or they have been deliberately disabled. If beacon has been activated, no homing device is functional or it has been deliberately disabled
+42 	0 	RLS function capability: 	RLS capability disabled
+43 	0 	Test protocol flag: 	Normal beacon operation
+44-66 	11000001100011110101110 	Latitude: 	65.56 S
+67-90 	000010001111100011010100 	Longitude: 	17.94397 E
+91-93 	100 	Vessel ID Type 	Aircraft aviation 24 Bit Address
+94-117 	110110000111110000111001 	Aviation 24 bit address 	Decimal: 14187577 Hex: D87C39
+118-132 	001000010011010 	Aircraft operator designator: 	J
+133-137 	01000 	Spare should be 0 	ERROR
+138-140 	111 	Beacon Type: 	System beacon
+141-154 	11111111111100 	Cancellation message status: 	ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+155-158 (Rotating field 1-4) 	0000 	Rotating Field Type: 	(#0) C/S G.008 Objective Requirements
+159-164 (Rotating field 5-10) 	110000 	Elapsed time since activation (hours): 	48 hours
+165-175 (Rotating field 11-21) 	00000010100 	Elapsed time since last encoded location (minutes): 	20 minutes
+176-185 (Rotating field 22-31) 	0001110000 	Altitude of encoded location: 	1392 m
+186-189 (Rotating field 32-34) 	0100 	HDOP: 	DOP >4 and <=5
+190-193 (Rotating field 35-39) 	1000 	VDOP: 	DOP >8 and <=10
+194-195 (Rotating field 40-41) 	10 	Automated/manual activation notification 	Automatic activation by external means
+196-198 (Rotating field 42-44) 	010 	Remaining battery capacity 	>10% and <=25% remaining
+199-200 (Rotating field 45-46) 	00 	GNSS location fix type: 	No fix
+201-202 (Rotating field 47-48) 	01 	Spare 	ERROR: Should be 00
+203-250 	110000111000011100001110000111000011100001110000 	Encoded BCH 	Encoded BCH
+Calculated 	100011000001110001100001001100001110111111000010 	Computed 	
+			ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+			
+==============================================================
+
+Decoded Beacon Message
+
+Hexadecimal code: 40749C3CFA8516CF69403114CEB28719C83FFFC5518145248032664CC999330
+
+The code consists of 63 hexadecimal characters representing a 252 bit messgage format from a second generation beacon, including 48 bits of BCH error correcting bit as defined by T.018 Issue 1 - Rev.8.
+
+Errors in Message:
+FD540749C3C26759438CE41
+
+    ERROR! first two bits not 00 nor 10
+    ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+    ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+
+    TAC # 466 Warning: SGB specifications stipulate TAC No should be greater than 10,000 
+
+Binary Range 	Binary Content 	Field Name 	Decoded Value
+Left pad 	01 		ERROR! first two bits not 00 nor 10
+1-16 	0000000111010010 	Type Approval Cert No: 	TAC # 466 Warning: SGB specifications stipulate TAC No should be greater than 10,000
+17-30 	01110000111100 	Beacon serial number: 	7228
+31-40 	1111101010 	Country code: 	1002 Unknown MID
+41 	0 	Status of homing device: 	Beacon is not equipped with any homing signals or they have been deliberately disabled. If beacon has been activated, no homing device is functional or it has been deliberately disabled
+42 	0 	RLS function capability: 	RLS capability disabled
+43 	0 	Test protocol flag: 	Normal beacon operation
+44-66 	10100010110110011110110 	Latitude: 	34.85126 S
+67-90 	100101000000001100010001 	Longitude: 	40.02396 W
+91-93 	010 	Vessel ID Type 	Radio call sign
+94-135 	011001110101100101000011100011001110010000 	Radio Callsign 	2YH9O?3
+136-137 	01 	Spare should be 0 	ERROR
+138-140 	111 	Beacon Type: 	System beacon
+141-154 	11111111111100 	Cancellation message status: 	ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+155-158 (Rotating field 1-4) 	0101 	Rotating Field Type: 	Spare
+203-250 	001001100110010011001100100110011001001100110000 	Encoded BCH 	Encoded BCH
+Calculated 	000100000101001000100100010001000110011011111011 	Computed 	
+			ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+			
+===============================================================
+
+Decoded Beacon Message
+
+Hexadecimal code: 36B00C24E8CFE1F03FFE0FC000000000002FFFD08E0F22C22006318C6318C60
+
+The code consists of 63 hexadecimal characters representing a 252 bit messgage format from a second generation beacon, including 48 bits of BCH error correcting bit as defined by T.018 Issue 1 - Rev.8.
+
+Errors in Message:
+F4776B00C24800000000001
+
+    Invalid Latitude (greater than 90 degrees)
+    Invalid Longitude (greater than 180 degrees)
+    Warning: With Vessel ID type set to none (000), bits 94-137 should be all 0 (unless national assigned)
+    ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+    ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+
+Binary Range 	Binary Content 	Field Name 	Decoded Value
+Left pad 	00 		Normal mode transmission (i.e., operational mode)
+1-16 	1101101011000000 	Type Approval Cert No: 	TAC # 56000
+17-30 	00110000100100 	Beacon serial number: 	3108
+31-40 	1110100011 	Country code: 	931 Unknown MID
+41 	0 	Status of homing device: 	Beacon is not equipped with any homing signals or they have been deliberately disabled. If beacon has been activated, no homing device is functional or it has been deliberately disabled
+42 	0 	RLS function capability: 	RLS capability disabled
+43 	1 	Test protocol flag: 	Test protocol message coded for non-operational use
+44-66 	11111100001111100000011 	Latitude: 	Invalid Latitude (greater than 90 degrees)
+67-90 	111111111110000011111100 	Longitude: 	Invalid Longitude (greater than 180 degrees)
+91-93 	000 	Vessel ID Type 	No aircraft or maritime identity (may be for national use; default bits 94-137 all 0)
+94-137 	00000000000000000000000000000000000000000001 	Vessel ID 	Warning: With Vessel ID type set to none (000), bits 94-137 should be all 0 (unless national assigned)
+138-140 	011 	Beacon Type: 	ELT(DT)
+141-154 	11111111111101 	Cancellation message status: 	ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+155-158 (Rotating field 1-4) 	0000 	Rotating Field Type: 	(#0) C/S G.008 Objective Requirements
+159-164 (Rotating field 5-10) 	100011 	Elapsed time since activation (hours): 	35 hours
+165-175 (Rotating field 11-21) 	10000011110 	Elapsed time since last encoded location (minutes): 	1054 minutes
+176-185 (Rotating field 22-31) 	0100010110 	Altitude of encoded location: 	4048 m
+186-189 (Rotating field 32-34) 	0001 	HDOP: 	DOP >1 and <=2
+190-193 (Rotating field 35-39) 	0001 	VDOP: 	DOP >1 and <=2
+194-195 (Rotating field 40-41) 	00 	Automated/manual activation notification 	Manual activation by user
+196-198 (Rotating field 42-44) 	000 	Remaining battery capacity 	<=5% remaining
+199-200 (Rotating field 45-46) 	00 	GNSS location fix type: 	No fix
+201-202 (Rotating field 47-48) 	00 	Spare 	OK
+203-250 	011000110001100011000110001100011000110001100000 	Encoded BCH 	Encoded BCH
+Calculated 	000000110100010110011100000010010101001100010001 	Computed 	
+			ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+			
+================================================================
+
+Decoded Beacon Message
+
+Hexadecimal code: 3039134901CFE1F03FFE0FC9B0F7D835551FFFC0503C0C89120000000000000
+
+The code consists of 63 hexadecimal characters representing a 252 bit messgage format from a second generation beacon, including 48 bits of BCH error correcting bit as defined by T.018 Issue 1 - Rev.8.
+
+Errors in Message:
+80F70391349CD87BEC1AAA8
+
+    Invalid Latitude (greater than 90 degrees)
+    Invalid Longitude (greater than 180 degrees)
+    ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+    ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+
+Binary Range 	Binary Content 	Field Name 	Decoded Value
+Left pad 	00 		Normal mode transmission (i.e., operational mode)
+1-16 	1100000011100100 	Type Approval Cert No: 	TAC # 49380
+17-30 	01001101001001 	Beacon serial number: 	4937
+31-40 	0000000111 	Country code: 	7 Unknown MID
+41 	0 	Status of homing device: 	Beacon is not equipped with any homing signals or they have been deliberately disabled. If beacon has been activated, no homing device is functional or it has been deliberately disabled
+42 	0 	RLS function capability: 	RLS capability disabled
+43 	1 	Test protocol flag: 	Test protocol message coded for non-operational use
+44-66 	11111100001111100000011 	Latitude: 	Invalid Latitude (greater than 90 degrees)
+67-90 	111111111110000011111100 	Longitude: 	Invalid Longitude (greater than 180 degrees)
+91-93 	100 	Vessel ID Type 	Aircraft aviation 24 Bit Address
+94-117 	110110000111101111101100 	Aviation 24 bit address 	Decimal: 14187500 Hex: D87BEC
+118-132 	000110101010101 	Aircraft operator designator: 	ORY
+133-137 	01000 	Spare should be 0 	ERROR
+138-140 	111 	Beacon Type: 	System beacon
+141-154 	11111111111100 	Cancellation message status: 	ERROR: Bits 141-154 should be set to all 1 or all 0 in the case that the rotating field is a cancellation message
+155-158 (Rotating field 1-4) 	0000 	Rotating Field Type: 	(#0) C/S G.008 Objective Requirements
+159-164 (Rotating field 5-10) 	010100 	Elapsed time since activation (hours): 	20 hours
+165-175 (Rotating field 11-21) 	00001111000 	Elapsed time since last encoded location (minutes): 	120 minutes
+176-185 (Rotating field 22-31) 	0001100100 	Altitude of encoded location: 	1200 m
+186-189 (Rotating field 32-34) 	0100 	HDOP: 	DOP >4 and <=5
+190-193 (Rotating field 35-39) 	1000 	VDOP: 	DOP >8 and <=10
+194-195 (Rotating field 40-41) 	10 	Automated/manual activation notification 	Automatic activation by external means
+196-198 (Rotating field 42-44) 	010 	Remaining battery capacity 	>10% and <=25% remaining
+199-200 (Rotating field 45-46) 	00 	GNSS location fix type: 	No fix
+201-202 (Rotating field 47-48) 	00 	Spare 	OK
+203-250 	000000000000000000000000000000000000000000000000 	Encoded BCH 	Encoded BCH
+Calculated 	000101110100101111100110000011101000000000111100 	Computed 	
+			ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+			
+==================================================================
+
+Decoded Beacon Message
+
+Hexadecimal code: 0C0E44D2407186DA5012D1426C4D08055547FFF0200787C4258000000000000
+
+The code consists of 63 hexadecimal characters representing a 252 bit messgage format from a second generation beacon, including 48 bits of BCH error correcting bit as defined by T.018 Issue 1 - Rev.8.
+
+Errors in Message:
+A034C0E44D2136268402AAA
+
+    ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+
+Binary Range 	Binary Content 	Field Name 	Decoded Value
+Left pad 	00 		Normal mode transmission (i.e., operational mode)
+1-16 	0011000000111001 	Type Approval Cert No: 	TAC # 12345
+17-30 	00010011010010 	Beacon serial number: 	1234
+31-40 	0100000001 	Country code: 	257 Norway
+41 	1 	Status of homing device: 	Beacon is equipped with at least one homing signal. If beacon has been activated, at least one homing device is functional and transmitting
+42 	1 	RLS function capability: 	RLS capability enabled
+43 	0 	Test protocol flag: 	Normal beacon operation
+44-66 	00110000110110110100101 	Latitude: 	48.8566 N
+67-90 	000000010010110100010100 	Longitude: 	2.35217 E
+91-93 	001 	Vessel ID Type 	Maritime MMSI
+94-123 	001101100010011010000100000000 	Unique ship station identity where the first 3 digits are MID (MIDxxxxxx): 	227123456
+		Flag state of vessel: 	227 France
+		Unique vessel number 	123456
+124-137 	10101010101010 	EPIRB-AIS System Identity: 	No EPIRB-AIS System
+138-140 	001 	Beacon Type: 	EPIRB
+141-154 	11111111111111 	Spare bits 	OK - all bits 1 and rotating field not a cancellation message
+155-158 (Rotating field 1-4) 	0000 	Rotating Field Type: 	(#0) C/S G.008 Objective Requirements
+159-164 (Rotating field 5-10) 	001000 	Elapsed time since activation (hours): 	8 hours
+165-175 (Rotating field 11-21) 	00000001111 	Elapsed time since last encoded location (minutes): 	15 minutes
+176-185 (Rotating field 22-31) 	0000111110 	Altitude of encoded location: 	592 m
+186-189 (Rotating field 32-34) 	0010 	HDOP: 	DOP >2 and <=3
+190-193 (Rotating field 35-39) 	0001 	VDOP: 	DOP >1 and <=2
+194-195 (Rotating field 40-41) 	00 	Automated/manual activation notification 	Manual activation by user
+196-198 (Rotating field 42-44) 	101 	Remaining battery capacity 	>75% and <=100% remaining
+199-200 (Rotating field 45-46) 	10 	GNSS location fix type: 	3D location
+201-202 (Rotating field 47-48) 	00 	Spare 	OK
+203-250 	000000000000000000000000000000000000000000000000 	Encoded BCH 	Encoded BCH
+Calculated 	001101001110111011000111101001010101011111101000 	Computed 	
+			ERROR! COMPUTED BCH DOES NOT MATCH ENCODED BCH!! 
+			
+=====================================================================
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+ ./dec406_hex 0C0E44D2407186DA5012D1426C4D08055547FFF0200787C4258000000000000
+2G frame detected: skipped 2 padding bits, extracted 250 data bits
+Starting 2G decoding...
+BCH: Errors detected (syndrome: 0x66A6CDAA26EB66B4)
+Validation: Invalid latitude 97.71320
+
+=== 406 MHz SECOND GENERATION BEACON (SGB) ===
+[IDENTIFICATION]
+ 23 Hex ID: A034C0E44D2136268402AAA
+ TAC Number: 12345 (0x3039)
+ Serial Number: 1234 (0x04D2)
+ Country Code: 257
+ Type: EPIRB
+ Vessel ID: MMSI:227123456
+
+[STATUS]
+ Homing Device: Available/Active
+ RLS Capability: Enabled
+ Test Protocol: Normal Operation
+
+[ENCODED GNSS LOCATION]
+ Position: 0.00000°N, 4.70435°E
+ Coordinates: 0.00000°N, 4.70435°E
+ Resolution: ~3.4 meters maximum
+
+[ROTATING FIELD 0]
+ Type: G.008 Objective Requirements
+ Elapsed time: 8 hours
+ Last position: 15 minutes ago
+ Altitude: 592 meters
+ HDOP: Category 2, VDOP: Category 1
+ Battery: 125%
+
+[COMPLIANCE]
+ Standard: COSPAS-SARSAT T.018 Second Generation Beacon
+ BCH Error Correction: BCH(250,202) - 48 bits
+ Data Rate: 300 bps, Spread Spectrum: DSSS-OQPSK
+====================================================

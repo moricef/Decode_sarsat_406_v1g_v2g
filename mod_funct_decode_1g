@@ -1,0 +1,62 @@
+// Modification of the display section in decode_1g function
+// Reorganize order: Header first, then CRC status, then hex content
+
+void decode_1g(const uint8_t *bits, int length) {
+    // ... (keep existing code until the display section) ...
+    
+    // Convert to string for processing
+    char frame_str[200];
+    for (int i = 0; i < length; i++) {
+        frame_str[i] = (bits[i] & 1) ? '1' : '0';
+    }
+    frame_str[length] = '\0';
+    
+    // Keep audio debug info if present
+    if (length == LONG_FRAME_BITS) {
+        printf("Long frame captured (%d bits)\n", length);
+    } else {
+        printf("Short frame captured (%d bits)\n", length);
+    }
+    
+    // Generate hexadecimal representation
+    char hex_str[64];
+    binary_to_hex(frame_str, length, hex_str, sizeof(hex_str));
+    
+    if (!validate_frame_sync(frame_str, length)) {
+        printf("Warning: Frame synchronization issues detected\n");
+    }
+
+    BeaconInfo1G info;
+    decode_1g_frame(frame_str, length, &info);
+    
+    // Display header FIRST - keep modern format
+    printf("\n=== 406 MHz BEACON DECODE (1G %s) ===", 
+           (length == LONG_FRAME_BITS) ? "LONG" : "SHORT");
+    
+    // THEN display CRC status
+    int crc1_failed = test_crc1(frame_str);
+    int crc2_failed = 0;
+    
+    if (length == LONG_FRAME_BITS) {
+        crc2_failed = test_crc2(frame_str);
+    }
+    
+    if (crc1_failed) {
+        printf("\nCRC1 Error");
+    } else {
+        printf("\nCRC1 OK");
+    }
+    
+    if (length == LONG_FRAME_BITS) {
+        if (crc2_failed) {
+            printf("\nCRC2 Error");
+        } else {
+            printf("\nCRC2 OK");
+        }
+    }
+    
+    // THEN display hexadecimal content
+    printf("\nHexadecimal content: %s", hex_str);
+    
+    // ... (continue with existing protocol display code)
+}
