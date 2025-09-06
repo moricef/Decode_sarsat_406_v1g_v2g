@@ -136,7 +136,7 @@ sox -t alsa default -t wav - | ./dec406 --100 # Défaut (robuste)
 | Option | Description |
 |--------|-------------|
 | `--help` | Affiche l'aide complète |
-| `--une_minute` | ⚠️ OBSOLÈTE v10.2 - Timeout fixe 55s (remplacé par timeout adaptatif) |
+| `--une_minute` |  OBSOLÈTE v10.2 - Timeout fixe 55s (remplacé par timeout adaptatif) |
 | `--canal1` | Utilise le canal droit pour les fichiers stéréo |
 | `--2` à `--100` | Coefficient seuil détection (2=très sensible, 100=robuste) |
 | `--osm` | Génère des liens OpenStreetMap cliquables |
@@ -217,9 +217,9 @@ dec406_v10.2/
 ## Rythmes de transmission des balises
 
 ### Types de balises et intervalles de répétition
-- **🔧 Balises de test** : **5 secondes** - Pour vérification et développement
-- **📋 Balises d'exercice** : **50 secondes** - Exercices CROSS/ADRASEC  
-- **🚨 Vraies balises de détresse** : **50 secondes** - Norme COSPAS-SARSAT officielle
+- ** Balises de test** : **5 secondes** - Pour vérification et développement
+- ** Balises d'exercice** : **50 secondes** - Exercices CROSS/ADRASEC  
+- ** Vraies balises de détresse** : **50 secondes** - Norme COSPAS-SARSAT officielle
 
 ### Système adaptatif intelligent
 Le script `decode_MIC_email_406.pl` s'adapte automatiquement :
@@ -245,7 +245,7 @@ Position (PDF-1): 43.85660°N, 2.35217°E
 Latitude offset: +2 min 12 sec
 Longitude offset: -1 min 8 sec
 Composite position: 43.89027°N, 2.33317°E
-📍 OpenStreetMap: https://www.openstreetmap.org/?mlat=43.89027&mlon=2.33317#map=18/43.89027/2.33317
+ OpenStreetMap: https://www.openstreetmap.org/?mlat=43.89027&mlon=2.33317#map=18/43.89027/2.33317
 [14:23:45] 1G decoding completed
 ```
 
