@@ -221,7 +221,7 @@ dec406_v10.2/
 - ** Balises d'exercice** : **50 secondes** - Exercices CROSS/ADRASEC  
 - ** Vraies balises de détresse** : **50 secondes** - Norme COSPAS-SARSAT officielle
 
-### Système adaptatif intelligent
+### Système adaptatif
 Le script `decode_MIC_email_406.pl` s'adapte automatiquement :
 - **Démarre en mode test** (15s) pour une réactivité maximale
 - **Auto-détecte le type** et passe en mode balise réelle (55s) si nécessaire
@@ -269,7 +269,7 @@ Test Protocol: Normal Operation
 Position: 43.85660°N, 2.35217°E
 Coordinates: 43.85660°N, 2.35217°E
 Resolution: ~3.4 meters maximum
-📍 OpenStreetMap: https://www.openstreetmap.org/?mlat=43.85660&mlon=2.35217#map=18/43.85660/2.35217
+ OpenStreetMap: https://www.openstreetmap.org/?mlat=43.85660&mlon=2.35217#map=18/43.85660/2.35217
 
 
 [ROTATING FIELD 0]
