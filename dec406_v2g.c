@@ -26,37 +26,73 @@
 // ===================================================
 // BCH Error Correction Implementation (T.018 Appendix B)
 // ===================================================
-#define BCH_POLY 0x1C7D72F93C97  // Polynomial: 1110001111110101110000101110111110011110010010111
+// Generator polynomial g(X) from T.018 Appendix B (49 bits):
+// 1110001111110101110000101110111110011110010010111
+#define BCH_POLY_HIGH 0xE3F5C2EFUL  // Upper 32 bits of 0x1C7EB85DF3C97
+#define BCH_POLY_LOW  0x13C97UL      // Lower 17 bits
 
 /**
  * @brief Decodes BCH(250,202) encoded message
  * @param msg Input: 250-bit raw message
  * @param out Output: 202-bit corrected data
- * 
+ *
  * Implements BCH error detection/correction as specified in
- * C/S T.018 Appendix B using the defined generator polynomial.
+ * C/S T.018 Appendix B using modulo-2 polynomial division.
+ * The algorithm follows the exact specification:
+ * 1. Add 5 padding zeros before 202 data bits
+ * 2. Add 48 zeros after to form 255-bit message
+ * 3. Perform modulo-2 division by g(X)
+ * 4. Check if remainder (syndrome) is zero
  */
 static void bch_decode_250_202(const uint8_t *msg, uint8_t *out) {
-    const int poly_degree = 48;
-    uint64_t shift_reg = 0;
-    
-    // Syndrome calculation
-    for (int i = 0; i < 250; i++) {
-        uint8_t bit = (msg[i] ^ (shift_reg >> (poly_degree - 1))) & 1;
-        shift_reg = (shift_reg << 1) | bit;
-        
-        if (shift_reg & (1ULL << poly_degree)) {
-            shift_reg ^= BCH_POLY;
+    // BCH(250,202) verification according to T.018 Appendix B
+    // Quote: "all calculations shall be performed with the full 255 length code.
+    // Therefore, 5 zeros are placed before the 202 data bits"
+
+    // Construct the 255-bit verification message:
+    // 5 padding zeros + 202 data bits + 48 BCH bits = 255 bits
+    uint8_t bch_message[255];
+
+    // 5 padding zeros as specified in T.018
+    memset(bch_message, 0, 5);
+
+    // 202 data bits from received message
+    memcpy(bch_message + 5, msg, 202);
+
+    // 48 BCH bits from received message
+    memcpy(bch_message + 207, msg + 202, 48);
+
+    // Generator polynomial g(X) from T.018 Appendix B (49 bits):
+    // Binary: 1110001111110101110000101110111110011110010010111
+    // This is the exact polynomial shown in the specification
+    const uint64_t generator_poly = 0x1C7EB85DF3C97ULL;
+
+    // Perform polynomial long division as shown in T.018 Figure B-1
+    // This implements the modulo-2 division process exactly as specified
+    uint64_t remainder = 0;
+
+    for (int i = 0; i < 255; i++) {
+        // Shift remainder left and input next message bit
+        remainder = (remainder << 1) | bch_message[i];
+
+        // If MSB (bit 48) is set, divide by generator polynomial
+        if (remainder & (1ULL << 48)) {
+            remainder ^= generator_poly;
         }
     }
-    
-    // Error detection
-    if (shift_reg != 0) {
-        fprintf(stderr, "BCH: Errors detected (syndrome: 0x%012lX)\n", shift_reg);
-        // Advanced correction logic would go here
+
+    // According to T.018: valid codeword has remainder = 0
+    if (remainder == 0) {
+        // Message is valid according to BCH(255,207) / BCH(250,202) specification
+        // No detectable errors in the 250-bit message
+    } else {
+        fprintf(stderr, "BCH: Errors detected (syndrome: 0x%013llX)\n",
+                (unsigned long long)remainder);
+        // The BCH(250,202) code can detect and correct up to 6 bit errors
+        // In a complete implementation, syndrome decoding would attempt correction
     }
-    
-    // Extract information bits (first 202 bits)
+
+    // Extract the 202 information bits for message decoding
     memcpy(out, msg, 202);
 }
 
