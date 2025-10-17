@@ -41,3 +41,9 @@ Thumbs.db
 
 # Configuration sensitive (keep template only)
 # config_mail.txt contains credentials - keep example only
+
+# Audio files (too large)
+*.wav
+
+# Documentation PDFs (large)
+*.pdfcsdr_frame_parser
