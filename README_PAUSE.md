@@ -26,10 +26,10 @@ Résultat actuel : **55.3% de bits corrects** (devrait être >95%)
 ## 🎯 Ce Qui Fonctionne
 
 ### ✅ Générateur de Signal (SARSAT_SGB)
-**Location** : `/home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/`
+**Location** : `~/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/`
 
 ```bash
-cd /home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB
+cd ~/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB
 make
 bin/sarsat_sgb -o test_output.iq
 ```
@@ -122,12 +122,12 @@ gcc -o dec406_iq main_iq.c dsss_demod.c prn_generator.c \
 
 ```bash
 # 1. Générer frame
-cd /home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB
+cd ~/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB
 bin/sarsat_sgb -o test.iq
 # Note frame hex affichée dans output
 
 # 2. Décoder frame directement (hex → décodage)
-cd /home/fab2/Developpement/COSPAS-SARSAT/balise_406MHz/dec406_v10.2
+cd ~/Developpement/COSPAS-SARSAT/balise_406MHz/dec406_v10.2
 ./dec406_hex <HEX_DE_LA_FRAME>
 ```
 
