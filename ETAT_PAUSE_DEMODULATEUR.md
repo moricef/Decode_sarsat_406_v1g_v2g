@@ -21,7 +21,7 @@
 ### 1. Générateur de Signal (SARSAT_SGB)
 **Status** : ✅ **OPÉRATIONNEL**
 
-- Localisation : `/home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/`
+- Localisation : `~/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/`
 - Génère frames T.018 conformes
 - Encodage BCH(250,202) validé
 - OQPSK avec séparation odd/even bits correcte
@@ -38,7 +38,7 @@
 ### 2. Décodeur de Frames (dec406_v2g.c)
 **Status** : ✅ **OPÉRATIONNEL**
 
-- Localisation : `/home/fab2/Developpement/COSPAS-SARSAT/balise_406MHz/dec406_v10.2/`
+- Localisation : `~/Developpement/COSPAS-SARSAT/balise_406MHz/dec406_v10.2/`
 - BCH(250,202) validé sur frames hardware
 - Décode tous champs T.018 correctement
 - **MAIS** : Nécessite 300 bits corrects en entrée
@@ -64,7 +64,7 @@
 
 **Compilation** :
 ```bash
-cd /home/fab2/Developpement/COSPAS-SARSAT/balise_406MHz/dec406_v10.2
+cd ~/Developpement/COSPAS-SARSAT/balise_406MHz/dec406_v10.2
 gcc -o dec406_iq main_iq.c dsss_demod.c prn_generator.c \
     dec406.c dec406_v1g.c dec406_v2g.c display_utils.c -lm -O2
 ```
@@ -329,7 +329,7 @@ Avant de reprendre, vérifier :
 ## 🗂️ Organisation des Fichiers
 
 ```
-/home/fab2/Developpement/COSPAS-SARSAT/
+~/Developpement/COSPAS-SARSAT/
 
 ├── ADALM-PLUTO/SARSAT_SGB/              ✅ Générateur (OPÉRATIONNEL)
 │   ├── bin/sarsat_sgb                   → Exécutable
