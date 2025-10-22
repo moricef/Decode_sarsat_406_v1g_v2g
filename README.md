@@ -1,6 +1,6 @@
 # dec406 - COSPAS-SARSAT 406 MHz Beacon Decoder
 
-Professional decoder for COSPAS-SARSAT 1st and 2nd generation emergency beacons (406 MHz).
+Decoder for COSPAS-SARSAT 1st and 2nd generation emergency beacons (406 MHz).
 
 **Status**: Production-ready (October 2025)
 **License**: Creative Commons CC BY-NC-SA
