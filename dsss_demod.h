@@ -88,6 +88,12 @@ typedef struct {
     float mean_correlation;         // Mean despreading correlation
     int bits_decoded;               // Number of bits successfully decoded
 
+    // Despreading parameters (Option C - iterative search)
+    int chip_convention;            // 0: Real>0→0, 1: Real>0→1
+    int prn_conversion;             // 0: -1→1, 1: -1→0
+    int interleaving;               // 0: I,Q,I,Q, 1: Q,I,Q,I
+    int chip_offset;                // Optimal chip offset (-10 to +10)
+
 } dsss_demod_state_t;
 
 // =============================================================================
@@ -243,7 +249,8 @@ int dsss_timing_recovery(const float complex *input,
 int dsss_resolve_phase_ambiguity(const float complex *symbols,
                                  size_t num_symbols,
                                  int *phase_rot,
-                                 bool *iq_swap);
+                                 bool *iq_swap,
+                                 dsss_demod_state_t *state);
 
 /**
  * @brief Despread DSSS signal using PRN correlation
@@ -263,6 +270,7 @@ int dsss_resolve_phase_ambiguity(const float complex *symbols,
 int dsss_despread(const uint8_t *chips_i,
                   const uint8_t *chips_q,
                   uint8_t *output_bits,
-                  float *correlation);
+                  float *correlation,
+                  const dsss_demod_state_t *state);
 
 #endif // DSSS_DEMOD_H

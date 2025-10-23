@@ -41,6 +41,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "dsss_demod.h"
+#include "prn_generator.h"
 
 // Forward declaration of existing decoder
 void decode_beacon(const uint8_t *bits, int length);
@@ -136,6 +137,14 @@ int main(int argc, char *argv[]) {
     printf("╔════════════════════════════════════════════════════════════════╗\n");
     printf("║     COSPAS-SARSAT 2G IQ DEMODULATOR (T.018 Rev.12)           ║\n");
     printf("╚════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    // Verify PRN generator compliance with T.018
+    printf("=== PRN GENERATOR VALIDATION ===\n");
+    if (!prn_verify_table_2_2()) {
+        fprintf(stderr, "FATAL: PRN generator does not match T.018 specification!\n");
+        return 1;
+    }
     printf("\n");
 
     // Allocate output buffer for 300 bits

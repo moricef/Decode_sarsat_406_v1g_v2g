@@ -576,102 +576,475 @@ int dsss_timing_recovery(const float complex *input, float complex *output,
 // =============================================================================
 
 /**
- * ⚠️  BUG #2: PHASE AMBIGUITY TESTED ON WRONG DATA ⚠️
+ * ⚠️  BUG #2: PHASE AMBIGUITY - CORRECTION OPTIMISÉE ⚠️
  *
- * CRITICAL ERROR: This function tests phase rotation on SPREAD CHIPS!
- * It should test AFTER despreading to get clean preamble bits.
+ * APPROCHE CORRIGÉE (Optimisée) :
+ * 1. Pour chaque combinaison (4 rotations × 2 swaps = 8 total)
+ * 2. Applique transformation aux symboles
+ * 3. Démodule en chips I/Q (SEULEMENT preamble = 12,800 chips)
+ * 4. Désétale ces 50 bits de preamble
+ * 5. Compare avec pattern attendu [0,1,0,1,...]
+ * 6. Garde la meilleure combinaison (corrélation >90%)
  *
- * CURRENT (WRONG):
- *   symbols → test 8 phase combinations → select best
- *            ↑ These are DSSS-spread QPSK symbols!
+ * OPTIMISATION :
+ * - Désétale seulement 50 bits × 8 combinaisons au lieu de 300 bits × 8
+ * - 12,800 chips × 8 = 102,400 ops vs 76,800 × 8 = 614,400 ops
+ * - Gain : 6× plus rapide
  *
- * CORRECT APPROACH:
- *   symbols → despread → extract 50-bit preamble → test phase → apply
- *
- * SYMPTOMS:
- * - Selects rotation=1 (90°) with only 48.6% correlation (random!)
- * - Cannot distinguish correct phase because spread signal looks like noise
- *
- * WHY THIS IS WRONG:
- * - DSSS spreading makes symbols appear random (that's the point!)
- * - Testing phase on spread symbols compares noise to expected pattern
- * - Only AFTER despreading do we get clean bits for phase testing
- *
- * CORRECT IMPLEMENTATION REQUIRES:
- * 1. Move this function AFTER despreading (reorder pipeline)
- * 2. Test on 50-bit preamble: expected = [0,1,0,1,0,1,...]
- * 3. Should get >90% correlation when phase is correct
- * 4. Alternative: Use preamble BEFORE spreading for detection (needs DSSS matched filter)
- *
- * See T.018 Section 2.2.3.b for OQPSK structure.
+ * @param symbols Input QPSK symbols (chip-rate, after timing recovery)
+ * @param num_symbols Number of symbols (should be ~38,400)
+ * @param phase_rot Output: best phase rotation (0-3)
+ * @param iq_swap Output: best I/Q swap flag
+ * @return 0 on success (>90% corr), -1 if no good match found
  */
 int dsss_resolve_phase_ambiguity(const float complex *symbols, size_t num_symbols,
-                                 int *phase_rot, bool *iq_swap) {
-    // Generate expected preamble pattern
-    const int test_length = 3200;  // Test first 3200 chips
-    uint8_t expected_chips[test_length];
+                                 int *phase_rot, bool *iq_swap,
+                                 dsss_demod_state_t *state) {
+    printf("[PHASE] Option C: Exhaustive search for optimal parameters...\n");
+    printf("[PHASE] Phase 1: Testing 8 phase/swap combinations...\n");
 
+    // Expected preamble: alternating 0,1,0,1,0,1... (50 bits)
+    uint8_t expected_preamble[DSSS_PREAMBLE_LENGTH];
+    for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
+        expected_preamble[i] = i % 2;
+    }
+
+    // Number of chips for preamble (50 bits × 256 chips/bit = 12,800 chips)
+    const int preamble_chips = DSSS_PREAMBLE_LENGTH * DSSS_SPREADING_FACTOR;
+
+    // Check we have enough symbols
+    if (num_symbols < preamble_chips) {
+        fprintf(stderr, "[PHASE] Error: Not enough symbols for preamble (%zu < %d)\n",
+                num_symbols, preamble_chips);
+        return -1;
+    }
+
+    // Generate PRN sequences for preamble (25 bits I + 25 bits Q)
     prn_state_t prn_state;
     prn_init(&prn_state, 0);
 
-    int8_t prn_i[DSSS_SPREADING_FACTOR];
-    int8_t prn_q[DSSS_SPREADING_FACTOR];
+    const int prn_bits = DSSS_PREAMBLE_LENGTH / 2;  // 25 bits per channel
+    uint8_t *prn_i_full = malloc(prn_bits * DSSS_SPREADING_FACTOR);
+    uint8_t *prn_q_full = malloc(prn_bits * DSSS_SPREADING_FACTOR);
 
-    int chip_idx = 0;
-    for (int bit = 0; bit < test_length / DSSS_SPREADING_FACTOR && chip_idx < test_length; bit++) {
-        prn_generate_i(&prn_state, prn_i);
-        prn_generate_q(&prn_state, prn_q);
+    if (!prn_i_full || !prn_q_full) {
+        free(prn_i_full);
+        free(prn_q_full);
+        return -1;
+    }
 
-        for (int c = 0; c < DSSS_SPREADING_FACTOR && chip_idx < test_length; c++) {
-            expected_chips[chip_idx++] = (bit % 2 == 0) ? 0 : 1;  // Alternating pattern
+    // Generate I-channel PRN (signed -1/+1)
+    int8_t *prn_i_signed = malloc(prn_bits * DSSS_SPREADING_FACTOR);
+    int8_t *prn_q_signed = malloc(prn_bits * DSSS_SPREADING_FACTOR);
+
+    if (!prn_i_signed || !prn_q_signed) {
+        free(prn_i_signed);
+        free(prn_q_signed);
+        free(prn_i_full);
+        free(prn_q_full);
+        return -1;
+    }
+
+    int8_t prn_chunk_signed[DSSS_SPREADING_FACTOR];
+    for (int bit = 0; bit < prn_bits; bit++) {
+        prn_generate_i(&prn_state, prn_chunk_signed);
+        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+            prn_i_signed[bit * DSSS_SPREADING_FACTOR + c] = prn_chunk_signed[c];
         }
     }
 
-    // Test all phase rotations and I/Q swaps
-    float best_corr = 0.0f;
+    // Reset for Q channel
+    prn_init(&prn_state, 0);
+
+    // Generate Q-channel PRN (signed -1/+1)
+    for (int bit = 0; bit < prn_bits; bit++) {
+        prn_generate_q(&prn_state, prn_chunk_signed);
+        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+            prn_q_signed[bit * DSSS_SPREADING_FACTOR + c] = prn_chunk_signed[c];
+        }
+    }
+
+    // PHASE 1: Test 8 phase/swap combinations with default despread params
+    float best_phase1_corr = 0.0f;
     int best_phase = 0;
     bool best_swap = false;
 
-    for (int p = 0; p < 4; p++) {  // 4 phase rotations
-        for (int swap = 0; swap < 2; swap++) {  // I/Q swap
-            // Apply phase rotation
+    // Default despreading parameters for Phase 1
+    const int default_chip_conv = 0;  // Real>0 → 0
+    const int default_prn_conv = 0;   // -1 → 1, +1 → 0
+    const int default_interleave = 0; // I,Q,I,Q
+    const int default_offset = -1;    // From diagnostic
+
+    for (int p = 0; p < 4; p++) {
+        for (int swap = 0; swap < 2; swap++) {
             float complex rot = cexpf(I * p * M_PI / 2.0f);
 
-            int matches = 0;
-            int total = fmin(test_length, num_symbols);
-
-            for (int i = 0; i < total; i++) {
-                float complex test_sym = symbols[i] * rot;
-
-                // I/Q swap if needed
-                if (swap) {
-                    test_sym = cimagf(test_sym) + I * crealf(test_sym);
-                }
-
-                // Demodulate QPSK
-                uint8_t demod_bit = (crealf(test_sym) >= 0 && cimagf(test_sym) >= 0) ? 0 : 1;
-
-                if (demod_bit == expected_chips[i]) {
-                    matches++;
-                }
+            // Demodulate to chips
+            uint8_t *chips_i = malloc(preamble_chips);
+            uint8_t *chips_q = malloc(preamble_chips);
+            if (!chips_i || !chips_q) {
+                free(chips_i); free(chips_q);
+                free(prn_i_signed); free(prn_q_signed);
+                free(prn_i_full); free(prn_q_full);
+                return -1;
             }
 
-            float corr = (float)matches / total;
-            if (corr > best_corr) {
-                best_corr = corr;
+            for (int i = 0; i < preamble_chips; i++) {
+                float complex test_sym = symbols[i] * rot;
+                if (swap) test_sym = cimagf(test_sym) + I * crealf(test_sym);
+
+                chips_i[i] = (crealf(test_sym) >= 0) ? 0 : 1;
+                chips_q[i] = (cimagf(test_sym) >= 0) ? 0 : 1;
+            }
+
+            // Convert PRN with default params
+            for (int c = 0; c < prn_bits * DSSS_SPREADING_FACTOR; c++) {
+                prn_i_full[c] = (prn_i_signed[c] == -1) ? 1 : 0;
+                prn_q_full[c] = (prn_q_signed[c] == -1) ? 1 : 0;
+            }
+
+            // Despread with default params
+            uint8_t despread_bits[DSSS_PREAMBLE_LENGTH];
+            for (int bit = 0; bit < prn_bits; bit++) {
+                int start_idx = bit * DSSS_SPREADING_FACTOR;
+                int corr_i = 0, corr_q = 0;
+
+                for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+                    int chip_idx = start_idx + c + default_offset;
+                    if (chip_idx >= 0 && chip_idx < preamble_chips) {
+                        if (chips_i[chip_idx] == prn_i_full[start_idx + c]) corr_i++;
+                        if (chips_q[chip_idx] == prn_q_full[start_idx + c]) corr_q++;
+                    }
+                }
+
+                uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+                uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+
+                despread_bits[2 * bit] = bit_i;
+                despread_bits[2 * bit + 1] = bit_q;
+            }
+
+            int matches = 0;
+            for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
+                if (despread_bits[i] == expected_preamble[i]) matches++;
+            }
+            float corr = (float)matches / DSSS_PREAMBLE_LENGTH;
+
+            if (corr > best_phase1_corr) {
+                best_phase1_corr = corr;
                 best_phase = p;
                 best_swap = (bool)swap;
+            }
+
+            free(chips_i);
+            free(chips_q);
+        }
+    }
+
+    printf("[PHASE] Phase 1 complete: best=rot%d/swap%d, corr=%.1f%%\n",
+           best_phase, best_swap, best_phase1_corr * 100.0f);
+
+    // PHASE 2: Exhaustive search of despreading params on best phase
+    printf("[PHASE] Phase 2: Testing 88 despreading parameter combinations...\n");
+
+    float best_corr = best_phase1_corr;
+    int best_chip_conv = default_chip_conv;
+    int best_prn_conv = default_prn_conv;
+    int best_interleave = default_interleave;
+    int best_offset = default_offset;
+
+    // Demodulate chips with best phase/swap
+    float complex rot = cexpf(I * best_phase * M_PI / 2.0f);
+    uint8_t *chips_i = malloc(preamble_chips);
+    uint8_t *chips_q = malloc(preamble_chips);
+
+    if (!chips_i || !chips_q) {
+        free(chips_i); free(chips_q);
+        free(prn_i_signed); free(prn_q_signed);
+        free(prn_i_full); free(prn_q_full);
+        return -1;
+    }
+
+    for (int i = 0; i < preamble_chips; i++) {
+        float complex test_sym = symbols[i] * rot;
+        if (best_swap) test_sym = cimagf(test_sym) + I * crealf(test_sym);
+        chips_i[i] = (crealf(test_sym) >= 0) ? 0 : 1;
+        chips_q[i] = (cimagf(test_sym) >= 0) ? 0 : 1;
+    }
+
+    // Test all despreading parameter combinations
+    for (int chip_conv = 0; chip_conv < 2; chip_conv++) {
+        for (int prn_conv = 0; prn_conv < 2; prn_conv++) {
+            // Convert PRN based on prn_conv
+            for (int c = 0; c < prn_bits * DSSS_SPREADING_FACTOR; c++) {
+                prn_i_full[c] = (prn_conv == 0) ?
+                    ((prn_i_signed[c] == -1) ? 1 : 0) :
+                    ((prn_i_signed[c] == -1) ? 0 : 1);
+                prn_q_full[c] = (prn_conv == 0) ?
+                    ((prn_q_signed[c] == -1) ? 1 : 0) :
+                    ((prn_q_signed[c] == -1) ? 0 : 1);
+            }
+
+            for (int interleave = 0; interleave < 2; interleave++) {
+                for (int offset = -5; offset <= 5; offset++) {
+                    uint8_t despread_bits[DSSS_PREAMBLE_LENGTH];
+
+                    for (int bit = 0; bit < prn_bits; bit++) {
+                        int start_idx = bit * DSSS_SPREADING_FACTOR;
+                        int corr_i = 0, corr_q = 0;
+
+                        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+                            int chip_idx = start_idx + c + offset;
+                            if (chip_idx >= 0 && chip_idx < preamble_chips) {
+                                uint8_t recv_chip_i = chip_conv ? (1 - chips_i[chip_idx]) : chips_i[chip_idx];
+                                uint8_t recv_chip_q = chip_conv ? (1 - chips_q[chip_idx]) : chips_q[chip_idx];
+
+                                if (recv_chip_i == prn_i_full[start_idx + c]) corr_i++;
+                                if (recv_chip_q == prn_q_full[start_idx + c]) corr_q++;
+                            }
+                        }
+
+                        uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+                        uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+
+                        if (interleave == 0) {
+                            despread_bits[2 * bit] = bit_i;
+                            despread_bits[2 * bit + 1] = bit_q;
+                        } else {
+                            despread_bits[2 * bit] = bit_q;
+                            despread_bits[2 * bit + 1] = bit_i;
+                        }
+                    }
+
+                    int matches = 0;
+                    for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
+                        if (despread_bits[i] == expected_preamble[i]) matches++;
+                    }
+                    float corr = (float)matches / DSSS_PREAMBLE_LENGTH;
+
+                    if (corr > best_corr) {
+                        best_corr = corr;
+                        best_chip_conv = chip_conv;
+                        best_prn_conv = prn_conv;
+                        best_interleave = interleave;
+                        best_offset = offset;
+                        printf("[PHASE]   NEW BEST: corr=%.1f%%, chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
+                               corr * 100.0f, chip_conv, prn_conv, interleave, offset);
+                    }
+                }
             }
         }
     }
 
-    printf("Phase ambiguity resolved: rotation=%d, swap=%d, corr=%.1f%%\n",
-           best_phase, best_swap, best_corr * 100.0f);
+    free(chips_i);
+    free(chips_q);
+    free(prn_i_signed);
+    free(prn_q_signed);
+    free(prn_i_full);
+    free(prn_q_full);
+
+    printf("[PHASE] ✓ FINAL: rot=%d (%3.0f°), swap=%d, corr=%.1f%%\n",
+           best_phase, best_phase * 90.0f, best_swap, best_corr * 100.0f);
+    printf("[PHASE] ✓ Despread params: chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
+           best_chip_conv, best_prn_conv, best_interleave, best_offset);
 
     if (phase_rot) *phase_rot = best_phase;
     if (iq_swap) *iq_swap = best_swap;
 
-    return (best_corr > 0.5f) ? 0 : -1;
+    // Store optimal despreading parameters in state
+    if (state) {
+        state->chip_convention = best_chip_conv;
+        state->prn_conversion = best_prn_conv;
+        state->interleaving = best_interleave;
+        state->chip_offset = best_offset;
+    }
+
+    // Return success if correlation > 90% (strong match on preamble)
+    if (best_corr > 0.9f) {
+        return 0;
+    } else if (best_corr > 0.7f) {
+        fprintf(stderr, "[PHASE] Warning: Moderate correlation (%.1f%%), proceeding anyway\n",
+                best_corr * 100.0f);
+        return 0;
+    } else {
+        fprintf(stderr, "[PHASE] Error: Low correlation (%.1f%%), phase resolution failed\n",
+                best_corr * 100.0f);
+        return -1;
+    }
+}
+
+// =============================================================================
+// DSSS DESPREADING - DIAGNOSTIC TOOL
+// =============================================================================
+
+/**
+ * @brief Outil de diagnostic pour identifier les paramètres optimaux de désétalement
+ *
+ * Teste systématiquement toutes les combinaisons de :
+ * - Convention chips (Real>0 → 0 vs Real>0 → 1)
+ * - Conversion PRN (-1 → 0 vs -1 → 1)
+ * - Interleaving I/Q (I,Q,I,Q vs Q,I,Q,I)
+ * - Offset chips (-10 à +10)
+ *
+ * @param chips_i Input I-channel chips
+ * @param chips_q Input Q-channel chips
+ * @param num_chips Total number of chips (should be 12,800 for preamble)
+ * @return Best correlation found (0.0 to 1.0)
+ */
+static float dsss_diagnose_despreading(const uint8_t *chips_i, const uint8_t *chips_q,
+                                       size_t num_chips) {
+    printf("\n[DIAGNOSTIC] Testing DSSS despreading parameters...\n");
+    printf("[DIAGNOSTIC] Testing preamble only (%zu chips = 50 bits)\n", num_chips);
+
+    // Expected preamble pattern
+    uint8_t expected[DSSS_PREAMBLE_LENGTH];
+    for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
+        expected[i] = i % 2;
+    }
+
+    // Chip offsets to test
+    int offsets[] = {-10, -5, -3, -2, -1, 0, 1, 2, 3, 5, 10};
+    int num_offsets = sizeof(offsets) / sizeof(offsets[0]);
+
+    float best_corr = 0.0f;
+    int best_chip_conv = 0;
+    int best_prn_conv = 0;
+    int best_interleave = 0;
+    int best_offset = 0;
+
+    // Test all combinations
+    for (int chip_conv = 0; chip_conv < 2; chip_conv++) {
+        for (int prn_conv = 0; prn_conv < 2; prn_conv++) {
+            for (int interleave = 0; interleave < 2; interleave++) {
+                for (int o = 0; o < num_offsets; o++) {
+                    int offset = offsets[o];
+
+                    // Generate PRN for this combination
+                    prn_state_t prn_state;
+                    prn_init(&prn_state, 0);
+
+                    uint8_t *prn_i_test = malloc(num_chips);
+                    uint8_t *prn_q_test = malloc(num_chips);
+
+                    if (!prn_i_test || !prn_q_test) {
+                        free(prn_i_test);
+                        free(prn_q_test);
+                        continue;
+                    }
+
+                    // Generate I-channel PRN
+                    int8_t prn_chunk[DSSS_SPREADING_FACTOR];
+                    for (int bit = 0; bit < DSSS_PREAMBLE_LENGTH / 2; bit++) {
+                        prn_generate_i(&prn_state, prn_chunk);
+                        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+                            int idx = bit * DSSS_SPREADING_FACTOR + c;
+                            // Apply PRN conversion
+                            if (prn_conv == 0) {
+                                prn_i_test[idx] = (prn_chunk[c] == -1) ? 1 : 0;
+                            } else {
+                                prn_i_test[idx] = (prn_chunk[c] == -1) ? 0 : 1;
+                            }
+                        }
+                    }
+
+                    // Generate Q-channel PRN
+                    prn_init(&prn_state, 0);
+                    for (int bit = 0; bit < DSSS_PREAMBLE_LENGTH / 2; bit++) {
+                        prn_generate_q(&prn_state, prn_chunk);
+                        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+                            int idx = bit * DSSS_SPREADING_FACTOR + c;
+                            // Apply PRN conversion
+                            if (prn_conv == 0) {
+                                prn_q_test[idx] = (prn_chunk[c] == -1) ? 1 : 0;
+                            } else {
+                                prn_q_test[idx] = (prn_chunk[c] == -1) ? 0 : 1;
+                            }
+                        }
+                    }
+
+                    // Despread with current parameters
+                    uint8_t despread[DSSS_PREAMBLE_LENGTH];
+                    for (int bit = 0; bit < DSSS_PREAMBLE_LENGTH / 2; bit++) {
+                        int corr_i = 0, corr_q = 0;
+
+                        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+                            int chip_idx = bit * DSSS_SPREADING_FACTOR + c;
+                            int test_idx = chip_idx + offset;
+
+                            if (test_idx >= 0 && test_idx < (int)num_chips) {
+                                uint8_t rx_chip_i = chips_i[test_idx];
+                                uint8_t rx_chip_q = chips_q[test_idx];
+                                uint8_t ref_i = prn_i_test[chip_idx];
+                                uint8_t ref_q = prn_q_test[chip_idx];
+
+                                // Apply chip convention
+                                if (chip_conv == 0) {
+                                    if (rx_chip_i == ref_i) corr_i++;
+                                    if (rx_chip_q == ref_q) corr_q++;
+                                } else {
+                                    if (rx_chip_i != ref_i) corr_i++;
+                                    if (rx_chip_q != ref_q) corr_q++;
+                                }
+                            }
+                        }
+
+                        // Majority vote
+                        uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+                        uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+
+                        // Apply interleaving
+                        if (interleave == 0) {
+                            despread[2 * bit] = bit_i;
+                            despread[2 * bit + 1] = bit_q;
+                        } else {
+                            despread[2 * bit] = bit_q;
+                            despread[2 * bit + 1] = bit_i;
+                        }
+                    }
+
+                    // Compare with expected preamble
+                    int matches = 0;
+                    for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
+                        if (despread[i] == expected[i]) matches++;
+                    }
+
+                    float corr = (float)matches / DSSS_PREAMBLE_LENGTH;
+
+                    // Report good matches
+                    if (corr > 0.9f) {
+                        printf("[DIAGNOSTIC] ✅ EXCELLENT: %.1f%% (chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d)\n",
+                               corr * 100.0f, chip_conv, prn_conv, interleave, offset);
+                    } else if (corr > 0.7f) {
+                        printf("[DIAGNOSTIC] ⚠️  GOOD: %.1f%% (chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d)\n",
+                               corr * 100.0f, chip_conv, prn_conv, interleave, offset);
+                    }
+
+                    if (corr > best_corr) {
+                        best_corr = corr;
+                        best_chip_conv = chip_conv;
+                        best_prn_conv = prn_conv;
+                        best_interleave = interleave;
+                        best_offset = offset;
+                    }
+
+                    free(prn_i_test);
+                    free(prn_q_test);
+                }
+            }
+        }
+    }
+
+    printf("\n[DIAGNOSTIC] ═══ BEST COMBINATION FOUND ═══\n");
+    printf("[DIAGNOSTIC] Correlation: %.1f%%\n", best_corr * 100.0f);
+    printf("[DIAGNOSTIC] Chip convention: %d (Real>0 → %d)\n", best_chip_conv, best_chip_conv == 0 ? 0 : 1);
+    printf("[DIAGNOSTIC] PRN conversion: %d (-1 → %d, +1 → %d)\n",
+           best_prn_conv, best_prn_conv == 0 ? 1 : 0, best_prn_conv == 0 ? 0 : 1);
+    printf("[DIAGNOSTIC] Interleaving: %d (%s)\n",
+           best_interleave, best_interleave == 0 ? "I,Q,I,Q" : "Q,I,Q,I");
+    printf("[DIAGNOSTIC] Chip offset: %+d\n", best_offset);
+    printf("[DIAGNOSTIC] ═══════════════════════════════\n\n");
+
+    return best_corr;
 }
 
 // =============================================================================
@@ -717,7 +1090,8 @@ int dsss_resolve_phase_ambiguity(const float complex *symbols, size_t num_symbol
  * - Current 0.053 suggests major synchronization failure
  */
 int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
-                  uint8_t *output_bits, float *correlation) {
+                  uint8_t *output_bits, float *correlation,
+                  const dsss_demod_state_t *state) {
     // Generate PRN sequences for all 150 bits (I and Q channels)
     prn_state_t prn_state;
     prn_init(&prn_state, 0);
@@ -731,15 +1105,25 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
         return -1;
     }
 
+    // Extract optimal parameters from state (found by exhaustive search)
+    int chip_conv = state ? state->chip_convention : 0;
+    int prn_conv = state ? state->prn_conversion : 0;
+    int interleave = state ? state->interleaving : 0;
+    int chip_offset = state ? state->chip_offset : -1;
+
     // Generate I-channel PRN (38400 chips for 150 bits)
-    // Convert from (-1, +1) to (1, 0) for XOR comparison
     int8_t prn_chunk_signed[DSSS_SPREADING_FACTOR];
     for (int bit = 0; bit < 150; bit++) {
         prn_generate_i(&prn_state, prn_chunk_signed);
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
-            // PRN: -1 → chip 1, +1 → chip 0
-            prn_i_full[bit * DSSS_SPREADING_FACTOR + c] =
-                (prn_chunk_signed[c] == -1) ? 1 : 0;
+            // Apply PRN conversion parameter
+            if (prn_conv == 0) {
+                prn_i_full[bit * DSSS_SPREADING_FACTOR + c] =
+                    (prn_chunk_signed[c] == -1) ? 1 : 0;
+            } else {
+                prn_i_full[bit * DSSS_SPREADING_FACTOR + c] =
+                    (prn_chunk_signed[c] == -1) ? 0 : 1;
+            }
         }
     }
 
@@ -750,31 +1134,46 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
     for (int bit = 0; bit < 150; bit++) {
         prn_generate_q(&prn_state, prn_chunk_signed);
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
-            // PRN: -1 → chip 1, +1 → chip 0
-            prn_q_full[bit * DSSS_SPREADING_FACTOR + c] =
-                (prn_chunk_signed[c] == -1) ? 1 : 0;
+            // Apply PRN conversion parameter
+            if (prn_conv == 0) {
+                prn_q_full[bit * DSSS_SPREADING_FACTOR + c] =
+                    (prn_chunk_signed[c] == -1) ? 1 : 0;
+            } else {
+                prn_q_full[bit * DSSS_SPREADING_FACTOR + c] =
+                    (prn_chunk_signed[c] == -1) ? 0 : 1;
+            }
         }
     }
 
-    // Despread using XOR correlation
+    // Despread using optimal parameters from exhaustive search
     float total_corr = 0.0f;
 
     for (int bit = 0; bit < 150; bit++) {
         int start_idx = bit * DSSS_SPREADING_FACTOR;
 
-        // Despread I-channel
+        // Despread I-channel with optimal parameters
         int corr_i = 0;
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
-            if (chips_i[start_idx + c] == prn_i_full[start_idx + c]) {
-                corr_i++;
+            int chip_idx = start_idx + c + chip_offset;
+            if (chip_idx >= 0 && chip_idx < 38400) {
+                // Apply chip convention
+                uint8_t recv_chip = chip_conv ? (1 - chips_i[chip_idx]) : chips_i[chip_idx];
+                if (recv_chip == prn_i_full[start_idx + c]) {
+                    corr_i++;
+                }
             }
         }
 
-        // Despread Q-channel
+        // Despread Q-channel with optimal parameters
         int corr_q = 0;
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
-            if (chips_q[start_idx + c] == prn_q_full[start_idx + c]) {
-                corr_q++;
+            int chip_idx = start_idx + c + chip_offset;
+            if (chip_idx >= 0 && chip_idx < 38400) {
+                // Apply chip convention
+                uint8_t recv_chip = chip_conv ? (1 - chips_q[chip_idx]) : chips_q[chip_idx];
+                if (recv_chip == prn_q_full[start_idx + c]) {
+                    corr_q++;
+                }
             }
         }
 
@@ -782,9 +1181,16 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
         uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
         uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
 
-        // Interleave I/Q → output (odd bits from I, even bits from Q)
-        output_bits[2 * bit] = bit_i;
-        output_bits[2 * bit + 1] = bit_q;
+        // Apply interleaving parameter
+        if (interleave == 0) {
+            // Standard: odd bits from I, even bits from Q
+            output_bits[2 * bit] = bit_i;
+            output_bits[2 * bit + 1] = bit_q;
+        } else {
+            // Swapped: odd bits from Q, even bits from I
+            output_bits[2 * bit] = bit_q;
+            output_bits[2 * bit + 1] = bit_i;
+        }
 
         // Track correlation
         float norm_corr_i = fabsf((float)corr_i - DSSS_SPREADING_FACTOR / 2) /
@@ -928,6 +1334,23 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     printf("  Fine freq offset: %.1f Hz (total: %.1f Hz)\n",
            freq_offset_fine, local_state.total_freq_offset);
 
+    // Step 4.5: OQPSK to QPSK conversion (apply Tc/2 delay)
+    printf("Step 4.5: OQPSK→QPSK conversion (Tc/2 delay)...\n");
+    float complex *qpsk_out = malloc(burst_length * sizeof(float complex));
+    if (!qpsk_out) {
+        free(agc_out);
+        free(freq_corr_out);
+        free(fine_sync_out);
+        return -1;
+    }
+
+    int sps_main = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
+    oqpsk_to_qpsk(fine_sync_out, qpsk_out, burst_length, sps_main);
+    printf("  Applied Tc/2 delay: %d samples\n", sps_main / 2);
+
+    // Update burst_length to account for delay
+    size_t qpsk_length = burst_length - sps_main / 2;
+
     // Step 5: Timing recovery
     printf("Step 5: Timing recovery...\n");
     float complex *symbols = malloc(40000 * sizeof(float complex));
@@ -935,11 +1358,12 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         free(agc_out);
         free(freq_corr_out);
         free(fine_sync_out);
+        free(qpsk_out);
         return -1;
     }
 
     size_t num_symbols;
-    dsss_timing_recovery(fine_sync_out, symbols, burst_length,
+    dsss_timing_recovery(qpsk_out, symbols, qpsk_length,
                         &num_symbols, samp_rate);
     printf("  Recovered %zu symbols\n", num_symbols);
 
@@ -949,7 +1373,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     bool iq_swap;
 
     if (dsss_resolve_phase_ambiguity(symbols, num_symbols,
-                                    &phase_rot, &iq_swap) < 0) {
+                                    &phase_rot, &iq_swap, &local_state) < 0) {
         fprintf(stderr, "Warning: Phase ambiguity resolution uncertain\n");
     }
 
@@ -974,6 +1398,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         free(agc_out);
         free(freq_corr_out);
         free(fine_sync_out);
+        free(qpsk_out);
         free(symbols);
         free(chips_i);
         free(chips_q);
@@ -987,14 +1412,32 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         chips_q[i] = (cimagf(symbols[i]) >= 0) ? 0 : 1;
     }
 
+    // =========================================================================
+    // DIAGNOSTIC TOOL: Test all despreading parameter combinations
+    // =========================================================================
+    // Run diagnostic on preamble (50 bits = 12,800 chips) to find optimal params
+    const size_t preamble_chips = DSSS_PREAMBLE_LENGTH * DSSS_SPREADING_FACTOR;
+    if (num_symbols >= preamble_chips) {
+        float diag_corr = dsss_diagnose_despreading(chips_i, chips_q, preamble_chips);
+        if (diag_corr < 0.7f) {
+            fprintf(stderr, "Warning: Diagnostic found no good parameters (best=%.1f%%)\n",
+                    diag_corr * 100.0f);
+        }
+    } else {
+        fprintf(stderr, "Warning: Not enough chips for diagnostic (%zu < %zu)\n",
+                num_symbols, preamble_chips);
+    }
+    // =========================================================================
+
     // Step 8: DSSS despreading
     printf("Step 8: DSSS despreading...\n");
     float mean_corr;
 
-    if (dsss_despread(chips_i, chips_q, output_bits, &mean_corr) < 0) {
+    if (dsss_despread(chips_i, chips_q, output_bits, &mean_corr, &local_state) < 0) {
         free(agc_out);
         free(freq_corr_out);
         free(fine_sync_out);
+        free(qpsk_out);
         free(symbols);
         free(chips_i);
         free(chips_q);
@@ -1014,6 +1457,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     free(agc_out);
     free(freq_corr_out);
     free(fine_sync_out);
+    free(qpsk_out);
     free(symbols);
     free(chips_i);
     free(chips_q);
