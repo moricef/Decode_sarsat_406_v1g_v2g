@@ -366,11 +366,104 @@ int dsss_fine_frequency_sync(const float complex *input, float complex *output,
 }
 
 // =============================================================================
+// TIMING RECOVERY HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Calculate loop filter gains for timing recovery or PLL
+ *
+ * Uses standard second-order loop filter equations:
+ *   k1 = (4 * zeta * omega_n) / (1 + 2*zeta*omega_n + omega_n^2)
+ *   k2 = (4 * omega_n^2) / (1 + 2*zeta*omega_n + omega_n^2)
+ *
+ * where omega_n = loop_bw (normalized loop bandwidth)
+ *       zeta = damping factor
+ *
+ * @param loop_bw Normalized loop bandwidth (typical: 0.001 - 0.01)
+ * @param damping Damping factor (typical: 0.707 for critical, 1.0-2.0 for overdamped)
+ * @param k1 Output: proportional gain
+ * @param k2 Output: integral gain
+ */
+static void calculate_loop_gains(float loop_bw, float damping, float *k1, float *k2) {
+    float zeta = damping;
+    float omega_n = loop_bw;
+    float denom = 1.0f + 2.0f * zeta * omega_n + omega_n * omega_n;
+
+    *k1 = (4.0f * zeta * omega_n) / denom;
+    *k2 = (4.0f * omega_n * omega_n) / denom;
+}
+
+/**
+ * @brief Cubic interpolation for sample extraction
+ *
+ * Uses 4-point cubic (Catmull-Rom) interpolation to extract a sample
+ * at fractional position mu between samples.
+ *
+ * Formula: y(mu) = a0*mu^3 + a1*mu^2 + a2*mu + a3
+ * where:
+ *   a0 = -0.5*y[-1] + 1.5*y[0] - 1.5*y[1] + 0.5*y[2]
+ *   a1 =      y[-1] - 2.5*y[0] + 2.0*y[1] - 0.5*y[2]
+ *   a2 = -0.5*y[-1]            + 0.5*y[1]
+ *   a3 =                 y[0]
+ *
+ * @param samples Input sample array
+ * @param mu Fractional position (0.0 to 1.0) between samples[idx] and samples[idx+1]
+ * @param idx Center index (must have idx-1 and idx+2 available)
+ * @param len Total array length (for bounds checking)
+ * @return Interpolated complex sample at position idx + mu
+ */
+static float complex interpolate_cubic(const float complex *samples, float mu, int idx, int len) {
+    // Get 4 surrounding samples with bounds checking
+    int idx0 = idx - 1;
+    int idx1 = idx;
+    int idx2 = idx + 1;
+    int idx3 = idx + 2;
+
+    // Clamp indices to valid range
+    if (idx0 < 0) idx0 = 0;
+    if (idx3 >= len) idx3 = len - 1;
+
+    float complex y0 = samples[idx0];
+    float complex y1 = samples[idx1];
+    float complex y2 = samples[idx2];
+    float complex y3 = samples[idx3];
+
+    // Cubic polynomial coefficients (Catmull-Rom spline)
+    float complex a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+    float complex a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+    float complex a2 = -0.5f * y0 + 0.5f * y2;
+    float complex a3 = y1;
+
+    // Evaluate polynomial at mu
+    float mu_sq = mu * mu;
+    float mu_cubed = mu_sq * mu;
+
+    return a0 * mu_cubed + a1 * mu_sq + a2 * mu + a3;
+}
+
+/**
+ * @brief Gardner Timing Error Detector
+ *
+ * Computes timing error from 3 successive symbols:
+ *   error = Re[(late - early) * conj(prompt)]
+ *
+ * This is a non-data-aided detector that works for BPSK/QPSK.
+ *
+ * @param early Symbol at n-1
+ * @param prompt Symbol at n (sampled between early and late)
+ * @param late Symbol at n+1
+ * @return Timing error (positive = sampling too early, negative = too late)
+ */
+static float gardner_ted(float complex early, float complex prompt, float complex late) {
+    return crealf((late - early) * conjf(prompt));
+}
+
+// =============================================================================
 // TIMING RECOVERY
 // =============================================================================
 
 /**
- * ⚠️  BUG #1: TIMING RECOVERY INCORRECT ⚠️
+ * ⚠️  BUG #1: TIMING RECOVERY INCORRECT ⚠️ (EN COURS DE CORRECTION)
  *
  * SYMPTOMS:
  * - Recovers only ~33k symbols instead of expected 38,400
@@ -399,53 +492,80 @@ int dsss_timing_recovery(const float complex *input, float complex *output,
                          size_t num_samples, size_t *num_symbols, float samp_rate) {
     const float loop_bw = 0.001f;
     const float damping = 2.0f;
-    const float detector_gain = 4.0f;
     const int sps = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
 
-    // Loop filter gains
-    float k1 = 4.0f * damping * loop_bw;
-    float k2 = 4.0f * loop_bw * loop_bw;
+    // Calculate loop filter gains using proper formula
+    float k1, k2;
+    calculate_loop_gains(loop_bw, damping, &k1, &k2);
 
-    size_t sample_idx = 0;
+    printf("[TIMING] Loop parameters: bw=%.5f, damping=%.2f, sps=%d\n", loop_bw, damping, sps);
+    printf("[TIMING] Loop gains: k1=%.6f, k2=%.6f\n", k1, k2);
+
+    // Timing state variables
+    // Initialize timing_phase to allow cubic interpolation (needs idx >= 1)
+    float timing_phase = 2.0f;           // Start at sample 2 (allows interpolation at idx-1)
+    float timing_freq = 0.0f;            // Accumulated frequency error (NCO)
     size_t symbol_count = 0;
-    float timing_phase = 0.0f;
 
+    // Symbol history for Gardner TED
     float complex prev_prev_sym = 0.0f;
     float complex prev_sym = 0.0f;
 
-    while (sample_idx + sps < num_samples && symbol_count < 40000) {
-        // Extract symbol sample
-        int start_idx = (int)(sample_idx + 0.5f);
-        if (start_idx + sps >= num_samples) break;
+    // Debug: track timing error statistics
+    float timing_error_sum = 0.0f;
+    float timing_error_max = 0.0f;
+    int debug_print_interval = 5000;     // Print every N symbols
 
-        // Simple averaging over samples per symbol
-        float complex symbol = 0.0f;
-        for (int i = 0; i < sps; i++) {
-            symbol += input[start_idx + i];
+    // Main timing recovery loop
+    while (timing_phase < num_samples - sps && symbol_count < 40000) {
+        // Calculate sample index with fractional part
+        int center_idx = (int)floorf(timing_phase);
+        float mu = timing_phase - floorf(timing_phase);  // Fractional position [0, 1)
+
+        // Bounds check for cubic interpolation (needs idx-1 to idx+2)
+        if (center_idx < 1 || center_idx + 2 >= (int)num_samples) {
+            break;
         }
-        symbol /= sps;
+
+        // Extract symbol using cubic interpolation
+        float complex symbol = interpolate_cubic(input, mu, center_idx, num_samples);
 
         output[symbol_count] = symbol;
         symbol_count++;
 
-        // Gardner timing error detector
+        // Compute timing error using Gardner TED
         float timing_error = 0.0f;
         if (symbol_count >= 3) {
-            float complex early = prev_prev_sym;
-            float complex prompt = prev_sym;
-            float complex late = symbol;
+            timing_error = gardner_ted(prev_prev_sym, prev_sym, symbol);
 
-            // Gardner TED
-            timing_error = crealf((late - early) * conjf(prompt));
+            // Track error statistics
+            timing_error_sum += fabsf(timing_error);
+            if (fabsf(timing_error) > timing_error_max) {
+                timing_error_max = fabsf(timing_error);
+            }
         }
 
-        // Update timing with loop filter
-        timing_phase += k1 * timing_error;
-        sample_idx += sps + k2 * timing_error + timing_phase;
+        // Update timing loop filter (proportional + integral)
+        timing_freq += k2 * timing_error;       // Integral path (NCO frequency)
+        timing_phase += sps + k1 * timing_error + timing_freq;  // Advance to next symbol
 
+        // Debug output every N symbols
+        if (symbol_count > 0 && symbol_count % debug_print_interval == 0) {
+            float avg_error = timing_error_sum / debug_print_interval;
+            printf("[TIMING] Symbol %zu: phase=%.2f, mu=%.4f, error=%.4f (avg=%.4f, max=%.4f), freq=%.6f\n",
+                   symbol_count, timing_phase, mu, timing_error, avg_error, timing_error_max, timing_freq);
+            timing_error_sum = 0.0f;
+            timing_error_max = 0.0f;
+        }
+
+        // Update symbol history
         prev_prev_sym = prev_sym;
         prev_sym = symbol;
     }
+
+    // Final statistics
+    printf("[TIMING] Recovery complete: %zu symbols recovered (expected ~38400)\n", symbol_count);
+    printf("[TIMING] Final timing phase: %.2f, final NCO freq: %.6f\n", timing_phase, timing_freq);
 
     if (num_symbols) *num_symbols = symbol_count;
     return 0;

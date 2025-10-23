@@ -44,8 +44,8 @@
 #define DSSS_CHIP_RATE          38400       // 38.4 kchips/s
 #define DSSS_DATA_RATE          300         // 300 bps
 #define DSSS_SPREADING_FACTOR   256         // 256 chips per bit
-#define DSSS_SAMPLE_RATE        2500000     // 2.5 MHz (default)
-#define DSSS_SAMPLES_PER_CHIP   65.104167f  // 2.5M / 38.4k
+#define DSSS_SAMPLE_RATE        400000      // 400 kHz (SARSAT_SGB default)
+#define DSSS_SAMPLES_PER_CHIP   10.416667f  // 400k / 38.4k
 
 #define DSSS_PREAMBLE_LENGTH    50          // 50 bits preamble
 #define DSSS_PAYLOAD_LENGTH     250         // 250 bits payload (202 data + 48 BCH)
