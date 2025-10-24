@@ -56,12 +56,18 @@ void decode_beacon(const uint8_t *bits, int length);
 static void print_usage(const char *progname) {
     printf("COSPAS-SARSAT 2G IQ Demodulator\n");
     printf("================================\n\n");
-    printf("Usage: %s <filename.iq|filename.cfile>\n\n", progname);
+    printf("Usage: %s <filename.iq|filename.cfile> [-s sample_rate]\n\n", progname);
+    printf("Options:\n");
+    printf("  -s <rate>  Specify sample rate in Hz (skip auto-detection)\n\n");
     printf("Supported formats:\n");
     printf("  .iq     - Raw complex float32 (interleaved I/Q)\n");
     printf("  .cfile  - GNU Radio complex float format\n\n");
-    printf("Example:\n");
-    printf("  %s test_sgb.iq\n\n", progname);
+    printf("Examples:\n");
+    printf("  %s test_sgb.iq\n", progname);
+    printf("  %s test_sgb.iq -s 2500000\n\n", progname);
+    printf("Workflow (recommended for accuracy):\n");
+    printf("  1. ./test_sample_rate file.iq          # Detect sample rate\n");
+    printf("  2. ./dec406_iq file.iq -s 2500000      # Use detected rate\n\n");
     printf("Output:\n");
     printf("  - Demodulator statistics (SNR, frequency offset, etc.)\n");
     printf("  - Decoded beacon message (Country, Position, Vessel ID)\n");
@@ -113,12 +119,38 @@ static void print_preamble_analysis(const uint8_t *bits) {
  */
 int main(int argc, char *argv[]) {
     // Parse arguments
-    if (argc != 2) {
+    const char *filename = NULL;
+    float manual_sample_rate = 0.0f;  // 0 = auto-detect
+
+    if (argc < 2 || argc > 4) {
         print_usage(argv[0]);
         return 1;
     }
 
-    const char *filename = argv[1];
+    // Parse options
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 < argc) {
+                manual_sample_rate = atof(argv[++i]);
+                if (manual_sample_rate <= 0) {
+                    fprintf(stderr, "Error: Invalid sample rate: %s\n", argv[i]);
+                    return 1;
+                }
+            } else {
+                fprintf(stderr, "Error: -s requires sample rate argument\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+        } else {
+            filename = argv[i];
+        }
+    }
+
+    if (!filename) {
+        fprintf(stderr, "Error: No input file specified\n");
+        print_usage(argv[0]);
+        return 1;
+    }
 
     // Check file extension
     int len = strlen(filename);
@@ -162,7 +194,7 @@ int main(int argc, char *argv[]) {
     printf("\n");
     printf("=== DEMODULATION PROCESS ===\n");
 
-    int ret = dsss_demodulate_file(filename, output_bits, &state);
+    int ret = dsss_demodulate_file(filename, output_bits, &state, manual_sample_rate);
 
     if (ret == -2) {
         fprintf(stderr, "\n❌ DEMODULATION FAILED: Preamble not found\n");
