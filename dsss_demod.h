@@ -137,11 +137,13 @@ int dsss_demodulate(const float complex *iq_samples,
  * @param filename      IQ file path
  * @param output_bits   Output 300-bit array (preallocated)
  * @param state         Output state structure (can be NULL)
+ * @param manual_sr     Manual sample rate (0 = auto-detect)
  * @return 0 on success, -1 on error, -2 if preamble not found
  */
 int dsss_demodulate_file(const char *filename,
                          uint8_t *output_bits,
-                         dsss_demod_state_t *state);
+                         dsss_demod_state_t *state,
+                         float manual_sr);
 
 /**
  * @brief Print demodulator state and statistics
@@ -167,6 +169,19 @@ int dsss_agc(const float complex *input,
              float complex *output,
              size_t num_samples,
              float *gain_out);
+
+/**
+ * @brief Estimate sample rate by testing multiple candidates
+ *
+ * Tests common SDR sample rates and chooses the one that maximizes
+ * preamble correlation
+ *
+ * @param samples       Input samples
+ * @param num_samples   Number of samples
+ * @return Estimated sample rate (Hz)
+ */
+float dsss_estimate_sample_rate(const float complex *samples,
+                                size_t num_samples);
 
 /**
  * @brief Detect preamble with frequency offset search

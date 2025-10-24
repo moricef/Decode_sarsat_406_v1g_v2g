@@ -171,6 +171,251 @@ int dsss_agc(const float complex *input, float complex *output,
 }
 
 // =============================================================================
+// SAMPLE RATE ESTIMATION
+// =============================================================================
+
+/**
+ * @brief Generate DSSS preamble reference at chip rate
+ *
+ * Preamble pattern: 50 bits alternating 0,1,0,1,...
+ * After DSSS spreading: 25×256 = 6,400 chips (I and Q channels)
+ */
+static int generate_preamble_chips_for_corr(float complex *preamble_chips) {
+    prn_state_t prn_state_i, prn_state_q;
+    prn_init(&prn_state_i, 0);  // Normal mode I-channel
+    prn_init(&prn_state_q, 0);  // Normal mode Q-channel
+
+    int8_t prn_i_buf[DSSS_SPREADING_FACTOR];
+    int8_t prn_q_buf[DSSS_SPREADING_FACTOR];
+
+    int chip_idx = 0;
+
+    // Generate 25 bits per channel (I and Q interleaved = 50 bits total)
+    for (int bit = 0; bit < 25; bit++) {
+        // Generate PRN sequences for this bit
+        prn_generate_i(&prn_state_i, prn_i_buf);
+        prn_generate_q(&prn_state_q, prn_q_buf);
+
+        // Preamble pattern: alternating 0,1,0,1...
+        int bit_value_i = (bit * 2) % 2;        // Even positions: 0,1,0,1...
+        int bit_value_q = (bit * 2 + 1) % 2;    // Odd positions: 1,0,1,0...
+
+        // Spread each bit across 256 chips
+        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+            // Convert PRN from {-1,+1} to chips considering bit value
+            float chip_i = (bit_value_i == 0) ? (float)prn_i_buf[c] : -(float)prn_i_buf[c];
+            float chip_q = (bit_value_q == 0) ? (float)prn_q_buf[c] : -(float)prn_q_buf[c];
+
+            preamble_chips[chip_idx++] = chip_i + I * chip_q;
+        }
+    }
+
+    return chip_idx;  // Should be 6400
+}
+
+/**
+ * @brief Upsample preamble chips to match signal sample rate
+ */
+static int upsample_preamble_for_corr(const float complex *preamble_chips, int num_chips,
+                                      float complex *preamble_samples, float sps) {
+    int num_samples = (int)(num_chips * sps);
+
+    for (int i = 0; i < num_samples; i++) {
+        int chip_idx = (int)(i / sps);
+        if (chip_idx >= num_chips) chip_idx = num_chips - 1;
+        preamble_samples[i] = preamble_chips[chip_idx];
+    }
+
+    return num_samples;
+}
+
+/**
+ * @brief Apply OQPSK Tc/2 delay to preamble
+ */
+static void apply_oqpsk_delay_for_corr(const float complex *preamble, float complex *output,
+                                       int num_samples, float sps) {
+    int delay = (int)(sps / 2.0f);
+
+    for (int i = 0; i < num_samples; i++) {
+        float i_val = crealf(preamble[i]);
+        float q_val = (i >= delay) ? cimagf(preamble[i - delay]) : 0.0f;
+        output[i] = i_val + I * q_val;
+    }
+}
+
+/**
+ * @brief Normalized cross-correlation between two complex signals
+ */
+static float correlate_complex_normalized(const float complex *sig1, const float complex *sig2, int len) {
+    float complex corr_sum = 0.0f;
+    float power1 = 0.0f, power2 = 0.0f;
+
+    for (int i = 0; i < len; i++) {
+        corr_sum += sig1[i] * conjf(sig2[i]);
+        power1 += cabsf(sig1[i]) * cabsf(sig1[i]);
+        power2 += cabsf(sig2[i]) * cabsf(sig2[i]);
+    }
+
+    if (power1 > 0 && power2 > 0) {
+        return cabsf(corr_sum) / sqrtf(power1 * power2);
+    }
+    return 0.0f;
+}
+
+/**
+ * @brief Real PRN-based preamble correlation for sample rate estimation
+ *
+ * Generates actual DSSS preamble with PRN sequences and OQPSK modulation,
+ * then correlates with received signal using sliding window.
+ *
+ * @param signal Input signal
+ * @param signal_len Signal length
+ * @param samp_rate Sample rate candidate
+ * @return Maximum normalized correlation found [0.0, 1.0]
+ */
+static float fast_preamble_correlation(const float complex *signal, size_t signal_len,
+                                       float samp_rate) {
+    // Calculate samples per chip
+    float sps = samp_rate / DSSS_CHIP_RATE;
+
+    // Generate preamble at chip rate
+    const int num_preamble_chips = 25 * DSSS_SPREADING_FACTOR;  // 6400 chips
+    float complex *preamble_chips = malloc(num_preamble_chips * sizeof(float complex));
+    if (!preamble_chips) return 0.0f;
+
+    generate_preamble_chips_for_corr(preamble_chips);
+
+    // Upsample to match signal sample rate
+    int preamble_samples_len = (int)(num_preamble_chips * sps);
+    if (preamble_samples_len <= 0 || preamble_samples_len > 1000000) {
+        free(preamble_chips);
+        return 0.0f;
+    }
+
+    float complex *preamble_qpsk = malloc(preamble_samples_len * sizeof(float complex));
+    if (!preamble_qpsk) {
+        free(preamble_chips);
+        return 0.0f;
+    }
+
+    upsample_preamble_for_corr(preamble_chips, num_preamble_chips, preamble_qpsk, sps);
+
+    // Apply OQPSK Tc/2 delay
+    float complex *preamble_oqpsk = malloc(preamble_samples_len * sizeof(float complex));
+    if (!preamble_oqpsk) {
+        free(preamble_chips);
+        free(preamble_qpsk);
+        return 0.0f;
+    }
+
+    apply_oqpsk_delay_for_corr(preamble_qpsk, preamble_oqpsk, preamble_samples_len, sps);
+
+    // Sliding correlation (search first 50% of signal)
+    float max_corr = 0.0f;
+    int search_len = signal_len / 2;
+    if (search_len < preamble_samples_len) {
+        free(preamble_chips);
+        free(preamble_qpsk);
+        free(preamble_oqpsk);
+        return 0.0f;
+    }
+
+    int step = (int)sps;  // Step by 1 chip
+    if (step < 1) step = 1;
+
+    for (int offset = 0; offset <= search_len - preamble_samples_len; offset += step) {
+        float corr = correlate_complex_normalized(&signal[offset], preamble_oqpsk, preamble_samples_len);
+        if (corr > max_corr) max_corr = corr;
+    }
+
+    free(preamble_chips);
+    free(preamble_qpsk);
+    free(preamble_oqpsk);
+
+    return max_corr;
+}
+
+/**
+ * @brief Estimate sample rate by testing multiple candidates
+ * @param samples Input signal
+ * @param num_samples Signal length
+ * @return Estimated sample rate (Hz)
+ */
+float dsss_estimate_sample_rate(const float complex *samples, size_t num_samples) {
+    // Extended candidate list with intermediate values
+    float candidates[] = {
+        300000.0f,    // 7.8 sps/chip
+        384000.0f,    // 10 sps/chip
+        400000.0f,    // 10.4 sps/chip
+        768000.0f,    // 20 sps/chip
+        1536000.0f,   // 40 sps/chip
+        2000000.0f,   // 52.1 sps/chip
+        2500000.0f,   // 65.1 sps/chip (PlutoSDR default)
+        3072000.0f,   // 80 sps/chip
+        6144000.0f    // 160 sps/chip
+    };
+    int num_candidates = sizeof(candidates) / sizeof(candidates[0]);
+
+    printf("=== SAMPLE RATE ESTIMATION ===\n");
+    printf("Testing %d candidate sample rates...\n", num_candidates);
+
+    float best_corr = 0.0f;
+    float best_sr = candidates[0];
+    int valid_candidates = 0;
+
+    for (int i = 0; i < num_candidates; i++) {
+        float sr_candidate = candidates[i];
+
+        // Check if file has enough samples for this sample rate
+        // Need: 300 bits × 256 chips/bit × sps = 76800 × (sr / 38400)
+        // Require at least 100% of full frame for reliable demodulation
+        size_t min_samples = (size_t)(76800.0f * (sr_candidate / DSSS_CHIP_RATE) * 1.0f);
+
+        if (num_samples < min_samples) {
+            printf("  [%d] SR=%.0f Hz (%.1f sps/chip): SKIPPED (need %zu samples, have %zu)\n",
+                   i+1, sr_candidate, sr_candidate / DSSS_CHIP_RATE, min_samples, num_samples);
+            continue;
+        }
+
+        // Test with ±5% tolerance
+        for (float delta = -0.05f; delta <= 0.05f; delta += 0.025f) {
+            float current_sr = sr_candidate * (1.0f + delta);
+            float corr = fast_preamble_correlation(samples, num_samples, current_sr);
+
+            if (i == 0 || (i < num_candidates && delta == 0.0f)) {
+                printf("  [%d] SR=%.0f Hz (%.1f sps/chip): corr=%.3f",
+                       i+1, sr_candidate, sr_candidate / DSSS_CHIP_RATE, corr);
+            }
+
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_sr = current_sr;
+                if (delta == 0.0f) printf(" ← NEW BEST");
+            }
+
+            if (i == 0 || (i < num_candidates && delta == 0.0f)) {
+                printf("\n");
+            }
+        }
+        valid_candidates++;
+    }
+
+    if (valid_candidates == 0) {
+        fprintf(stderr, "Warning: No valid sample rate candidates for %zu samples\n", num_samples);
+        fprintf(stderr, "Using fallback: 384000 Hz\n");
+        return 384000.0f;
+    }
+
+    printf("\n✓ Sample rate estimated: %.0f Hz\n", best_sr);
+    printf("  Best correlation: %.3f\n", best_corr);
+    printf("  Samples per chip: %.2f\n", best_sr / DSSS_CHIP_RATE);
+    printf("  Tested %d/%d candidates\n", valid_candidates, num_candidates);
+    printf("=================================\n\n");
+
+    return best_sr;
+}
+
+// =============================================================================
 // PREAMBLE DETECTION
 // =============================================================================
 
@@ -511,15 +756,24 @@ static float gardner_ted(float complex early, float complex prompt, float comple
  */
 int dsss_timing_recovery(const float complex *input, float complex *output,
                          size_t num_samples, size_t *num_symbols, float samp_rate) {
-    const float loop_bw = 0.001f;
     const float damping = 2.0f;
     const int sps = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
+
+    // Adaptive loop bandwidth: scale inversely with sps (normalized to sps=20)
+    // Lower sps → wider bandwidth (faster convergence)
+    // Higher sps → narrower bandwidth (better noise rejection)
+    float loop_bw_base = 0.001f;
+    float loop_bw = loop_bw_base * (20.0f / sps);
+
+    // Clamp to safe range
+    if (loop_bw < 0.0002f) loop_bw = 0.0002f;  // Min for sps=100
+    if (loop_bw > 0.005f)  loop_bw = 0.005f;   // Max for sps=4
 
     // Calculate loop filter gains using proper formula
     float k1, k2;
     calculate_loop_gains(loop_bw, damping, &k1, &k2);
 
-    printf("[TIMING] Loop parameters: bw=%.5f, damping=%.2f, sps=%d\n", loop_bw, damping, sps);
+    printf("[TIMING] Loop parameters: bw=%.5f (adaptive), damping=%.2f, sps=%d\n", loop_bw, damping, sps);
     printf("[TIMING] Loop gains: k1=%.6f, k2=%.6f\n", k1, k2);
 
     // Timing state variables
@@ -1554,7 +1808,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
 // =============================================================================
 
 int dsss_demodulate_file(const char *filename, uint8_t *output_bits,
-                         dsss_demod_state_t *state) {
+                         dsss_demod_state_t *state, float manual_sr) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
         fprintf(stderr, "Error: Cannot open file %s\n", filename);
@@ -1588,9 +1842,21 @@ int dsss_demodulate_file(const char *filename, uint8_t *output_bits,
         num_samples = read;
     }
 
-    // Demodulate
+    // Determine sample rate (manual or auto-detect)
+    printf("\n");
+    float sample_rate;
+    if (manual_sr > 0) {
+        printf("Using manual sample rate: %.0f Hz (sps=%.1f)\n",
+               manual_sr, manual_sr / DSSS_CHIP_RATE);
+        sample_rate = manual_sr;
+    } else {
+        printf("Auto-detecting sample rate...\n");
+        sample_rate = dsss_estimate_sample_rate(iq_samples, num_samples);
+    }
+
+    // Demodulate with sample rate
     int result = dsss_demodulate(iq_samples, num_samples, output_bits,
-                                 DSSS_SAMPLE_RATE, state);
+                                 sample_rate, state);
 
     free(iq_samples);
     return result;
