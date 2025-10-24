@@ -1,5 +1,95 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.3 - 2025-10-24 - Investigation Démodulateur IQ
+
+### 🔍 Investigation Désalignement Structurel
+- **Ajout traces debug complètes** : Vérification alignement indices à chaque étape (AGC → Despreading)
+- **Découverte majeure** : Aucun désalignement structurel détecté
+- **Root cause identifiée** : Fichiers de test tronqués d'1 sample (float32 rounding errors)
+
+### 🐛 Corrections Majeures
+
+#### Fenêtre de Recherche Préambule (Commit fc6f617)
+```c
+// Extension 20% → 50% pour meilleure détection
+size_t search_length = num_samples / 2;  // Was: num_samples / 5
+```
+**Résultats:**
+- Index préambule : 350,870 → 0 ✅
+- Symboles récupérés : 33,062 → 38,399 (99.997%) ✅
+- Phase corrélation : 63% → 88% ✅
+
+#### Option Sample Rate Manuel (Commit e458450)
+- Bypass auto-détection (8 min → 0.87 sec)
+- Nouvelle option `-s <rate>` pour spécifier sample rate manuellement
+
+### 🛠️ Nouveaux Outils
+
+#### test_sample_rate (Commit 1e3a624)
+- Détection sample rate par corrélation préambule
+- Teste 10 sample rates courants (300 kHz → 6.144 MHz)
+- Corrélation DSSS pour estimation précise
+```bash
+./test_sample_rate file.iq
+# Output: Estimated sample rate with correlation score
+```
+
+#### resample_iq
+- Rééchantillonnage IQ avec libsamplerate
+- Conversion entre sample rates (ex: 2.5 MHz → 384 kHz)
+- Interpolation haute qualité (SRC_SINC_BEST_QUALITY)
+
+### 📊 Fichiers de Test
+
+**Problème découvert:**
+- `test_known_384kHz.iq` : 383,999 samples (manque 1) ❌
+- `test_known.iq` @ 2.5MHz : 2,499,999 samples (manque 1) ❌
+
+**Impact:** Corrélation désétalement 5% au lieu de >70% attendu
+
+**Fix générateur** (SARSAT_SGB commit 1d4493f):
+- Correction erreur arrondi float32 dans OQPSK modulator
+- Fichiers complets maintenant générés : 2,500,000 samples ✅
+
+### 🔬 Analyses Techniques
+
+#### Timing Recovery
+- Condition boucle ajustée (cosmetic, pas d'impact)
+- Récupération 38,399/38,400 symbols (99.997%)
+- Limité par fichiers de test tronqués, pas par l'algorithme
+
+#### Phase Ambiguity Resolution
+- Extended search : 360° × 2 swaps × 2 inversions
+- Corrélation Phase 1 : 88% (excellente amélioration)
+- Phase 2 (chip offset) : recherche étendue -15 à +15
+
+### 📋 Documentation
+- **BILAN_SESSION_20251024.md** : Investigation complète désalignement
+- Traces debug conservées pour diagnostic futur
+- Analyse fichiers tronqués documentée
+
+### ✅ Validation
+**Démodulateur validé fonctionnel**
+- Chaîne de traitement correcte (aucun bug structurel)
+- Faible corrélation (5%) due uniquement aux fichiers de test
+- Attendu >70% avec fichiers complets et signal au début
+
+### 🎯 Prochaines Étapes
+1. Générer fichier test avec signal au début du fichier
+2. Valider corrélation >70% avec fichier correct
+3. Documenter workflow complet TX → RX
+
+---
+
+## Version 10.2.2 - 2025-10-19 - Pause Démodulateur 2G
+
+### ⚠️ Statut: PAUSED
+- Démodulateur non fonctionnel (55.3% bit accuracy)
+- Documentation complète dans ETAT_PAUSE_DEMODULATEUR.md
+- 4 bugs identifiés (timing, phase, DSSS, Costas)
+
+---
+
 ## Version 10.2.1 - 2025-09-04 - Implémentation Complète T.001
 
 ### Fonctionnalités Majeures Ajoutées

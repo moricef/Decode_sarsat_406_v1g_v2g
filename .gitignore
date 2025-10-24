@@ -1,49 +1,37 @@
-# Executables
+# Binaires compilés
+dec406_iq
+resample_iq
+test_sample_rate
+dec406_main
 dec406
-dec406_hex
-dec406_audio
-generate_2g_frame
-generate_2g_fixed
-generate_2g_hex
-test_2g
-reset_usb
-
-# Object files
 *.o
+*.a
 
-# Temporary files
-code
-trame
-trame.asc
+# Fichiers de test IQ
+*.iq
+*.cfile
+
+# Sorties de test
+demod_*.txt
 *.log
-email.log
 
-# Generated files
-log_power.csv
+# Fichiers temporaires
+*.tmp
+*.bak
+*~
 
-# IDE/Editor files
+# Analyses temporaires
+ANALYSE_*.md
+
+# Node modules (si utilisé)
+node_modules/
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
-
-# Build artifacts
-*.exe
-*.dll
-*.so
-*.dylib
-*.a
-
-# Configuration sensitive (keep template only)
-# config_mail.txt contains credentials - keep example only
-
-# Audio files (too large)
-*.wav
-
-# Documentation PDFs (large)
-*.pdfcsdr_frame_parser
