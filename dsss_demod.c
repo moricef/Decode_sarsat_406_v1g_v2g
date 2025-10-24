@@ -507,8 +507,9 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
             preamble_shifted[i] = preamble_ref[i] * cexpf(I * 2.0f * M_PI * f_offset * t);
         }
 
-        // Correlate with received signal (search first 20% of buffer where preamble should be)
-        size_t search_length = num_samples / 5;  // Search first 20%
+        // Correlate with received signal (search first 50% of buffer where preamble should be)
+        // Extended from 20% to match test_sample_rate.c behavior (which successfully finds preamble)
+        size_t search_length = num_samples / 2;  // Search first 50%
         float max_corr_this_freq = 0.0f;
         int max_idx_this_freq = -1;
 
@@ -1606,8 +1607,8 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
 
     // FIXED: Rewind burst start to capture signal before preamble detection peak
     // Preamble detection finds correlation peak (middle of preamble), not start
-    // Rewind by 200ms to capture actual signal start
-    int rewind_samples = (int)(0.2f * samp_rate);  // 200ms = 500k samples @ 2.5MHz
+    // Rewind by 50ms to capture actual signal start (reduced from 200ms after extending search window)
+    int rewind_samples = (int)(0.05f * samp_rate);  // 50ms = 125k samples @ 2.5MHz
     int burst_start_idx = (preamble_idx > rewind_samples) ? (preamble_idx - rewind_samples) : 0;
 
     // Adjust burst length to include rewinded samples
