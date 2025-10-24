@@ -793,7 +793,9 @@ int dsss_timing_recovery(const float complex *input, float complex *output,
     int debug_print_interval = 5000;     // Print every N symbols
 
     // Main timing recovery loop
-    while (timing_phase < num_samples - sps && symbol_count < 40000) {
+    // Loop until we can't interpolate anymore (need 3 samples after center_idx for cubic)
+    // Previous: timing_phase < num_samples - sps caused early stop (missed last symbol)
+    while (timing_phase < num_samples - 3 && symbol_count < 40000) {
         // Calculate sample index with fractional part
         int center_idx = (int)floorf(timing_phase);
         float mu = timing_phase - floorf(timing_phase);  // Fractional position [0, 1)
@@ -842,6 +844,8 @@ int dsss_timing_recovery(const float complex *input, float complex *output,
     // Final statistics
     printf("[TIMING] Recovery complete: %zu symbols recovered (expected ~38400)\n", symbol_count);
     printf("[TIMING] Final timing phase: %.2f, final NCO freq: %.6f\n", timing_phase, timing_freq);
+    printf("[DEBUG] Timing Recovery: Input samples burst[0 .. %zu] → symbols[0 .. %zu]\n",
+           num_samples - 1, symbol_count - 1);
 
     if (num_symbols) *num_symbols = symbol_count;
     return 0;
@@ -1050,6 +1054,8 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
         chips_i[i] = (crealf(test_sym) >= 0) ? (best_invert ? 1 : 0) : (best_invert ? 0 : 1);
         chips_q[i] = (cimagf(test_sym) >= 0) ? (best_invert ? 1 : 0) : (best_invert ? 0 : 1);
     }
+    printf("[DEBUG] Phase resolution: symbols[0 .. %d] → chips[0 .. %d] (1:1 mapping)\n",
+           test_chips_phase2 - 1, test_chips_phase2 - 1);
 
     // Regenerate PRN for extended test (75 bits instead of 25)
     free(prn_i_signed);
@@ -1447,6 +1453,9 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
     int interleave = state ? state->interleaving : 0;
     int chip_offset = state ? state->chip_offset : -1;
 
+    printf("[DEBUG] Despreading: chips_i/q[0 .. 38399] with offset=%d → bits[0 .. 299]\n",
+           chip_offset);
+
     // Generate I-channel PRN (38400 chips for 150 bits)
     int8_t prn_chunk_signed[DSSS_SPREADING_FACTOR];
     for (int bit = 0; bit < 150; bit++) {
@@ -1567,6 +1576,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
 
     dsss_agc(iq_samples, agc_out, num_samples, &local_state.agc_gain);
     printf("  AGC gain: %.2f\n", local_state.agc_gain);
+    printf("[DEBUG] AGC: Input samples 0-%zu, output aligned 1:1 (no delay)\n", num_samples - 1);
 
     // Step 2: Preamble detection
     printf("Step 2: Preamble detection...\n");
@@ -1584,6 +1594,8 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     local_state.preamble_found = true;
     local_state.preamble_index = preamble_idx;
     local_state.coarse_freq_offset = freq_offset_coarse;
+    printf("[DEBUG] Preamble: Found at AGC index %d (%.3f sec)\n",
+           preamble_idx, (float)preamble_idx / samp_rate);
 
     // Extract burst from detected position
     // We need samples for the entire frame duration
@@ -1620,6 +1632,8 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     printf("  Burst start (rewinded): %d samples before preamble peak\n", preamble_idx - burst_start_idx);
     printf("  Burst length: %zu samples (%.2f sec)\n",
            burst_length, (float)burst_length / samp_rate);
+    printf("[DEBUG] Burst extraction: AGC[%d .. %zu] → burst[0 .. %zu]\n",
+           burst_start_idx, burst_start_idx + burst_length - 1, burst_length - 1);
 
     float complex *burst = &agc_out[burst_start_idx];
 
@@ -1760,6 +1774,8 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         chips_i[i] = (crealf(symbols[i]) >= 0) ? (bit_invert ? 1 : 0) : (bit_invert ? 0 : 1);
         chips_q[i] = (cimagf(symbols[i]) >= 0) ? (bit_invert ? 1 : 0) : (bit_invert ? 0 : 1);
     }
+    printf("[DEBUG] Symbol to chips: symbols[0 .. %zu] → chips_i/q[0 .. %zu] (1:1 mapping)\n",
+           num_symbols - 1, num_symbols - 1);
 
     // =========================================================================
     // DIAGNOSTIC TOOL: Test all despreading parameter combinations
