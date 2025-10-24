@@ -76,8 +76,10 @@ typedef struct {
     float timing_error_std;
 
     // Phase
-    int phase_rotation;             // 0, 1, 2, 3 (0°, 90°, 180°, 270°)
+    int phase_rotation;             // 0, 1, 2, 3 (0°, 90°, 180°, 270°) - legacy
+    float phase_angle_deg;          // Continuous phase angle (0-360°)
     bool iq_swapped;
+    bool bit_invert;                // Bit inversion flag (0/1 convention)
 
     // Quality
     float snr_estimate;             // dB
@@ -246,7 +248,7 @@ int dsss_timing_recovery(const float complex *input,
  * @param iq_swap       Output: I/Q swap flag
  * @return 0 on success, -1 if preamble not found
  */
-int dsss_resolve_phase_ambiguity(const float complex *symbols,
+int dsss_resolve_phase_ambiguity(float complex *symbols,
                                  size_t num_symbols,
                                  int *phase_rot,
                                  bool *iq_swap,
