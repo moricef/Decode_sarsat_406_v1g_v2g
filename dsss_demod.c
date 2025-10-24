@@ -1604,10 +1604,23 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         return -1;
     }
 
+    // FIXED: Rewind burst start to capture signal before preamble detection peak
+    // Preamble detection finds correlation peak (middle of preamble), not start
+    // Rewind by 200ms to capture actual signal start
+    int rewind_samples = (int)(0.2f * samp_rate);  // 200ms = 500k samples @ 2.5MHz
+    int burst_start_idx = (preamble_idx > rewind_samples) ? (preamble_idx - rewind_samples) : 0;
+
+    // Adjust burst length to include rewinded samples
+    burst_length += (preamble_idx - burst_start_idx);
+    if (burst_start_idx + burst_length > num_samples) {
+        burst_length = num_samples - burst_start_idx;
+    }
+
+    printf("  Burst start (rewinded): %d samples before preamble peak\n", preamble_idx - burst_start_idx);
     printf("  Burst length: %zu samples (%.2f sec)\n",
            burst_length, (float)burst_length / samp_rate);
 
-    float complex *burst = &agc_out[preamble_idx];
+    float complex *burst = &agc_out[burst_start_idx];
 
     // Step 3: Coarse frequency correction
     printf("Step 3: Frequency correction (coarse: %.1f Hz)...\n", freq_offset_coarse);
