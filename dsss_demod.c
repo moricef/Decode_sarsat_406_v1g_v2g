@@ -55,6 +55,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <omp.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -577,28 +578,30 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
     int best_idx = -1;
     float best_freq = 0.0f;
 
-    // Enable debug output for first 10 frequencies
+    // Calculate number of frequencies to test
+    const int num_freqs = (int)((2 * DSSS_MAX_DOPPLER) / DSSS_FREQ_SEARCH_STEP) + 1;  // 161
     int debug_count = 0;
-    const int debug_max = 10;
 
-    printf("  Frequency search (testing every %d Hz, range ±%d Hz):\n",
-           DSSS_FREQ_SEARCH_STEP, DSSS_MAX_DOPPLER);
+    printf("  Frequency search (testing %d frequencies every %d Hz, range ±%d Hz):\n",
+           num_freqs, DSSS_FREQ_SEARCH_STEP, DSSS_MAX_DOPPLER);
+    printf("  [OPENMP] Parallelizing frequency search across %d cores...\n", omp_get_max_threads());
 
-    for (float f_offset = -DSSS_MAX_DOPPLER;
-         f_offset <= DSSS_MAX_DOPPLER;
-         f_offset += DSSS_FREQ_SEARCH_STEP) {
+    // Parallelize frequency search - 161 frequencies distributed to all cores
+    #pragma omp parallel for schedule(dynamic, 4)
+    for (int f_idx = 0; f_idx < num_freqs; f_idx++) {
+        float f_offset = -DSSS_MAX_DOPPLER + f_idx * DSSS_FREQ_SEARCH_STEP;
 
-        // Apply frequency offset to reference
+        // Thread-local buffers
         float complex *preamble_shifted = calloc(preamble_length, sizeof(float complex));
         if (!preamble_shifted) continue;
 
+        // Apply frequency offset to reference
         for (int i = 0; i < preamble_length; i++) {
             float t = (float)i / samp_rate;
             preamble_shifted[i] = preamble_ref[i] * cexpf(I * 2.0f * M_PI * f_offset * t);
         }
 
         // Correlate with received signal (search first 50% of buffer where preamble should be)
-        // Extended from 20% to match test_sample_rate.c behavior (which successfully finds preamble)
         size_t search_length = num_samples / 2;  // Search first 50%
         float max_corr_this_freq = 0.0f;
         int max_idx_this_freq = -1;
@@ -614,31 +617,27 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
             }
         }
 
-        // Update global best
-        if (max_corr_this_freq > best_corr) {
-            best_corr = max_corr_this_freq;
-            best_idx = max_idx_this_freq;
-            best_freq = f_offset;
-        }
-
-        // Debug output for interesting frequencies
-        if (debug_count < debug_max ||
-            fabs(f_offset) < 500 ||  // Around 0 Hz
-            max_corr_this_freq > 0.7) {  // High correlation
-            printf("    f=%+7.0f Hz: corr=%.3f at idx=%d%s\n",
-                   f_offset, max_corr_this_freq, max_idx_this_freq,
-                   (max_corr_this_freq == best_corr) ? " ← BEST" : "");
-            debug_count++;
-        }
-
         free(preamble_shifted);
 
-        // Disabled early exit to find true peak
-        // (Re-enable after debugging)
-        // if (best_corr > 0.95f) {
-        //     printf("    (Early exit: excellent correlation %.3f)\n", best_corr);
-        //     break;
-        // }
+        // Thread-safe update of global best
+        #pragma omp critical
+        {
+            if (max_corr_this_freq > best_corr) {
+                best_corr = max_corr_this_freq;
+                best_idx = max_idx_this_freq;
+                best_freq = f_offset;
+            }
+
+            // Debug output for interesting frequencies (limited to avoid spam)
+            if (debug_count < 10 ||
+                fabs(f_offset) < 500 ||  // Around 0 Hz
+                max_corr_this_freq > 0.7) {  // High correlation
+                printf("    f=%+7.0f Hz: corr=%.3f at idx=%d%s\n",
+                       f_offset, max_corr_this_freq, max_idx_this_freq,
+                       (max_corr_this_freq == best_corr) ? " ← BEST" : "");
+                debug_count++;
+            }
+        }
     }
 
     printf("  Completed frequency search: tested %d frequencies\n",
@@ -1041,52 +1040,62 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     bool best_swap = false;
     bool best_invert = false;
 
+    const int total_phase1 = 360 * 2 * 2;  // 1440 combinations
     int progress = 0;
-    int total_phase1 = 360 * 2 * 2;
 
     // Test on first 50 symbols (preamble)
     const int test_symbols = 50;
 
-    for (int angle = 0; angle < 360; angle++) {
-        for (int swap = 0; swap < 2; swap++) {
-            for (int invert = 0; invert < 2; invert++) {
-                float angle_rad = angle * M_PI / 180.0f;
-                float complex rot = cexpf(I * angle_rad);
+    printf("  [OPENMP] Parallelizing Phase 1 (%d combinations) across %d cores...\n",
+           total_phase1, omp_get_max_threads());
 
-                // Test directly on symbols (no despreading)
-                int matches = 0;
-                for (int i = 0; i < test_symbols && i < num_symbols; i++) {
-                    float complex test_sym = symbols[i] * rot;
-                    if (swap) test_sym = cimagf(test_sym) + I * crealf(test_sym);
+    // Parallelize Phase 1 - flatten to single loop
+    #pragma omp parallel for schedule(dynamic, 16)
+    for (int combo = 0; combo < total_phase1; combo++) {
+        // Decode combo into (angle, swap, invert)
+        int invert = combo % 2;
+        int swap = (combo / 2) % 2;
+        int angle = combo / 4;
 
-                    // Convert to bits with inversion applied to CHIPS
-                    uint8_t bit_i = (crealf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
-                    uint8_t bit_q = (cimagf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
+        float angle_rad = angle * M_PI / 180.0f;
+        float complex rot = cexpf(I * angle_rad);
 
-                    // Expected preamble pattern
-                    uint8_t expected_i = (i * 2) % 2;
-                    uint8_t expected_q = (i * 2 + 1) % 2;
+        // Test directly on symbols (no despreading)
+        int matches = 0;
+        for (int i = 0; i < test_symbols && i < num_symbols; i++) {
+            float complex test_sym = symbols[i] * rot;
+            if (swap) test_sym = cimagf(test_sym) + I * crealf(test_sym);
 
-                    if (bit_i == expected_i) matches++;
-                    if (bit_q == expected_q) matches++;
-                }
+            // Convert to bits with inversion applied to CHIPS
+            uint8_t bit_i = (crealf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
+            uint8_t bit_q = (cimagf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
 
-                float corr = (float)matches / (test_symbols * 2);  // 2 bits per symbol
+            // Expected preamble pattern
+            uint8_t expected_i = (i * 2) % 2;
+            uint8_t expected_q = (i * 2 + 1) % 2;
 
-                if (corr > best_phase1_corr) {
-                    best_phase1_corr = corr;
-                    best_angle_deg = (float)angle;
-                    best_swap = (bool)swap;
-                    best_invert = (bool)invert;
-                }
+            if (bit_i == expected_i) matches++;
+            if (bit_q == expected_q) matches++;
+        }
 
-                // Progress indicator
-                progress++;
-                if (progress % 144 == 0) {  // Every 10%
-                    printf("  Progress: %d%% (best: %.1f%%)\r",
-                           (progress * 100) / total_phase1, best_phase1_corr * 100.0f);
-                    fflush(stdout);
-                }
+        float corr = (float)matches / (test_symbols * 2);  // 2 bits per symbol
+
+        // Thread-safe update of best
+        #pragma omp critical
+        {
+            if (corr > best_phase1_corr) {
+                best_phase1_corr = corr;
+                best_angle_deg = (float)angle;
+                best_swap = (bool)swap;
+                best_invert = (bool)invert;
+            }
+
+            // Progress indicator
+            progress++;
+            if (progress % 144 == 0) {  // Every 10%
+                printf("  Progress: %d%% (best: %.1f%%)\r",
+                       (progress * 100) / total_phase1, best_phase1_corr * 100.0f);
+                fflush(stdout);
             }
         }
     }

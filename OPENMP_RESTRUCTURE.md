@@ -1,8 +1,14 @@
-# Restructuration OpenMP pour Phase 2
+# Parallélisation OpenMP complète
 
 **Date:** 2025-10-25
 **Branche:** `feature/openmp-parallel`
-**Fichier:** `dsss_demod.c` lignes 1185-1306
+**Fichiers:** `dsss_demod.c`
+
+## Sections parallélisées
+
+1. **Step 2 - Preamble detection** (lignes 589-640): 161 fréquences
+2. **Phase 1 - Rotation continue** (lignes 1052-1100): 1440 combinaisons
+3. **Phase 2 - Désétalement** (lignes 1227-1300): 248 combinaisons
 
 ## Problème
 
@@ -87,15 +93,19 @@ Done! Processed 248 iterations
 
 ## Performance attendue
 
-- **Avant:** 15-20 minutes (1 thread)
-- **Après:** ~1-2 minutes (16 threads, speedup ~10-15x)
+### Avant (séquentiel - 1 thread)
+- **Step 2 (Preamble):** ~8-10 min (161 fréquences)
+- **Phase 1 (Rotation):** ~30-60 secondes (1440 combos, calculs légers)
+- **Phase 2 (Désétalement):** ~15-20 min (248 combos, calculs lourds)
+- **Total:** ~25-30 minutes
 
-Speedup théorique limité par:
-- Overhead OpenMP (thread creation/sync)
-- Section critique (`#pragma omp critical`)
-- Phase 1 non parallélisée (~10 min)
+### Après (parallèle - 16 threads)
+- **Step 2 (Preamble):** ~30-40 secondes (speedup ~15x)
+- **Phase 1 (Rotation):** ~2-5 secondes (speedup ~15x)
+- **Phase 2 (Désétalement):** ~1-2 minutes (speedup ~12x)
+- **Total:** ~2-3 minutes
 
-**Speedup Phase 2 attendu:** ~12-14x sur 16 cores
+**Speedup global attendu:** ~15-20x sur 16 cores
 
 ## Compilation
 
