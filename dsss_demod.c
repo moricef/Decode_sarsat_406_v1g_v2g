@@ -420,27 +420,45 @@ float dsss_estimate_sample_rate(const float complex *samples, size_t num_samples
 // =============================================================================
 
 /**
- * @brief Generate preamble reference sequence
+ * @brief Generate DSSS preamble reference at chip rate
+ *
+ * Generates 6,400 chips (25 I bits + 25 Q bits × 256 chips/bit)
+ * Preamble pattern: alternating 0,1,0,1,...
+ *
+ * This matches test_sample_rate.c which successfully detects preamble.
+ *
+ * @param preamble_chips Output buffer for chips (6,400 complex chips)
+ * @return 0 on success
  */
-static int generate_preamble_reference(float complex *preamble, int length) {
-    // Generate PRN for preamble
-    prn_state_t prn_state;
-    prn_init(&prn_state, 0);  // Normal mode
+static int generate_preamble_chips(float complex *preamble_chips) {
+    prn_state_t prn_state_i, prn_state_q;
+    prn_init(&prn_state_i, 0);  // Normal mode I-channel
+    prn_init(&prn_state_q, 0);  // Normal mode Q-channel
 
     int8_t prn_i_buf[DSSS_SPREADING_FACTOR];
     int8_t prn_q_buf[DSSS_SPREADING_FACTOR];
 
     int chip_idx = 0;
-    for (int bit = 0; bit < length / (DSSS_SPREADING_FACTOR / 2); bit++) {
-        prn_generate_i(&prn_state, prn_i_buf);
-        prn_generate_q(&prn_state, prn_q_buf);
 
-        // Preamble is alternating 0,1 pattern
-        // For simplicity, use first half of chips for preamble detection
-        for (int c = 0; c < DSSS_SPREADING_FACTOR / 2 && chip_idx < length; c++) {
-            float i_val = (bit % 2 == 0) ? (float)prn_i_buf[c] : -(float)prn_i_buf[c];
-            float q_val = (bit % 2 == 0) ? (float)prn_q_buf[c] : -(float)prn_q_buf[c];
-            preamble[chip_idx++] = (i_val * 2.0f - 1.0f) + I * (q_val * 2.0f - 1.0f);
+    // Generate 25 bits per channel (I and Q = 50 bits total preamble)
+    for (int bit = 0; bit < DSSS_PREAMBLE_LENGTH / 2; bit++) {
+        // Generate PRN sequences for this bit
+        prn_generate_i(&prn_state_i, prn_i_buf);
+        prn_generate_q(&prn_state_q, prn_q_buf);
+
+        // Preamble pattern: alternating 0,1,0,1...
+        // Bit value affects sign of chips
+        int bit_value_i = (bit * 2) % 2;        // Even positions: 0,1,0,1...
+        int bit_value_q = (bit * 2 + 1) % 2;    // Odd positions: 1,0,1,0...
+
+        // Spread each bit across 256 chips
+        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+            // Convert PRN from {0,1} to {-1,+1} considering bit value
+            // Bit 0: keep PRN sign, Bit 1: flip PRN sign
+            float chip_i = (bit_value_i == 0) ? (float)prn_i_buf[c] : -(float)prn_i_buf[c];
+            float chip_q = (bit_value_q == 0) ? (float)prn_q_buf[c] : -(float)prn_q_buf[c];
+
+            preamble_chips[chip_idx++] = chip_i + I * chip_q;
         }
     }
 
@@ -448,15 +466,60 @@ static int generate_preamble_reference(float complex *preamble, int length) {
 }
 
 /**
+ * @brief Upsample preamble chips to match signal sample rate
+ *
+ * Uses zero-order hold (repeat each chip sps times)
+ * This matches test_sample_rate.c upsampling method.
+ *
+ * @param preamble_chips Input chips at chip rate (6,400)
+ * @param num_chips Number of chips (6,400)
+ * @param preamble_samples Output upsampled preamble
+ * @param sps Samples per chip (e.g., 65.1 for 2.5 MHz)
+ * @return Number of output samples
+ */
+static int upsample_preamble(const float complex *preamble_chips, int num_chips,
+                             float complex *preamble_samples, float sps) {
+    int num_samples = (int)(num_chips * sps);
+
+    for (int i = 0; i < num_samples; i++) {
+        int chip_idx = (int)(i / sps);
+        if (chip_idx >= num_chips) chip_idx = num_chips - 1;
+        preamble_samples[i] = preamble_chips[chip_idx];
+    }
+
+    return num_samples;
+}
+
+/**
  * @brief Correlate two signals
+ */
+/**
+ * @brief Compute normalized cross-correlation between two complex signals
+ *
+ * Uses standard complex correlation: |Σ(s1 * conj(s2))| / sqrt(power1 * power2)
+ * This matches test_sample_rate.c normalization.
+ *
+ * @param sig1 First signal
+ * @param sig2 Second signal
+ * @param len Length of both signals
+ * @return Normalized correlation [0.0, 1.0]
  */
 static float correlate_signals(const float complex *sig1, const float complex *sig2,
                                size_t len) {
-    float complex corr = 0.0f;
+    float complex corr_sum = 0.0f;
+    float power1 = 0.0f, power2 = 0.0f;
+
     for (size_t i = 0; i < len; i++) {
-        corr += sig1[i] * conjf(sig2[i]);
+        corr_sum += sig1[i] * conjf(sig2[i]);
+        power1 += cabsf(sig1[i]) * cabsf(sig1[i]);
+        power2 += cabsf(sig2[i]) * cabsf(sig2[i]);
     }
-    return cabsf(corr) / len;
+
+    // Normalized correlation (like test_sample_rate.c)
+    if (power1 > 0 && power2 > 0) {
+        return cabsf(corr_sum) / sqrtf(power1 * power2);
+    }
+    return 0.0f;
 }
 
 int dsss_detect_preamble(const float complex *samples, size_t num_samples,
@@ -464,23 +527,50 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
                          float *freq_offset, float *correlation) {
     // Preamble detection parameters
     const int preamble_offset = 200;  // Skip AGC settling
-    const int preamble_length = 500;   // Longer correlation for better detection
 
-    // Generate reference preamble
+    // Calculate samples per chip (keep as float for accurate preamble length)
+    float sps = samp_rate / DSSS_CHIP_RATE;  // e.g., 65.104166 for 2.5 MHz
+    int sps_int = (int)(sps + 0.5f);         // Rounded for step size
+
+    // Use FULL DSSS preamble for accurate detection (like test_sample_rate)
+    // Preamble: 50 bits = 25 bits I + 25 bits Q
+    // Each bit spread over 256 chips = 6,400 chips total
+    const int num_preamble_chips = (DSSS_PREAMBLE_LENGTH / 2) * DSSS_SPREADING_FACTOR;  // 6,400
+    const int preamble_length = (int)(num_preamble_chips * sps);  // Use float sps for accuracy!
+
+    printf("  Preamble detection: %d chips × %.2f sps = %d samples (was: 500)\n",
+           num_preamble_chips, sps, preamble_length);
+
+    // Generate reference preamble chips at chip rate (like test_sample_rate.c)
+    float complex *preamble_chips = calloc(num_preamble_chips, sizeof(float complex));
+    if (!preamble_chips) return -1;
+
+    generate_preamble_chips(preamble_chips);
+
+    // Upsample QPSK chips to samples (like test_sample_rate.c)
+    float complex *preamble_qpsk = calloc(preamble_length, sizeof(float complex));
+    if (!preamble_qpsk) {
+        free(preamble_chips);
+        return -1;
+    }
+    upsample_preamble(preamble_chips, num_preamble_chips, preamble_qpsk, sps);
+    free(preamble_chips);  // No longer needed
+
+    // Apply OQPSK delay (Tc/2 on Q channel) to reference preamble
+    // This matches test_sample_rate.c which correlates OQPSK signal with OQPSK reference
     float complex *preamble_ref = calloc(preamble_length, sizeof(float complex));
-    if (!preamble_ref) return -1;
-
-    generate_preamble_reference(preamble_ref, preamble_length);
-
-    // Convert OQPSK to QPSK for detection
-    int sps = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
-    float complex *samples_qpsk = calloc(num_samples, sizeof(float complex));
-    if (!samples_qpsk) {
-        free(preamble_ref);
+    if (!preamble_ref) {
+        free(preamble_qpsk);
         return -1;
     }
 
-    oqpsk_to_qpsk(samples, samples_qpsk, num_samples, sps);
+    int delay = (int)(sps / 2.0f);  // Tc/2 delay in samples
+    for (int i = 0; i < preamble_length; i++) {
+        float i_val = crealf(preamble_qpsk[i]);
+        float q_val = (i >= delay) ? cimagf(preamble_qpsk[i - delay]) : 0.0f;
+        preamble_ref[i] = i_val + I * q_val;
+    }
+    free(preamble_qpsk);  // No longer needed
 
     // Search over frequency offsets (±12 kHz for LEO Doppler)
     float best_corr = 0.0f;
@@ -513,8 +603,9 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
         float max_corr_this_freq = 0.0f;
         int max_idx_this_freq = -1;
 
-        for (size_t idx = 0; idx < search_length - preamble_length; idx += sps) {
-            float corr = correlate_signals(&samples_qpsk[idx],
+        for (size_t idx = 0; idx < search_length - preamble_length; idx += sps_int) {
+            // Correlate OQPSK signal with OQPSK reference (like test_sample_rate)
+            float corr = correlate_signals(&samples[idx],
                                           preamble_shifted, preamble_length);
 
             if (corr > max_corr_this_freq) {
@@ -554,7 +645,6 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
            (int)((2 * DSSS_MAX_DOPPLER) / DSSS_FREQ_SEARCH_STEP) + 1);
 
     free(preamble_ref);
-    free(samples_qpsk);
 
     if (best_corr < 0.3f) {
         fprintf(stderr, "Preamble not detected (best corr: %.3f)\n", best_corr);
