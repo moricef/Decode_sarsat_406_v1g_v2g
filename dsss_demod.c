@@ -1110,7 +1110,7 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     // PHASE 2: Extended chip offset search on corrected symbols
     // Testing wider range: -15 to +15 chips (was -5 to +5)
     // Testing more bits: 75 bits per channel (was 25)
-    const int test_bits_phase2 = 75;  // Extended from 25
+    const int test_bits_phase2 = 25;  // Reduced to 25 for fast testing (was 75)
     const int test_chips_phase2 = test_bits_phase2 * DSSS_SPREADING_FACTOR;
 
     printf("[PHASE] Phase 2: Extended chip offset search (-15 to +15, %d bits)...\n", test_bits_phase2 * 2);
@@ -1119,7 +1119,7 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     const int default_chip_conv = 0;  // Real>0 → 0
     const int default_prn_conv = 0;   // -1 → 1, +1 → 0
     const int default_interleave = 0; // I,Q,I,Q
-    const int default_offset = -1;    // From diagnostic
+    const int default_offset = 0;     // Changed from -1 after preamble fix
 
     float best_corr = best_phase1_corr;
     int best_chip_conv = default_chip_conv;
@@ -1199,6 +1199,8 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
             }
 
             for (int interleave = 0; interleave < 2; interleave++) {
+                // Parallelize the offset loop (31 iterations) - perfect for 16 cores
+                #pragma omp parallel for schedule(dynamic)
                 for (int offset = -15; offset <= 15; offset++) {  // EXTENDED RANGE
                     uint8_t despread_bits[test_bits_phase2 * 2];  // I and Q bits
 
@@ -1240,22 +1242,26 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
                     }
                     float corr = (float)matches / total_test_bits;
 
-                    if (corr > best_corr) {
-                        best_corr = corr;
-                        best_chip_conv = chip_conv;
-                        best_prn_conv = prn_conv;
-                        best_interleave = interleave;
-                        best_offset = offset;
-                        printf("[PHASE]   NEW BEST: corr=%.1f%%, chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
-                               corr * 100.0f, chip_conv, prn_conv, interleave, offset);
-                    }
+                    // Thread-safe update of best results
+                    #pragma omp critical
+                    {
+                        if (corr > best_corr) {
+                            best_corr = corr;
+                            best_chip_conv = chip_conv;
+                            best_prn_conv = prn_conv;
+                            best_interleave = interleave;
+                            best_offset = offset;
+                            printf("[PHASE]   NEW BEST: corr=%.1f%%, chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
+                                   corr * 100.0f, chip_conv, prn_conv, interleave, offset);
+                        }
 
-                    // Progress indicator
-                    progress_phase2++;
-                    if (progress_phase2 % 25 == 0) {
-                        printf("  Phase 2 progress: %d%% (best: %.1f%%)\r",
-                               (progress_phase2 * 100) / total_phase2, best_corr * 100.0f);
-                        fflush(stdout);
+                        // Progress indicator
+                        progress_phase2++;
+                        if (progress_phase2 % 25 == 0) {
+                            printf("  Phase 2 progress: %d%% (best: %.1f%%)\r",
+                                   (progress_phase2 * 100) / total_phase2, best_corr * 100.0f);
+                            fflush(stdout);
+                        }
                     }
                 }
             }
@@ -1627,11 +1633,13 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
             output_bits[2 * bit + 1] = bit_i;
         }
 
-        // Track correlation
-        float norm_corr_i = fabsf((float)corr_i - DSSS_SPREADING_FACTOR / 2) /
-                           (DSSS_SPREADING_FACTOR / 2);
-        float norm_corr_q = fabsf((float)corr_q - DSSS_SPREADING_FACTOR / 2) /
-                           (DSSS_SPREADING_FACTOR / 2);
+        // Track correlation (asymmetric metric - penalize inversions)
+        // corr > 128 → positive correlation → (corr - 128) / 128 ∈ [0, 1]
+        // corr < 128 → negative correlation → 0 (bad)
+        float norm_corr_i = fmaxf(0.0f, ((float)corr_i - DSSS_SPREADING_FACTOR / 2) /
+                                        (DSSS_SPREADING_FACTOR / 2));
+        float norm_corr_q = fmaxf(0.0f, ((float)corr_q - DSSS_SPREADING_FACTOR / 2) /
+                                        (DSSS_SPREADING_FACTOR / 2));
         total_corr += (norm_corr_i + norm_corr_q) / 2.0f;
     }
 
