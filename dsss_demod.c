@@ -1147,20 +1147,15 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     printf("[DEBUG] Phase resolution: symbols[0 .. %d] → chips[0 .. %d] (1:1 mapping)\n",
            test_chips_phase2 - 1, test_chips_phase2 - 1);
 
-    // Regenerate PRN for extended test (75 bits instead of 25)
+    // Regenerate PRN for extended test (was prn_i_full/prn_q_full - now using variations)
     free(prn_i_signed);
     free(prn_q_signed);
-    free(prn_i_full);
-    free(prn_q_full);
 
     prn_i_signed = malloc(test_bits_phase2 * DSSS_SPREADING_FACTOR);
     prn_q_signed = malloc(test_bits_phase2 * DSSS_SPREADING_FACTOR);
-    prn_i_full = malloc(test_bits_phase2 * DSSS_SPREADING_FACTOR);
-    prn_q_full = malloc(test_bits_phase2 * DSSS_SPREADING_FACTOR);
 
-    if (!prn_i_signed || !prn_q_signed || !prn_i_full || !prn_q_full) {
+    if (!prn_i_signed || !prn_q_signed) {
         free(prn_i_signed); free(prn_q_signed);
-        free(prn_i_full); free(prn_q_full);
         free(chips_i); free(chips_q);
         return -1;
     }
@@ -1182,90 +1177,127 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
         }
     }
 
-    // Test all despreading parameter combinations with extended range
-    int progress_phase2 = 0;
-    int total_phase2 = 2 * 2 * 2 * 31;  // chip_conv × prn_conv × interleave × offset(-15..+15)
+    // Precalculate all 4 PRN variations (2 chip_conv × 2 prn_conv)
+    // This avoids regenerating PRN in parallel threads
+    uint8_t *prn_variations[4][2];  // [variation][I=0/Q=1]
+    for (int v = 0; v < 4; v++) {
+        prn_variations[v][0] = malloc(test_bits_phase2 * DSSS_SPREADING_FACTOR);
+        prn_variations[v][1] = malloc(test_bits_phase2 * DSSS_SPREADING_FACTOR);
+        if (!prn_variations[v][0] || !prn_variations[v][1]) {
+            fprintf(stderr, "Error: malloc failed for PRN variations\n");
+            for (int i = 0; i < v; i++) {
+                free(prn_variations[i][0]);
+                free(prn_variations[i][1]);
+            }
+            free(chips_i); free(chips_q);
+            free(prn_i_signed); free(prn_q_signed);
+            return -1;
+        }
+    }
 
+    // Generate all 4 variations: v=0(cc0,pc0), v=1(cc0,pc1), v=2(cc1,pc0), v=3(cc1,pc1)
     for (int chip_conv = 0; chip_conv < 2; chip_conv++) {
         for (int prn_conv = 0; prn_conv < 2; prn_conv++) {
-            // Convert PRN based on prn_conv
+            int v = chip_conv * 2 + prn_conv;
             for (int c = 0; c < test_bits_phase2 * DSSS_SPREADING_FACTOR; c++) {
-                prn_i_full[c] = (prn_conv == 0) ?
+                prn_variations[v][0][c] = (prn_conv == 0) ?
                     ((prn_i_signed[c] == -1) ? 1 : 0) :
                     ((prn_i_signed[c] == -1) ? 0 : 1);
-                prn_q_full[c] = (prn_conv == 0) ?
+                prn_variations[v][1][c] = (prn_conv == 0) ?
                     ((prn_q_signed[c] == -1) ? 1 : 0) :
                     ((prn_q_signed[c] == -1) ? 0 : 1);
             }
+        }
+    }
 
-            for (int interleave = 0; interleave < 2; interleave++) {
-                // Parallelize the offset loop (31 iterations) - perfect for 16 cores
-                #pragma omp parallel for schedule(dynamic)
-                for (int offset = -15; offset <= 15; offset++) {  // EXTENDED RANGE
-                    uint8_t despread_bits[test_bits_phase2 * 2];  // I and Q bits
+    // Flatten all loops into single iteration space: 248 combinations
+    // Each combo_id encodes: chip_conv, prn_conv, interleave, offset
+    const int total_phase2 = 2 * 2 * 2 * 31;  // 248 combinations
+    int progress_phase2 = 0;
 
-                    for (int bit = 0; bit < test_bits_phase2; bit++) {
-                        int start_idx = bit * DSSS_SPREADING_FACTOR;
-                        int corr_i = 0, corr_q = 0;
+    printf("[OPENMP] Parallelizing %d combinations across available cores...\n", total_phase2);
 
-                        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
-                            int chip_idx = start_idx + c + offset;
-                            if (chip_idx >= 0 && chip_idx < test_chips_phase2) {
-                                uint8_t recv_chip_i = chip_conv ? (1 - chips_i[chip_idx]) : chips_i[chip_idx];
-                                uint8_t recv_chip_q = chip_conv ? (1 - chips_q[chip_idx]) : chips_q[chip_idx];
+    // Parallelize the flattened loop - 248 iterations distributed to all cores
+    #pragma omp parallel for schedule(dynamic, 4)
+    for (int combo_id = 0; combo_id < total_phase2; combo_id++) {
+        // Decode combo_id into parameters
+        int offset = (combo_id % 31) - 15;             // -15..+15
+        int interleave = (combo_id / 31) % 2;          // 0 or 1
+        int prn_conv = (combo_id / 62) % 2;            // 0 or 1
+        int chip_conv = (combo_id / 124) % 2;          // 0 or 1
 
-                                if (recv_chip_i == prn_i_full[start_idx + c]) corr_i++;
-                                if (recv_chip_q == prn_q_full[start_idx + c]) corr_q++;
-                            }
-                        }
+        // Select appropriate PRN variation
+        int variation = chip_conv * 2 + prn_conv;
+        uint8_t *prn_i = prn_variations[variation][0];
+        uint8_t *prn_q = prn_variations[variation][1];
 
-                        uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
-                        uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+        // Thread-local despread buffer
+        uint8_t despread_bits[test_bits_phase2 * 2];
 
-                        // NOTE: Inversion already applied during symbols→chips conversion
+        // Despread using this parameter combination
+        for (int bit = 0; bit < test_bits_phase2; bit++) {
+            int start_idx = bit * DSSS_SPREADING_FACTOR;
+            int corr_i = 0, corr_q = 0;
 
-                        if (interleave == 0) {
-                            despread_bits[2 * bit] = bit_i;
-                            despread_bits[2 * bit + 1] = bit_q;
-                        } else {
-                            despread_bits[2 * bit] = bit_q;
-                            despread_bits[2 * bit + 1] = bit_i;
-                        }
-                    }
+            for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+                int chip_idx = start_idx + c + offset;
+                if (chip_idx >= 0 && chip_idx < test_chips_phase2) {
+                    uint8_t recv_chip_i = chip_conv ? (1 - chips_i[chip_idx]) : chips_i[chip_idx];
+                    uint8_t recv_chip_q = chip_conv ? (1 - chips_q[chip_idx]) : chips_q[chip_idx];
 
-                    // Compare with expected pattern (alternating 0101...)
-                    int matches = 0;
-                    int total_test_bits = test_bits_phase2 * 2;  // I and Q bits
-                    for (int i = 0; i < total_test_bits; i++) {
-                        uint8_t expected_bit = i % 2;  // Alternating pattern
-                        if (despread_bits[i] == expected_bit) matches++;
-                    }
-                    float corr = (float)matches / total_test_bits;
-
-                    // Thread-safe update of best results
-                    #pragma omp critical
-                    {
-                        if (corr > best_corr) {
-                            best_corr = corr;
-                            best_chip_conv = chip_conv;
-                            best_prn_conv = prn_conv;
-                            best_interleave = interleave;
-                            best_offset = offset;
-                            printf("[PHASE]   NEW BEST: corr=%.1f%%, chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
-                                   corr * 100.0f, chip_conv, prn_conv, interleave, offset);
-                        }
-
-                        // Progress indicator
-                        progress_phase2++;
-                        if (progress_phase2 % 25 == 0) {
-                            printf("  Phase 2 progress: %d%% (best: %.1f%%)\r",
-                                   (progress_phase2 * 100) / total_phase2, best_corr * 100.0f);
-                            fflush(stdout);
-                        }
-                    }
+                    if (recv_chip_i == prn_i[start_idx + c]) corr_i++;
+                    if (recv_chip_q == prn_q[start_idx + c]) corr_q++;
                 }
             }
+
+            uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+            uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+
+            if (interleave == 0) {
+                despread_bits[2 * bit] = bit_i;
+                despread_bits[2 * bit + 1] = bit_q;
+            } else {
+                despread_bits[2 * bit] = bit_q;
+                despread_bits[2 * bit + 1] = bit_i;
+            }
         }
+
+        // Compare with expected pattern (alternating 0101...)
+        int matches = 0;
+        int total_test_bits = test_bits_phase2 * 2;
+        for (int i = 0; i < total_test_bits; i++) {
+            uint8_t expected_bit = i % 2;
+            if (despread_bits[i] == expected_bit) matches++;
+        }
+        float corr = (float)matches / total_test_bits;
+
+        // Thread-safe update of best results
+        #pragma omp critical
+        {
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_chip_conv = chip_conv;
+                best_prn_conv = prn_conv;
+                best_interleave = interleave;
+                best_offset = offset;
+                printf("[PHASE]   NEW BEST: corr=%.1f%%, chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
+                       corr * 100.0f, chip_conv, prn_conv, interleave, offset);
+            }
+
+            // Progress indicator
+            progress_phase2++;
+            if (progress_phase2 % 25 == 0) {
+                printf("  Phase 2 progress: %d%% (best: %.1f%%)\r",
+                       (progress_phase2 * 100) / total_phase2, best_corr * 100.0f);
+                fflush(stdout);
+            }
+        }
+    }
+
+    // Free PRN variations
+    for (int v = 0; v < 4; v++) {
+        free(prn_variations[v][0]);
+        free(prn_variations[v][1]);
     }
     printf("\n");  // Clear progress line
 
