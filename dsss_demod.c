@@ -632,9 +632,8 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
             if (debug_count < 10 ||
                 fabs(f_offset) < 500 ||  // Around 0 Hz
                 max_corr_this_freq > 0.7) {  // High correlation
-                printf("    f=%+7.0f Hz: corr=%.3f at idx=%d%s\n",
-                       f_offset, max_corr_this_freq, max_idx_this_freq,
-                       (max_corr_this_freq == best_corr) ? " ← BEST" : "");
+                printf("    f=%+7.0f Hz: corr=%.3f at idx=%d\n",
+                       f_offset, max_corr_this_freq, max_idx_this_freq);
                 debug_count++;
             }
         }
@@ -972,10 +971,10 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     printf("[PHASE] Fine rotation search for optimal parameters...\n");
     printf("[PHASE] Phase 1: Testing 1440 combinations (360°×2 swaps×2 inversions)...\n");
 
-    // Expected preamble: alternating 0,1,0,1,0,1... (50 bits)
+    // T.018 §2.2.4: Expected preamble = all bits '0' (50 bits)
     uint8_t expected_preamble[DSSS_PREAMBLE_LENGTH];
     for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
-        expected_preamble[i] = i % 2;
+        expected_preamble[i] = 0;  // All preamble bits = 0
     }
 
     // Number of chips for preamble (50 bits × 256 chips/bit = 12,800 chips)
@@ -1368,17 +1367,23 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
  * @param chips_i Input I-channel chips
  * @param chips_q Input Q-channel chips
  * @param num_chips Total number of chips (should be 12,800 for preamble)
+ * @param out_chip_conv Output: best chip convention
+ * @param out_prn_conv  Output: best PRN conversion
+ * @param out_interleave Output: best interleaving
+ * @param out_offset    Output: best chip offset
  * @return Best correlation found (0.0 to 1.0)
  */
 static float dsss_diagnose_despreading(const uint8_t *chips_i, const uint8_t *chips_q,
-                                       size_t num_chips) {
+                                       size_t num_chips,
+                                       int *out_chip_conv, int *out_prn_conv,
+                                       int *out_interleave, int *out_offset) {
     printf("\n[DIAGNOSTIC] Testing DSSS despreading parameters...\n");
     printf("[DIAGNOSTIC] Testing preamble only (%zu chips = 50 bits)\n", num_chips);
 
-    // Expected preamble pattern
+    // Expected preamble pattern (T.018 §2.2.4: all bits '0')
     uint8_t expected[DSSS_PREAMBLE_LENGTH];
     for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
-        expected[i] = i % 2;
+        expected[i] = 0;  // All preamble bits = 0
     }
 
     // Chip offsets to test
@@ -1523,6 +1528,12 @@ static float dsss_diagnose_despreading(const uint8_t *chips_i, const uint8_t *ch
     printf("[DIAGNOSTIC] Chip offset: %+d\n", best_offset);
     printf("[DIAGNOSTIC] ═══════════════════════════════\n\n");
 
+    // Save optimal parameters to output pointers
+    if (out_chip_conv) *out_chip_conv = best_chip_conv;
+    if (out_prn_conv) *out_prn_conv = best_prn_conv;
+    if (out_interleave) *out_interleave = best_interleave;
+    if (out_offset) *out_offset = best_offset;
+
     return best_corr;
 }
 
@@ -1638,10 +1649,14 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
             int chip_idx = start_idx + c + chip_offset;
             if (chip_idx >= 0 && chip_idx < 38400) {
-                // Apply chip convention
-                uint8_t recv_chip = chip_conv ? (1 - chips_i[chip_idx]) : chips_i[chip_idx];
-                if (recv_chip == prn_i_full[start_idx + c]) {
-                    corr_i++;
+                uint8_t rx_chip_i = chips_i[chip_idx];
+                uint8_t ref_i = prn_i_full[start_idx + c];
+
+                // Apply chip convention (same logic as diagnostic)
+                if (chip_conv == 0) {
+                    if (rx_chip_i == ref_i) corr_i++;
+                } else {
+                    if (rx_chip_i != ref_i) corr_i++;
                 }
             }
         }
@@ -1651,10 +1666,14 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
             int chip_idx = start_idx + c + chip_offset;
             if (chip_idx >= 0 && chip_idx < 38400) {
-                // Apply chip convention
-                uint8_t recv_chip = chip_conv ? (1 - chips_q[chip_idx]) : chips_q[chip_idx];
-                if (recv_chip == prn_q_full[start_idx + c]) {
-                    corr_q++;
+                uint8_t rx_chip_q = chips_q[chip_idx];
+                uint8_t ref_q = prn_q_full[start_idx + c];
+
+                // Apply chip convention (same logic as diagnostic)
+                if (chip_conv == 0) {
+                    if (rx_chip_q == ref_q) corr_q++;
+                } else {
+                    if (rx_chip_q != ref_q) corr_q++;
                 }
             }
         }
@@ -1698,7 +1717,7 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
 
 int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
                     uint8_t *output_bits, float samp_rate,
-                    dsss_demod_state_t *state) {
+                    dsss_demod_state_t *state, float forced_freq) {
 
     if (!iq_samples || !output_bits) {
         fprintf(stderr, "Error: NULL input\n");
@@ -1717,17 +1736,30 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     printf("  AGC gain: %.2f\n", local_state.agc_gain);
     printf("[DEBUG] AGC: Input samples 0-%zu, output aligned 1:1 (no delay)\n", num_samples - 1);
 
-    // Step 2: Preamble detection
+    // Step 2: Preamble detection (skip if frequency is forced)
     printf("Step 2: Preamble detection...\n");
     int preamble_idx;
     float freq_offset_coarse;
 
-    if (dsss_detect_preamble(agc_out, num_samples, samp_rate,
-                            &preamble_idx, &freq_offset_coarse,
-                            &local_state.correlation_peak) < 0) {
-        free(agc_out);
-        if (state) *state = local_state;
-        return -2;
+    if (!isnan(forced_freq)) {
+        // Skip frequency search, use forced offset
+        printf("  Using forced frequency offset: %.1f Hz (skipping search)\n", forced_freq);
+        freq_offset_coarse = forced_freq;
+
+        // Still need to find preamble position, but only at forced frequency
+        // For now, use a simplified detection at f=0
+        // TODO: Implement single-frequency preamble detection
+        preamble_idx = 0;  // Assume signal starts at beginning
+        local_state.correlation_peak = 1.0f;  // Placeholder
+    } else {
+        // Normal frequency search
+        if (dsss_detect_preamble(agc_out, num_samples, samp_rate,
+                                &preamble_idx, &freq_offset_coarse,
+                                &local_state.correlation_peak) < 0) {
+            free(agc_out);
+            if (state) *state = local_state;
+            return -2;
+        }
     }
 
     local_state.preamble_found = true;
@@ -1922,7 +1954,17 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     // Run diagnostic on preamble (50 bits = 12,800 chips) to find optimal params
     const size_t preamble_chips = DSSS_PREAMBLE_LENGTH * DSSS_SPREADING_FACTOR;
     if (num_symbols >= preamble_chips) {
-        float diag_corr = dsss_diagnose_despreading(chips_i, chips_q, preamble_chips);
+        int best_chip_conv, best_prn_conv, best_interleave, best_offset;
+        float diag_corr = dsss_diagnose_despreading(chips_i, chips_q, preamble_chips,
+                                                     &best_chip_conv, &best_prn_conv,
+                                                     &best_interleave, &best_offset);
+
+        // Save optimal parameters to state for use in despreading
+        local_state.chip_convention = best_chip_conv;
+        local_state.prn_conversion = best_prn_conv;
+        local_state.interleaving = best_interleave;
+        local_state.chip_offset = best_offset;
+
         if (diag_corr < 0.7f) {
             fprintf(stderr, "Warning: Diagnostic found no good parameters (best=%.1f%%)\n",
                     diag_corr * 100.0f);
@@ -1977,7 +2019,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
 // =============================================================================
 
 int dsss_demodulate_file(const char *filename, uint8_t *output_bits,
-                         dsss_demod_state_t *state, float manual_sr) {
+                         dsss_demod_state_t *state, float manual_sr, float forced_freq) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) {
         fprintf(stderr, "Error: Cannot open file %s\n", filename);
@@ -2023,9 +2065,9 @@ int dsss_demodulate_file(const char *filename, uint8_t *output_bits,
         sample_rate = dsss_estimate_sample_rate(iq_samples, num_samples);
     }
 
-    // Demodulate with sample rate
+    // Demodulate with sample rate and forced frequency offset
     int result = dsss_demodulate(iq_samples, num_samples, output_bits,
-                                 sample_rate, state);
+                                 sample_rate, state, forced_freq);
 
     free(iq_samples);
     return result;

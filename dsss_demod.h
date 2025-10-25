@@ -51,7 +51,7 @@
 #define DSSS_PAYLOAD_LENGTH     250         // 250 bits payload (202 data + 48 BCH)
 #define DSSS_TOTAL_BITS         300         // Total frame length
 
-#define DSSS_MAX_DOPPLER        12000       // ±12 kHz max frequency offset
+#define DSSS_MAX_DOPPLER        750         // ±750 Hz (phase dev, PlutoSDR+osc.ext, tests sol)
 #define DSSS_FREQ_SEARCH_STEP   150         // 150 Hz frequency search step
 
 // =============================================================================
@@ -119,13 +119,15 @@ typedef struct {
  * @param output_bits   Output 300-bit array (preallocated)
  * @param samp_rate     Sample rate in Hz (default: 2.5 MHz)
  * @param state         Output state structure (can be NULL)
+ * @param forced_freq   Forced frequency offset in Hz (NAN = auto-search)
  * @return 0 on success, -1 on error, -2 if preamble not found
  */
 int dsss_demodulate(const float complex *iq_samples,
                     size_t num_samples,
                     uint8_t *output_bits,
                     float samp_rate,
-                    dsss_demod_state_t *state);
+                    dsss_demod_state_t *state,
+                    float forced_freq);
 
 /**
  * @brief Load IQ file and demodulate
@@ -138,12 +140,14 @@ int dsss_demodulate(const float complex *iq_samples,
  * @param output_bits   Output 300-bit array (preallocated)
  * @param state         Output state structure (can be NULL)
  * @param manual_sr     Manual sample rate (0 = auto-detect)
+ * @param forced_freq   Forced frequency offset in Hz (NAN = auto-search)
  * @return 0 on success, -1 on error, -2 if preamble not found
  */
 int dsss_demodulate_file(const char *filename,
                          uint8_t *output_bits,
                          dsss_demod_state_t *state,
-                         float manual_sr);
+                         float manual_sr,
+                         float forced_freq);
 
 /**
  * @brief Print demodulator state and statistics

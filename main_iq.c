@@ -40,11 +40,15 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include "dsss_demod.h"
 #include "prn_generator.h"
 
-// Forward declaration of existing decoder
-void decode_beacon(const uint8_t *bits, int length);
+// Stub for decode_beacon (to be implemented)
+void decode_beacon(const uint8_t *bits, int length) {
+    printf("[INFO] decode_beacon() stub: would decode %d bits\n", length);
+    // TODO: Implement full BCH decoder and message parser
+}
 
 // =============================================================================
 // MAIN PROGRAM
@@ -56,9 +60,10 @@ void decode_beacon(const uint8_t *bits, int length);
 static void print_usage(const char *progname) {
     printf("COSPAS-SARSAT 2G IQ Demodulator\n");
     printf("================================\n\n");
-    printf("Usage: %s <filename.iq|filename.cfile> [-s sample_rate]\n\n", progname);
+    printf("Usage: %s <filename.iq|filename.cfile> [-s sample_rate] [-f freq_offset]\n\n", progname);
     printf("Options:\n");
-    printf("  -s <rate>  Specify sample rate in Hz (skip auto-detection)\n\n");
+    printf("  -s <rate>  Specify sample rate in Hz (skip auto-detection)\n");
+    printf("  -f <freq>  Force frequency offset in Hz (skip search, use 0 for synthetic signals)\n\n");
     printf("Supported formats:\n");
     printf("  .iq     - Raw complex float32 (interleaved I/Q)\n");
     printf("  .cfile  - GNU Radio complex float format\n\n");
@@ -95,15 +100,15 @@ static void print_bits_hex(const uint8_t *bits, int length) {
  */
 static void print_preamble_analysis(const uint8_t *bits) {
     printf("\n[DEBUG] Preamble Analysis (50 bits):\n");
-    printf("Expected: 01010101... (alternating)\n");
+    printf("Expected: 0000000000... (T.018 §2.2.4: all bits '0')\n");
     printf("Received: ");
 
     int errors = 0;
     for (int i = 0; i < 50; i++) {
         printf("%d", bits[i]);
 
-        // Check alternating pattern (bit 0 = 0, bit 1 = 1, bit 2 = 0, ...)
-        uint8_t expected = i % 2;
+        // T.018 §2.2.4: All preamble bits should be '0'
+        uint8_t expected = 0;
         if (bits[i] != expected) {
             errors++;
         }
@@ -121,8 +126,9 @@ int main(int argc, char *argv[]) {
     // Parse arguments
     const char *filename = NULL;
     float manual_sample_rate = 0.0f;  // 0 = auto-detect
+    float forced_freq_offset = NAN;   // NAN = auto-search
 
-    if (argc < 2 || argc > 4) {
+    if (argc < 2 || argc > 6) {
         print_usage(argv[0]);
         return 1;
     }
@@ -138,6 +144,14 @@ int main(int argc, char *argv[]) {
                 }
             } else {
                 fprintf(stderr, "Error: -s requires sample rate argument\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-f") == 0) {
+            if (i + 1 < argc) {
+                forced_freq_offset = atof(argv[++i]);
+            } else {
+                fprintf(stderr, "Error: -f requires frequency offset argument\n");
                 print_usage(argv[0]);
                 return 1;
             }
@@ -194,7 +208,7 @@ int main(int argc, char *argv[]) {
     printf("\n");
     printf("=== DEMODULATION PROCESS ===\n");
 
-    int ret = dsss_demodulate_file(filename, output_bits, &state, manual_sample_rate);
+    int ret = dsss_demodulate_file(filename, output_bits, &state, manual_sample_rate, forced_freq_offset);
 
     if (ret == -2) {
         fprintf(stderr, "\n❌ DEMODULATION FAILED: Preamble not found\n");
