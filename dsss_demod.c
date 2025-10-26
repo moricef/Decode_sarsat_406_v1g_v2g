@@ -231,16 +231,26 @@ static int upsample_preamble_for_corr(const float complex *preamble_chips, int n
 }
 
 /**
- * @brief Apply OQPSK Tc/2 delay to preamble
+ * @brief Apply OQPSK Tc/2 compensation to preamble (QPSK conversion)
+ *
+ * CORRECTED: Advances Q by Tc/2 to compensate TX delay (consistent with oqpsk_to_qpsk)
+ * TX sends: I(t) + j·Q(t - Tc/2)
+ * RX creates: I(t) + j·Q(t) for correlation
  */
 static void apply_oqpsk_delay_for_corr(const float complex *preamble, float complex *output,
                                        int num_samples, float sps) {
     int delay = (int)(sps / 2.0f);
 
-    for (int i = 0; i < num_samples; i++) {
+    for (int i = 0; i < num_samples - delay; i++) {
         float i_val = crealf(preamble[i]);
-        float q_val = (i >= delay) ? cimagf(preamble[i - delay]) : 0.0f;
+        // FIXED: Advance Q instead of delaying (consistent with oqpsk_to_qpsk)
+        float q_val = cimagf(preamble[i + delay]);  // Q(t + Tc/2) to compensate TX Q(t - Tc/2)
         output[i] = i_val + I * q_val;
+    }
+
+    // Fill remaining samples with zeros
+    for (int i = num_samples - delay; i < num_samples; i++) {
+        output[i] = 0.0f;
     }
 }
 
@@ -1042,8 +1052,9 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     const int total_phase1 = 360 * 2 * 2;  // 1440 combinations
     int progress = 0;
 
-    // Test on first 50 symbols (preamble)
-    const int test_symbols = 50;
+    // Test on first 50 bits = 12,800 chips (preamble)
+    // T.018: 50 bits × 256 chips/bit = 12,800 chips total
+    const int test_symbols = DSSS_PREAMBLE_LENGTH * DSSS_SPREADING_FACTOR;  // 12,800
 
     printf("  [OPENMP] Parallelizing Phase 1 (%d combinations) across %d cores...\n",
            total_phase1, omp_get_max_threads());
@@ -1069,9 +1080,9 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
             uint8_t bit_i = (crealf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
             uint8_t bit_q = (cimagf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
 
-            // Expected preamble pattern
-            uint8_t expected_i = (i * 2) % 2;
-            uint8_t expected_q = (i * 2 + 1) % 2;
+            // T.018 §2.2.4: Preamble = all bits '0' (both I and Q channels)
+            uint8_t expected_i = 0;
+            uint8_t expected_q = 0;
 
             if (bit_i == expected_i) matches++;
             if (bit_q == expected_q) matches++;
@@ -1603,6 +1614,8 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
 
     printf("[DEBUG] Despreading: chips_i/q[0 .. 38399] with offset=%d → bits[0 .. 299]\n",
            chip_offset);
+    printf("[DEBUG] Despread params: chip_conv=%d, prn_conv=%d, interleave=%d, offset=%d\n",
+           chip_conv, prn_conv, interleave, chip_offset);
 
     // Generate I-channel PRN (38400 chips for 150 bits)
     int8_t prn_chunk_signed[DSSS_SPREADING_FACTOR];
