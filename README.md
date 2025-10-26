@@ -22,7 +22,8 @@ Decoder for COSPAS-SARSAT 1st and 2nd generation emergency beacons (406 MHz).
 - **Position**: High-precision GPS (3.4m resolution)
 - **Advanced Features**: RLS Type 1/2/3, Two-Way Communication, G.008 Objective Requirements
 
-**Latest Update (2025-10-17)**: Fixed BCH verification algorithm to full T.018 compliance.
+**Latest Update (2025-10-26)**: Critical fix - Phase 1 ambiguity resolution (3 major bugs corrected).
+**Previous Update (2025-10-17)**: Fixed BCH verification algorithm to full T.018 compliance.
 
 ---
 
@@ -199,6 +200,34 @@ dec406_v10.2/
 ---
 
 ## Recent Changes
+
+### 2025-10-26: Phase 1 Ambiguity Resolution - Critical Fix (3 Bugs)
+**Commit**: 29a0661
+
+**Bug #1 - Incorrect Preamble Pattern**:
+- Phase 1 was testing Q channel against all 1s instead of all 0s (T.018 §2.2.4)
+- Impact: Wrong pattern caused 38% errors on preamble decoding
+- Fix: Both I and Q channels now correctly expect all 0s
+
+**Bug #2 - Insufficient Test Sample Size**:
+- Phase 1 tested only 50 chips instead of 12,800 (0.4% of preamble!)
+- Impact: False 89% correlation on tiny sample, wrong parameter selection
+- Fix: Now tests full preamble (50 bits × 256 chips/bit = 12,800 chips)
+
+**Bug #3 - OQPSK Tc/2 Delay Inconsistency**:
+- `apply_oqpsk_delay_for_corr` delayed Q instead of advancing it
+- Impact: Inconsistent with `oqpsk_to_qpsk`, caused correlation errors
+- Fix: Both functions now consistently compensate TX OQPSK delay
+
+**Results**:
+- Diagnostic correlation improved from 62% → 68%
+- Phase detection now realistic: 50.6% on full preamble (was false 89%)
+- Parameter consistency achieved between all demod stages
+- **Remaining issue**: Despread still shows 3.2% avg (investigation ongoing)
+
+**Details**: See `Docs/DEBUGGING_SESSION_2025-10-26.md`
+
+---
 
 ### 2025-10-17: BCH Algorithm Fix
 **Problem**: False BCH errors reported on valid frames from hardware beacons.
