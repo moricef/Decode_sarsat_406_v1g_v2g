@@ -1,0 +1,137 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           SESSION DE DEBUGGING dec406 - 26 OCTOBRE 2025                      ║
+║                  RÉSUMÉ EXÉCUTIF POUR L'UTILISATEUR                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+🎯 OBJECTIF DE LA SESSION
+─────────────────────────
+Résoudre le problème de corrélation très faible (2.5%) dans le décodeur dec406
+malgré un signal IQ correctement généré par SARSAT_SGB.
+
+🔴 3 BUGS CRITIQUES DÉCOUVERTS ET CORRIGÉS
+───────────────────────────────────────────
+
+1️⃣  BUG #1: Pattern de préambule incorrect (Phase 1)
+   📍 Ligne 1083-1084 de dsss_demod.c
+   ❌ Avant: expected_q = (i*2+1)%2 → [1,1,1,1,...] (FAUX!)
+   ✅ Après: expected_q = 0 (conforme T.018 §2.2.4)
+   📊 Impact: +6% corrélation diagnostic (62% → 68%)
+   🎓 Découvert par: Votre analyse comparant avec spécification T.018
+
+2️⃣  BUG #2: Phase 1 teste seulement 50 chips au lieu de 12,800
+   📍 Ligne 1056 de dsss_demod.c
+   ❌ Avant: test_symbols = 50 (0.4% du préambule!)
+   ✅ Après: test_symbols = 12,800 (50 bits × 256 chips/bit)
+   📊 Impact: Corrélation Phase 1 passe de 89% (fausse) → 50.6% (réaliste)
+   🎓 Découvert par: Analyse après résultats incohérents
+
+3️⃣  BUG #3: Incohérence OQPSK Tc/2 delay
+   📍 Lignes 236-255 de dsss_demod.c
+   ❌ Avant: apply_oqpsk_delay_for_corr RETARDAIT Q (contradictoire)
+   ✅ Après: AVANCE Q de Tc/2 (cohérent avec oqpsk_to_qpsk)
+   📊 Impact: Cohérence entre toutes les fonctions RX OQPSK
+   🎓 Découvert par: Votre analyse comparant deux fonctions
+
+📈 RÉSULTATS COMPARATIFS
+────────────────────────
+
+AVANT CORRECTIONS:
+┌──────────────┬──────────┬────────────────────────────────────┐
+│ Étape        │ Corr.    │ Paramètres                         │
+├──────────────┼──────────┼────────────────────────────────────┤
+│ Phase 1      │ 89.0%    │ angle=133°, swap=0, invert=1       │
+│              │          │ (FAUX - 50 chips seulement!)       │
+├──────────────┼──────────┼────────────────────────────────────┤
+│ Diagnostic   │ 62.0%    │ prn_conv=1, offset=-2              │
+├──────────────┼──────────┼────────────────────────────────────┤
+│ Despread     │  2.5%    │ Paramètres incohérents             │
+└──────────────┴──────────┴────────────────────────────────────┘
+
+APRÈS CORRECTIONS:
+┌──────────────┬──────────┬────────────────────────────────────┐
+│ Étape        │ Corr.    │ Paramètres                         │
+├──────────────┼──────────┼────────────────────────────────────┤
+│ Phase 1      │ 50.6%    │ angle=46°, swap=0, invert=1        │
+│              │          │ (RÉALISTE - 12,800 chips complets) │
+├──────────────┼──────────┼────────────────────────────────────┤
+│ Diagnostic   │ 68.0%    │ prn_conv=0, offset=+5              │
+│              │  (+6%)   │                                    │
+├──────────────┼──────────┼────────────────────────────────────┤
+│ Despread     │  3.2%    │ Paramètres cohérents maintenant    │
+│              │ (+0.7%)  │                                    │
+└──────────────┴──────────┴────────────────────────────────────┘
+
+✅ AMÉLIORATIONS CONFIRMÉES
+────────────────────────────
+• Phase détectée : 133° → 46° (proche de 45° théorique OQPSK)
+• Détection invert=1 maintenant correcte
+• Diagnostic +6% corrélation (62% → 68%)
+• Cohérence paramètres entre toutes les étapes ✓
+
+⚠️  PROBLÈME RESTANT
+─────────────────────
+Écart diagnostic vs despread: 68% → 3.2%
+
+ANALYSE:
+• Préambule (50 bits): 68% corrélation ✅
+• Information+BCH (250 bits): ~0% corrélation ❌
+• Moyenne attendue: (50×0.68 + 250×0)/300 = 11.3%
+• Moyenne observée: 3.2% (encore plus bas!)
+
+HYPOTHÈSES:
+1. Métrique de corrélation asymétrique (fmaxf penalise <50%)
+2. Dérive de synchronisation après préambule
+3. PRN sequence drift TX vs RX
+4. SNR 1.5 dB reste anormalement bas (devrait être 10-15 dB)
+
+📁 FICHIERS MODIFIÉS
+────────────────────
+• dsss_demod.c (3 bugs corrigés + debug traces)
+
+📝 COMMITS CRÉÉS
+─────────────────
+1️⃣  29a0661 - CRITICAL FIX: Correct Phase 1 ambiguity resolution (3 major bugs)
+2️⃣  925961d - docs: Add detailed debugging session report (26 Oct 2025)
+3️⃣  2b66b74 - docs: Update README with Phase 1 fix summary
+
+📚 DOCUMENTATION CRÉÉE
+──────────────────────
+• Docs/DEBUGGING_SESSION_2025-10-26.md (rapport complet 272 lignes)
+• README.md section "Recent Changes" mise à jour
+
+🔄 PROCHAINES ÉTAPES RECOMMANDÉES
+──────────────────────────────────
+
+COURT TERME:
+1. Ajouter trace corrélation bit-par-bit pour identifier où elle chute
+2. Comparer PRN généré TX vs RX sur les 64 premiers chips
+3. Investiguer pourquoi SNR reste à 1.5 dB
+
+MOYEN TERME:
+4. Vérifier si timing recovery maintient synchro sur 300 bits
+5. Tester avec signal simulé idéal (sans bruit, sans dérive)
+
+LONG TERME:
+6. Implémenter tracking phase/timing continu (pas juste préambule)
+7. Améliorer métrique corrélation (weighted average)
+8. Visualisation constellation I/Q à différents points
+
+🎓 LEÇONS APPRISES
+──────────────────
+1. Toujours tester sur échantillon COMPLET (pas 0.4%!)
+2. Vérifier cohérence entre fonctions similaires
+3. Valider contre spécification officielle
+4. Méfiance envers les "bons" résultats (89% était faux)
+
+⏱️  STATISTIQUES SESSION
+─────────────────────────
+• Durée: ~3 heures
+• Bugs corrigés: 3 critiques
+• Commits: 3
+• Documentation: 2 fichiers
+• Amélioration: +6% corrélation diagnostic
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ STATUT: Bugs critiques corrigés ✅                                           ║
+║ Investigation problème corrélation finale en cours 🔄                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
