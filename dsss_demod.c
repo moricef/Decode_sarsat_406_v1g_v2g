@@ -1178,6 +1178,144 @@ void validate_cubic_interpolation() {
 }
 
 // =============================================================================
+// OQPSK TIMING RECOVERY
+// =============================================================================
+
+/**
+ * @brief OQPSK symbol timing recovery with integrated Tc/2 compensation
+ *
+ * Performs symbol timing recovery on an OQPSK signal where the Q channel
+ * is delayed by Tc/2 relative to the I channel. The function compensates
+ * for this offset internally and outputs aligned QPSK symbols.
+ *
+ * Algorithm:
+ * 1. Compensate Q channel Tc/2 delay by advancing Q by Tc/2 samples
+ * 2. Apply Gardner timing error detector on QPSK-equivalent signal
+ * 3. Extract symbols at chip rate using cubic interpolation
+ *
+ * Loop parameters:
+ * - Normalized loop bandwidth: 0.001
+ * - Damping factor: 2.0
+ * - Detector gain: 4 (implicit in Gardner TED)
+ */
+int dsss_timing_recovery_oqpsk(const float complex *oqpsk_in,
+                               float complex *qpsk_out,
+                               size_t num_samples,
+                               size_t *num_symbols,
+                               float samp_rate) {
+
+    // Timing loop parameters
+    const float normalized_loop_bw = 0.001f;
+    const float damping = 2.0f;
+
+    float samples_per_chip = samp_rate / DSSS_CHIP_RATE;
+    int sps = (int)(samples_per_chip + 0.5f);
+    float phase_increment = samples_per_chip;
+
+    // Calculate PLL gains
+    float k1, k2;
+    calculate_symbol_sync_gains(normalized_loop_bw, damping, &k1, &k2);
+
+    printf("[TIMING OQPSK] Starting timing recovery\n");
+    printf("[TIMING OQPSK] Parameters: bw=%.6f, damping=%.2f, sps=%d\n",
+           normalized_loop_bw, damping, sps);
+    printf("[TIMING OQPSK] Phase increment=%.8f (samples/chip)\n", phase_increment);
+    printf("[TIMING OQPSK] Gains: k1=%.8f, k2=%.8f\n", k1, k2);
+
+    // =========================================================================
+    // Step 1: Compensate OQPSK Tc/2 delay
+    // =========================================================================
+    // Input OQPSK signal has Q delayed by Tc/2 relative to I
+    // Advance Q by Tc/2 samples to create aligned QPSK-equivalent signal
+
+    int q_delay_samples = sps / 2;  // Tc/2 in samples
+
+    float complex *qpsk_equiv = calloc(num_samples, sizeof(float complex));
+    if (!qpsk_equiv) {
+        fprintf(stderr, "[TIMING OQPSK] Erreur allocation mémoire\n");
+        return -1;
+    }
+
+    // Create QPSK-equivalent signal: I(t) + j*Q(t) with Q advanced by Tc/2
+    for (size_t i = 0; i < num_samples; i++) {
+        float i_val = crealf(oqpsk_in[i]);
+        float q_val = (i + q_delay_samples < num_samples) ?
+                      cimagf(oqpsk_in[i + q_delay_samples]) : 0.0f;
+        qpsk_equiv[i] = i_val + I * q_val;
+    }
+
+    printf("[TIMING OQPSK] Q channel advanced by %d samples (Tc/2)\n", q_delay_samples);
+
+    // =========================================================================
+    // Step 2: Gardner timing error detector
+    // =========================================================================
+
+    float timing_phase = 1.0f;
+    float timing_freq = 0.0f;
+    size_t symbol_count = 0;
+
+    float complex prev_prev_sym = 0.0f;
+    float complex prev_sym = 0.0f;
+
+    while (timing_phase < num_samples - 4 && symbol_count < 38400) {
+
+        // Cubic interpolation for fractional sample timing
+        int center_idx = (int)floorf(timing_phase);
+        float mu = timing_phase - center_idx;
+
+        if (center_idx < 1 || center_idx + 2 >= (int)num_samples) {
+            break;
+        }
+
+        float complex symbol = interpolate_cubic(qpsk_equiv, mu, center_idx, num_samples);
+        qpsk_out[symbol_count] = symbol;
+
+        if (symbol_count < 5) {
+            printf("[TIMING OQPSK] symbol[%zu]: idx=%d phase=%.3f → %.3f+j%.3f\n",
+                   symbol_count, center_idx, timing_phase,
+                   crealf(symbol), cimagf(symbol));
+        }
+
+        // Apply Gardner TED every 2 symbols
+        if (symbol_count >= 2 && symbol_count % 2 == 0) {
+            float error_i = crealf(prev_sym) * (crealf(symbol) - crealf(prev_prev_sym));
+            float error_q = cimagf(prev_sym) * (cimagf(symbol) - cimagf(prev_prev_sym));
+            float timing_error = error_i + error_q;
+
+            // Update timing loop filter
+            timing_freq += k2 * timing_error;
+            timing_phase += phase_increment + timing_freq + k1 * timing_error;
+
+            if (symbol_count < 10) {
+                printf("[TIMING OQPSK]   TED: error=%.6f freq=%.6f\n",
+                       timing_error, timing_freq);
+            }
+        } else {
+            timing_phase += phase_increment + timing_freq;
+        }
+
+        // Update symbol history
+        prev_prev_sym = prev_sym;
+        prev_sym = symbol;
+        symbol_count++;
+    }
+
+    free(qpsk_equiv);
+
+    *num_symbols = symbol_count;
+
+    printf("[TIMING OQPSK] Recovered %zu QPSK symbols (expected: 38400)\n", symbol_count);
+    printf("[TIMING OQPSK] Success rate: %.1f%%\n", 100.0f * symbol_count / 38400.0f);
+
+    if (symbol_count < 30000) {
+        fprintf(stderr, "[TIMING OQPSK] ERROR: Insufficient symbols recovered\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+// =============================================================================
 // PHASE AMBIGUITY RESOLUTION
 // =============================================================================
 

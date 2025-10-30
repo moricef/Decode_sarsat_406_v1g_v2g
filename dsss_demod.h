@@ -261,6 +261,31 @@ int dsss_timing_recovery(const float complex *input,
                          float samp_rate);
 
 /**
+ * @brief OQPSK symbol timing recovery
+ *
+ * Performs timing recovery on OQPSK signal and outputs QPSK symbols.
+ * The function compensates for the Tc/2 offset between I and Q channels
+ * during the timing recovery process.
+ *
+ * Processing steps:
+ * 1. Compensates Q channel Tc/2 delay to create QPSK-equivalent signal
+ * 2. Applies Gardner timing error detector
+ * 3. Outputs symbol-rate QPSK samples (1 symbol per chip)
+ *
+ * @param oqpsk_in      Input OQPSK samples (oversampled)
+ * @param qpsk_out      Output QPSK symbols at chip rate
+ * @param num_samples   Input sample count
+ * @param num_symbols   Output: number of QPSK symbols recovered
+ * @param samp_rate     Sample rate (Hz)
+ * @return 0 on success, -1 on error
+ */
+int dsss_timing_recovery_oqpsk(const float complex *oqpsk_in,
+                               float complex *qpsk_out,
+                               size_t num_samples,
+                               size_t *num_symbols,
+                               float samp_rate);
+
+/**
  * @brief Resolve phase ambiguity using preamble
  *
  * Tests 4 rotations × 2 I/Q swaps = 8 combinations
