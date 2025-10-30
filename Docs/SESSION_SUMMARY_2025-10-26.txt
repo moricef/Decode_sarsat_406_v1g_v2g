@@ -132,6 +132,6 @@ LONG TERME:
 • Amélioration: +6% corrélation diagnostic
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║ STATUT: Bugs critiques corrigés ✅                                           ║
-║ Investigation problème corrélation finale en cours 🔄                        ║
+║ STATUT: Bugs critiques corrigés ✅                                            ║
+║ Investigation problème corrélation finale en cours 🔄                         ║
 ╚══════════════════════════════════════════════════════════════════════════════╝

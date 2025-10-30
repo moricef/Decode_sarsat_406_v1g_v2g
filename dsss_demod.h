@@ -95,6 +95,10 @@ typedef struct {
     int prn_conversion;             // 0: -1→1, 1: -1→0
     int interleaving;               // 0: I,Q,I,Q, 1: Q,I,Q,I
     int chip_offset;                // Optimal chip offset (-10 to +10)
+    
+    int auto_conv_i;  // Convention I détectée automatiquement
+    int auto_conv_q;  // Convention Q détectée automatiquement
+    float auto_conv_correlation;
 
 } dsss_demod_state_t;
 

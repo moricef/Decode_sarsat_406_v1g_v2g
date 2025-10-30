@@ -31,28 +31,28 @@ Decoder for COSPAS-SARSAT 1st and 2nd generation emergency beacons (406 MHz).
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Input Sources                         │
+│                    Input Sources                        │
 ├───────────────────────────┬─────────────────────────────┤
 │       WAV Audio (1G)      │      Hex String (1G/2G)     │
 └────────────┬──────────────┴──────────────┬──────────────┘
              │                              │
              ▼                              ▼
 ┌─────────────────────────────────────────────────────────┐
-│              Demodulator / Parser                        │
+│              Demodulator / Parser                       │
 │  • audio_capture.c (Biphase-L from audio)               │
 │  • dec406_main.c (hex string parser)                    │
 └────────────────────┬────────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────┐
-│                Frame Decoders                            │
+│                Frame Decoders                           │
 │  • dec406_v1g.c → 1G protocols (CRC validation)         │
 │  • dec406_v2g.c → 2G protocols (BCH correction)         │
 └────────────────────┬────────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────┐
-│                Decoded Output                            │
+│                Decoded Output                           │
 │  • Beacon ID (15/23 Hex), Type, Country (MID)           │
 │  • GPS Position, Timestamp                              │
 │  • Vessel/Aircraft ID (MMSI, Call Sign, ICAO24)         │
@@ -253,7 +253,7 @@ dec406_v10.2/
 
 ## References
 
-- **C/S T.001**: COSPAS-SARSAT 1st Generation Beacon Specification
+- **C/S T.001**: COSPAS-SARSAT 1st Generation Beacon Specification (FGB)
 - **C/S T.018**: COSPAS-SARSAT 2nd Generation Beacon Specification (SGB)
 - **C/S G.005**: MEOSAR Return Link Service
 - **Hardware Reference**: dsPIC33CK T.018 compliant beacon implementation

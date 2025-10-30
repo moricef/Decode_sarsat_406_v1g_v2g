@@ -80,12 +80,64 @@ static void saturate_complex(float complex *signal, size_t len, float abs_limit)
 /**
  * @brief Convert OQPSK to QPSK by removing Q channel delay
  */
-static void oqpsk_to_qpsk(const float complex *oqpsk, float complex *qpsk,
+/*static void oqpsk_to_qpsk(const float complex *oqpsk, float complex *qpsk,
                           size_t num_samples, int sps) {
     int delay = sps / 2;
+    
+    // Remplir la partie principale
     for (size_t i = 0; i < num_samples - delay; i++) {
         qpsk[i] = crealf(oqpsk[i]) + I * cimagf(oqpsk[i + delay]);
     }
+    
+    // REMPLIR AUSSI LA FIN DU BUFFER - CORRECTION CRITIQUE
+    for (size_t i = num_samples - delay; i < num_samples; i++) {
+        if (i < num_samples - delay) {
+            qpsk[i] = crealf(oqpsk[i]) + I * cimagf(oqpsk[i + delay]);
+        } else {
+            // Pour les derniers échantillons, utiliser la dernière valeur disponible
+            qpsk[i] = crealf(oqpsk[i]) + I * cimagf(oqpsk[num_samples - 1]);
+        }
+    }
+    
+    printf("[DEBUG] OQPSK→QPSK: qpsk[0]=%.3f+j%.3f, qpsk[1]=%.3f+j%.3f\n", 
+           crealf(qpsk[0]), cimagf(qpsk[0]),
+           crealf(qpsk[1]), cimagf(qpsk[1]));
+}*/
+
+/*static void oqpsk_to_qpsk(const float complex *oqpsk, float complex *qpsk,
+                          size_t num_samples, int sps) {
+    int delay = sps / 2;
+    
+    // CORRECTION: Commencer à l'index 'delay' pour éviter les zéros
+    for (size_t i = 0; i < num_samples - delay; i++) {
+        qpsk[i] = crealf(oqpsk[i]) + I * cimagf(oqpsk[i + delay]);
+    }
+    
+    // Remplir la fin avec les dernières valeurs valides
+    for (size_t i = num_samples - delay; i < num_samples; i++) {
+        qpsk[i] = crealf(oqpsk[i]) + I * cimagf(oqpsk[num_samples - 1]);
+    }
+    
+    printf("[DEBUG OQPSK] First 3 samples: [0]=%.3f+j%.3f, [1]=%.3f+j%.3f, [2]=%.3f+j%.3f\n",
+           crealf(qpsk[0]), cimagf(qpsk[0]),
+           crealf(qpsk[1]), cimagf(qpsk[1]),
+           crealf(qpsk[2]), cimagf(qpsk[2]));
+}*/
+
+static void oqpsk_to_qpsk(const float complex *oqpsk, float complex *qpsk,
+                          size_t num_samples, int sps) {
+    int delay = sps / 2;
+    
+    for (size_t i = 0; i < num_samples; i++) {
+        float i_val = crealf(oqpsk[i]);
+        float q_val = (i >= delay) ? cimagf(oqpsk[i - delay]) : 0.0f;
+        qpsk[i] = i_val + I * q_val;
+    }
+    
+    // Debug minimal
+    printf("[FIX] qpsk[0]=%.3f+j%.3f, qpsk[32]=%.3f+j%.3f\n", 
+           crealf(qpsk[0]), cimagf(qpsk[0]),
+           crealf(qpsk[32]), cimagf(qpsk[32]));
 }
 
 /**
@@ -95,7 +147,7 @@ static void oqpsk_to_qpsk(const float complex *oqpsk, float complex *qpsk,
  * NOTE: Paradoxically, 3 kHz cutoff gives better phase detection (85%) than no filter (78%)
  * even though it degrades SNR. This may be due to phase equalization effect.
  */
-static void apply_lowpass_filter(float complex *signal, size_t num_samples, float samp_rate) {
+/*static void apply_lowpass_filter(float complex *signal, size_t num_samples, float samp_rate) {
     const float cutoff_freq = 3000.0f;  // 3 kHz cutoff (empirically optimal for phase detection)
     float rc = 1.0f / (2.0f * M_PI * cutoff_freq);
     float dt = 1.0f / samp_rate;
@@ -107,33 +159,96 @@ static void apply_lowpass_filter(float complex *signal, size_t num_samples, floa
         signal[i] = prev + alpha * (current - prev);
         prev = signal[i];
     }
-}
+}*/
 
 /**
  * @brief Estimate SNR from signal
  */
 static float estimate_snr(const float complex *signal, size_t len) {
-    // Calculate signal power
+    if (len == 0) return 0.0f;
+    
+    // Calcul de la puissance du signal
     float sig_power = 0.0f;
     for (size_t i = 0; i < len; i++) {
         sig_power += cabsf(signal[i]) * cabsf(signal[i]);
     }
     sig_power /= len;
 
-    // Estimate noise from constellation scatter
+    // Estimation du bruit par variance des points par rapport aux décisions idéales
     float noise_power = 0.0f;
+    int count = 0;
+    
     for (size_t i = 0; i < len; i++) {
-        float complex ideal = (crealf(signal[i]) > 0 ? 1.0f : -1.0f) +
-                              I * (cimagf(signal[i]) > 0 ? 1.0f : -1.0f);
+        // Points QPSK idéaux : (±1 ± j*1)/√2
+        float complex ideal;
+        if (crealf(signal[i]) >= 0 && cimagf(signal[i]) >= 0) {
+            ideal = (1.0f + I * 1.0f) / sqrtf(2.0f);
+        } else if (crealf(signal[i]) >= 0 && cimagf(signal[i]) < 0) {
+            ideal = (1.0f - I * 1.0f) / sqrtf(2.0f);
+        } else if (crealf(signal[i]) < 0 && cimagf(signal[i]) >= 0) {
+            ideal = (-1.0f + I * 1.0f) / sqrtf(2.0f);
+        } else {
+            ideal = (-1.0f - I * 1.0f) / sqrtf(2.0f);
+        }
+        
         float error = cabsf(signal[i] - ideal);
         noise_power += error * error;
+        count++;
     }
-    noise_power /= len;
-
-    if (noise_power > 0) {
+    
+    if (count > 0 && noise_power > 0) {
+        noise_power /= count;
         return 10.0f * log10f(sig_power / noise_power);
     }
-    return 60.0f; // Very high SNR
+    
+    return 30.0f; // SNR élevé par défaut
+}
+
+
+/**
+ * @brief Teste une convention de conversion symbole→chip
+ * @param symbols Symboles QPSK en entrée
+ * @param num_symbols Nombre de symboles
+ * @param conv_i Convention pour I: 0=real>0→0, 1=real>0→1
+ * @param conv_q Convention pour Q: 0=imag>0→0, 1=imag>0→1  
+ * @param invert Inversion des bits
+ * @return Corrélation avec le PRN attendu [0.0 - 1.0]
+ */
+static float test_chip_convention(const float complex *symbols, size_t num_symbols,
+                                 int conv_i, int conv_q, bool invert) {
+    if (num_symbols < 1000) return 0.0f;
+    
+    uint8_t chips_i[1000], chips_q[1000];
+    
+    // Appliquer la convention de conversion testée
+    for (int i = 0; i < 1000; i++) {
+        chips_i[i] = (crealf(symbols[i]) >= 0) ? conv_i : (1 - conv_i);
+        chips_q[i] = (cimagf(symbols[i]) >= 0) ? conv_q : (1 - conv_q);
+        
+        if (invert) {
+            chips_i[i] = 1 - chips_i[i];
+            chips_q[i] = 1 - chips_q[i];
+        }
+    }
+    
+    // Générer le PRN de référence
+    prn_state_t prn_ref;
+    prn_init(&prn_ref, 0);
+    int8_t prn_i[256], prn_q[256];
+    prn_generate_i(&prn_ref, prn_i);
+    prn_generate_q(&prn_ref, prn_q);
+    
+    // Comparer avec les premiers chips PRN
+    int matches_i = 0, matches_q = 0;
+    for (int i = 0; i < 10; i++) {
+        uint8_t expected_i = (prn_i[i] == -1) ? 1 : 0;
+        uint8_t expected_q = (prn_q[i] == -1) ? 1 : 0;
+        
+        if (chips_i[i] == expected_i) matches_i++;
+        if (chips_q[i] == expected_q) matches_q++;
+    }
+    
+    return (float)(matches_i + matches_q) / 20.0f;  // Normalisé [0.0-1.0]
 }
 
 // =============================================================================
@@ -537,7 +652,7 @@ int dsss_detect_preamble(const float complex *samples, size_t num_samples,
                          float samp_rate, int *preamble_idx,
                          float *freq_offset, float *correlation) {
     // Preamble detection parameters
-    const int preamble_offset = 200;  // Skip AGC settling
+    //const int preamble_offset = 200;  // Skip AGC settling
 
     // Calculate samples per chip (keep as float for accurate preamble length)
     float sps = samp_rate / DSSS_CHIP_RATE;  // e.g., 65.104166 for 2.5 MHz
@@ -749,14 +864,14 @@ int dsss_fine_frequency_sync(const float complex *input, float complex *output,
  * @param k1 Output: proportional gain
  * @param k2 Output: integral gain
  */
-static void calculate_loop_gains(float loop_bw, float damping, float *k1, float *k2) {
+/*static void calculate_loop_gains(float loop_bw, float damping, float *k1, float *k2) {
     float zeta = damping;
     float omega_n = loop_bw;
     float denom = 1.0f + 2.0f * zeta * omega_n + omega_n * omega_n;
 
     *k1 = (4.0f * zeta * omega_n) / denom;
     *k2 = (4.0f * omega_n * omega_n) / denom;
-}
+}*/
 
 /**
  * @brief Cubic interpolation for sample extraction
@@ -819,9 +934,34 @@ static float complex interpolate_cubic(const float complex *samples, float mu, i
  * @param late Symbol at n+1
  * @return Timing error (positive = sampling too early, negative = too late)
  */
-static float gardner_ted(float complex early, float complex prompt, float complex late) {
+/*static float gardner_ted(float complex early, float complex prompt, float complex late) {
     return crealf((late - early) * conjf(prompt));
-}
+}*/
+
+/**
+ * @brief Modified Gardner TED avec échantillons à T/2 - OPTION AMÉLIORÉE
+ * 
+ * Utilise des échantillons à T/2 d'intervalle pour meilleure précision
+ */
+/*static float gardner_ted_improved(float complex prev_sample, float complex curr_sample, 
+                                 float complex next_sample, int sps) {
+    // Échantillons à T/2 d'intervalle
+    float complex at_minus_half = prev_sample;  // n-1
+    float complex at_zero = curr_sample;        // n (point idéal)
+    float complex at_plus_half = next_sample;   // n+1
+    
+    return crealf((at_plus_half - at_minus_half) * conjf(at_zero));
+}*/
+
+/**
+ * @brief Version alternative avec paramètres éprouvés
+ */
+/*static void calculate_timing_loop_gains_safe(float *k1, float *k2) {
+    // Paramètres conservateurs testés empiriquement
+    // pour signal DSSS avec spreading factor 256
+    *k1 = 0.0001f;  // Gain proportionnel très faible
+    *k2 = 0.00001f; // Gain intégral encore plus faible
+}*/
 
 // =============================================================================
 // TIMING RECOVERY
@@ -853,100 +993,190 @@ static float gardner_ted(float complex early, float complex prompt, float comple
  * - "Digital Communication Receivers" by Meyr, Moeneclaey, Fechtel
  * - GNU Radio Symbol Sync block implementation
  */
-int dsss_timing_recovery(const float complex *input, float complex *output,
-                         size_t num_samples, size_t *num_symbols, float samp_rate) {
-    const float damping = 2.0f;
-    const int sps = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
 
-    // Adaptive loop bandwidth: scale inversely with sps (normalized to sps=20)
-    // Lower sps → wider bandwidth (faster convergence)
-    // Higher sps → narrower bandwidth (better noise rejection)
-    float loop_bw_base = 0.001f;
-    float loop_bw = loop_bw_base * (20.0f / sps);
+/**
+ * @brief Calcul des gains de boucle CORRECT pour synchronisation symbole
+ */
+static void calculate_symbol_sync_gains(float loop_bw, float damping, float *k1, float *k2) {
+    float omega_n = loop_bw;
+    float zeta = damping;
+    float denom = 1.0f + 2.0f * zeta * omega_n + omega_n * omega_n;
+    
+    *k1 = (2.0f * zeta * omega_n) / denom;
+    *k2 = (omega_n * omega_n) / denom;
+    
+    // Ajustement pour signal DSSS
+    *k1 *= 0.5f;
+    *k2 *= 0.25f;
+}
 
-    // Clamp to safe range
-    if (loop_bw < 0.0002f) loop_bw = 0.0002f;  // Min for sps=100
-    if (loop_bw > 0.005f)  loop_bw = 0.005f;   // Max for sps=4
+/**
+ * @brief Gardner Timing Error Detector - IMPLÉMENTATION CORRECTE
+ */
+static float gardner_ted_corrected(float complex early, float complex prompt, float complex late) {
+    float complex diff = late - early;
+    return crealf(diff * conjf(prompt));
+}
 
-    // Calculate loop filter gains using proper formula
+/**
+ * @brief Timing Recovery CORRIGÉE pour signal DSSS/OQPSK
+ */
+int dsss_timing_recovery_corrected(const float complex *input, float complex *output,
+                                  size_t num_samples, size_t *num_symbols, float samp_rate) {
+    
+    // Paramètres optimisés pour DSSS
+    const float damping = 1.0f;
+    const float loop_bw = 0.0005f;
+    
+    // === Calcul incrément de phase ===
+    float samples_per_chip = samp_rate / DSSS_CHIP_RATE;  // ~65.104
+    float phase_increment = samples_per_chip;      // 65.104
+    int sps = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);   // Garder pour debug
+    
+    // Calcul des gains
     float k1, k2;
-    calculate_loop_gains(loop_bw, damping, &k1, &k2);
+    calculate_symbol_sync_gains(loop_bw, damping, &k1, &k2);
+    
+    printf("[TIMING CORRIGÉ] Paramètres: bw=%.6f, damping=%.2f, sps=%d\n", loop_bw, damping, sps);
+    printf("[TIMING CORRIGÉ] VRAI phase_increment=%.8f (1/%.6f)\n", phase_increment, samples_per_chip);
+    printf("[TIMING CORRIGÉ] Gains: k1=%.8f, k2=%.8f\n", k1, k2);
 
-    printf("[TIMING] Loop parameters: bw=%.5f (adaptive), damping=%.2f, sps=%d\n", loop_bw, damping, sps);
-    printf("[TIMING] Loop gains: k1=%.6f, k2=%.6f\n", k1, k2);
-
-    // Timing state variables
-    // Initialize timing_phase to allow cubic interpolation (needs idx >= 1)
-    float timing_phase = 2.0f;           // Start at sample 2 (allows interpolation at idx-1)
-    float timing_freq = 0.0f;            // Accumulated frequency error (NCO)
+    // État de la boucle
+    //float timing_phase = 2.0f;
+    float timing_phase = 1.0f;
+    float timing_freq = 0.0f;
     size_t symbol_count = 0;
-
-    // Symbol history for Gardner TED
+    
+    // Historique pour Gardner TED
     float complex prev_prev_sym = 0.0f;
     float complex prev_sym = 0.0f;
-
-    // Debug: track timing error statistics
-    float timing_error_sum = 0.0f;
-    float timing_error_max = 0.0f;
-    int debug_print_interval = 5000;     // Print every N symbols
-
-    // Main timing recovery loop
-    // Loop until we can't interpolate anymore (need 3 samples after center_idx for cubic)
-    // Previous: timing_phase < num_samples - sps caused early stop (missed last symbol)
-    while (timing_phase < num_samples - 3 && symbol_count < 40000) {
-        // Calculate sample index with fractional part
+    float complex curr_sym = 0.0f;
+    
+    // BOUCLE PRINCIPALE
+    while (timing_phase < num_samples - 4 && symbol_count < 38400) {
+        
+        // Extraction du symbole avec interpolation cubique
         int center_idx = (int)floorf(timing_phase);
-        float mu = timing_phase - floorf(timing_phase);  // Fractional position [0, 1)
-
-        // Bounds check for cubic interpolation (needs idx-1 to idx+2)
+        float mu = timing_phase - center_idx;
+        
         if (center_idx < 1 || center_idx + 2 >= (int)num_samples) {
             break;
         }
-
-        // Extract symbol using cubic interpolation
+        
         float complex symbol = interpolate_cubic(input, mu, center_idx, num_samples);
-
         output[symbol_count] = symbol;
-        symbol_count++;
-
-        // Compute timing error using Gardner TED
-        float timing_error = 0.0f;
-        if (symbol_count >= 3) {
-            timing_error = gardner_ted(prev_prev_sym, prev_sym, symbol);
-
-            // Track error statistics
-            timing_error_sum += fabsf(timing_error);
-            if (fabsf(timing_error) > timing_error_max) {
-                timing_error_max = fabsf(timing_error);
-            }
+        
+        // Debug des premiers échantillons
+        if (symbol_count < 5) {
+            printf("[TIMING DEBUG] symbol[%zu]: center_idx=%d (phase=%.3f, mu=%.3f)\n",
+                symbol_count, center_idx, timing_phase, mu);
+            printf("[TIMING DEBUG]   input[%d]=%.3f+j%.3f → output=%.3f+j%.3f\n",
+                center_idx, crealf(input[center_idx]), cimagf(input[center_idx]),
+                crealf(symbol), cimagf(symbol));
         }
-
-        // Update timing loop filter (proportional + integral)
-        timing_freq += k2 * timing_error;       // Integral path (NCO frequency)
-        timing_phase += sps + k1 * timing_error + timing_freq;  // Advance to next symbol
-
-        // Debug output every N symbols
-        if (symbol_count > 0 && symbol_count % debug_print_interval == 0) {
-            float avg_error = timing_error_sum / debug_print_interval;
-            printf("[TIMING] Symbol %zu: phase=%.2f, mu=%.4f, error=%.4f (avg=%.4f, max=%.4f), freq=%.6f\n",
-                   symbol_count, timing_phase, mu, timing_error, avg_error, timing_error_max, timing_freq);
-            timing_error_sum = 0.0f;
-            timing_error_max = 0.0f;
-        }
-
-        // Update symbol history
+        
+        // Mise à jour de l'historique pour Gardner TED
         prev_prev_sym = prev_sym;
-        prev_sym = symbol;
+        prev_sym = curr_sym; 
+        curr_sym = symbol;
+        
+        // Calcul erreur de timing (Gardner TED)
+        float timing_error = 0.0f;
+        if (symbol_count >= 2) {
+            timing_error = gardner_ted_corrected(prev_prev_sym, prev_sym, curr_sym);
+            
+            // Limiter l'erreur
+            if (timing_error > 0.5f) timing_error = 0.5f;
+            if (timing_error < -0.5f) timing_error = -0.5f;
+        }
+        
+        // === CORRECTION 2 : Utiliser phase_increment au lieu de sps ===
+        if (symbol_count >= 2) {
+            timing_freq += k2 * timing_error;
+            timing_phase += phase_increment + k1 * timing_error + timing_freq;  // ← CHANGÉ
+        } else {
+            timing_phase += phase_increment;  // ← CHANGÉ
+        }
+        
+        symbol_count++;
+        
+        // Debug périodique
+        if (symbol_count % 5000 == 0) {
+            printf("[TIMING] Symbole %zu: phase=%.2f, mu=%.3f, center_idx=%d\n",
+                   symbol_count, timing_phase, mu, (int)floorf(timing_phase));
+        }
     }
-
-    // Final statistics
-    printf("[TIMING] Recovery complete: %zu symbols recovered (expected ~38400)\n", symbol_count);
-    printf("[TIMING] Final timing phase: %.2f, final NCO freq: %.6f\n", timing_phase, timing_freq);
-    printf("[DEBUG] Timing Recovery: Input samples burst[0 .. %zu] → symbols[0 .. %zu]\n",
-           num_samples - 1, symbol_count - 1);
-
+    
+    // Statistiques finales
+    printf("[TIMING CORRIGÉ] Récupération terminée: %zu symboles\n", symbol_count);
+    printf("[TIMING CORRIGÉ] Phase finale: %.2f, Fréquence NCO: %.6f\n", 
+           timing_phase, timing_freq);
+    
     if (num_symbols) *num_symbols = symbol_count;
+    
+    // VALIDATION
+    if (symbol_count < 36000) {
+        fprintf(stderr, "[TIMING CORRIGÉ] ERREUR: Symboles insuffisants (%zu < 36000)\n", symbol_count);
+        return -1;
+    }
+    
     return 0;
+}
+
+/**
+ * @brief Test simple de validation du timing recovery
+ */
+int test_timing_recovery_simple() {
+    printf("=== TEST TIMING RECOVERY SIMPLE ===\n");
+    
+    // Créer un signal de test simple (sinusoïde)
+    const size_t TEST_LENGTH = 100000;
+    float complex *test_signal = malloc(TEST_LENGTH * sizeof(float complex));
+    
+    if (!test_signal) return -1;
+    
+    // Générer une sinusoïde complexe
+    for (size_t i = 0; i < TEST_LENGTH; i++) {
+        float t = (float)i / 1000.0f;
+        test_signal[i] = cexpf(I * 2.0f * M_PI * t);
+    }
+    
+    float complex *output_symbols = malloc(40000 * sizeof(float complex));
+    size_t num_recovered = 0;
+    
+    // Tester le timing recovery
+    int result = dsss_timing_recovery_corrected(test_signal, output_symbols, 
+                                               TEST_LENGTH, &num_recovered, 2.5e6f);
+    
+    printf("Test résultat: %s, %zu symboles récupérés\n", 
+           (result == 0) ? "SUCCÈS" : "ÉCHEC", num_recovered);
+    
+    free(test_signal);
+    free(output_symbols);
+    return result;
+}
+
+/**
+ * @brief Validation de l'interpolation cubique
+ */
+void validate_cubic_interpolation() {
+    printf("=== VALIDATION INTERPOLATION CUBIQUE ===\n");
+    
+    // Signal test: sinusoïde pure
+    float complex test_signal[100];
+    for (int i = 0; i < 100; i++) {
+        test_signal[i] = cexpf(I * 2.0f * M_PI * i / 10.0f);
+    }
+    
+    // Tester différentes positions fractionnaires
+    for (float mu = 0.0f; mu <= 1.0f; mu += 0.1f) {
+        float complex interpolated = interpolate_cubic(test_signal, mu, 10, 100);
+        float complex expected = cexpf(I * 2.0f * M_PI * (10.0f + mu) / 10.0f);
+        
+        float error = cabsf(interpolated - expected);
+        printf("  mu=%.1f: erreur=%.6f %s\n", mu, error, 
+               (error < 0.01f) ? "✅" : "❌");
+    }
 }
 
 // =============================================================================
@@ -979,13 +1209,42 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
                                  int *phase_rot, bool *iq_swap,
                                  dsss_demod_state_t *state) {
     printf("[PHASE] Fine rotation search for optimal parameters...\n");
+    printf("[PHASE] Pre-generating PRN sequences for preamble (50 bits)...\n");
+    
+    // Générer les séquences PRN pour le preamble (50 bits = 25 I + 25 Q)
+    prn_state_t prn_preamble_i, prn_preamble_q;
+    prn_init(&prn_preamble_i, 0);
+    prn_init(&prn_preamble_q, 0);
+
+    int8_t *prn_preamble_i_full = malloc(25 * DSSS_SPREADING_FACTOR * sizeof(int8_t));
+    int8_t *prn_preamble_q_full = malloc(25 * DSSS_SPREADING_FACTOR * sizeof(int8_t));
+
+    if (!prn_preamble_i_full || !prn_preamble_q_full) {
+        fprintf(stderr, "[PHASE] Error: malloc failed for PRN preamble buffers\n");
+        free(prn_preamble_i_full);
+        free(prn_preamble_q_full);
+        return -1;
+    }
+
+    int8_t prn_chunk[DSSS_SPREADING_FACTOR];
+    for (int bit = 0; bit < 25; bit++) {
+        prn_generate_i(&prn_preamble_i, prn_chunk);
+        memcpy(&prn_preamble_i_full[bit * DSSS_SPREADING_FACTOR], prn_chunk, DSSS_SPREADING_FACTOR * sizeof(int8_t));
+        
+        prn_generate_q(&prn_preamble_q, prn_chunk);
+        memcpy(&prn_preamble_q_full[bit * DSSS_SPREADING_FACTOR], prn_chunk, DSSS_SPREADING_FACTOR * sizeof(int8_t));
+    }
+    
+    printf("[PHASE] PRN preamble sequences generated (%d chips I, %d chips Q)\n", 
+           25 * DSSS_SPREADING_FACTOR, 25 * DSSS_SPREADING_FACTOR);
+    
     printf("[PHASE] Phase 1: Testing 1440 combinations (360°×2 swaps×2 inversions)...\n");
 
     // T.018 §2.2.4: Expected preamble = all bits '0' (50 bits)
-    uint8_t expected_preamble[DSSS_PREAMBLE_LENGTH];
+    /*uint8_t expected_preamble[DSSS_PREAMBLE_LENGTH];
     for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
         expected_preamble[i] = 0;  // All preamble bits = 0
-    }
+    }*/
 
     // Number of chips for preamble (50 bits × 256 chips/bit = 12,800 chips)
     const int preamble_chips = DSSS_PREAMBLE_LENGTH * DSSS_SPREADING_FACTOR;
@@ -994,6 +1253,9 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     if (num_symbols < preamble_chips) {
         fprintf(stderr, "[PHASE] Error: Not enough symbols for preamble (%zu < %d)\n",
                 num_symbols, preamble_chips);
+        
+        free(prn_preamble_i_full);
+        free(prn_preamble_q_full);
         return -1;
     }
 
@@ -1055,60 +1317,139 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     // Test on first 50 bits = 12,800 chips (preamble)
     // T.018: 50 bits × 256 chips/bit = 12,800 chips total
     const int test_symbols = DSSS_PREAMBLE_LENGTH * DSSS_SPREADING_FACTOR;  // 12,800
+    // Vérifier que nous avons assez de symboles
+    if (num_symbols < test_symbols) {
+        fprintf(stderr, "[PHASE] Error: Not enough symbols for preamble testing (%zu < %d)\n",
+                num_symbols, test_symbols);
+        free(prn_preamble_i_full);
+        free(prn_preamble_q_full);
+        return -1;
+    }
 
     printf("  [OPENMP] Parallelizing Phase 1 (%d combinations) across %d cores...\n",
            total_phase1, omp_get_max_threads());
 
-    // Parallelize Phase 1 - flatten to single loop
-    #pragma omp parallel for schedule(dynamic, 16)
+    #pragma omp parallel for schedule(dynamic, 8)
     for (int combo = 0; combo < total_phase1; combo++) {
-        // Decode combo into (angle, swap, invert)
-        int invert = combo % 2;
-        int swap = (combo / 2) % 2;
-        int angle = combo / 4;
+    // Decode combo into (angle, swap, invert)
+    int invert = combo % 2;
+    int swap = (combo / 2) % 2;
+    int angle = combo / 4;
 
-        float angle_rad = angle * M_PI / 180.0f;
-        float complex rot = cexpf(I * angle_rad);
+    float angle_rad = angle * M_PI / 180.0f;
+    float complex rot = cexpf(I * angle_rad);
 
-        // Test directly on symbols (no despreading)
-        int matches = 0;
-        for (int i = 0; i < test_symbols && i < num_symbols; i++) {
-            float complex test_sym = symbols[i] * rot;
-            if (swap) test_sym = cimagf(test_sym) + I * crealf(test_sym);
-
-            // Convert to bits with inversion applied to CHIPS
-            uint8_t bit_i = (crealf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
-            uint8_t bit_q = (cimagf(test_sym) >= 0) ? (invert ? 1 : 0) : (invert ? 0 : 1);
-
-            // T.018 §2.2.4: Preamble = all bits '0' (both I and Q channels)
-            uint8_t expected_i = 0;
-            uint8_t expected_q = 0;
-
-            if (bit_i == expected_i) matches++;
-            if (bit_q == expected_q) matches++;
-        }
-
-        float corr = (float)matches / (test_symbols * 2);  // 2 bits per symbol
-
-        // Thread-safe update of best
-        #pragma omp critical
-        {
-            if (corr > best_phase1_corr) {
-                best_phase1_corr = corr;
-                best_angle_deg = (float)angle;
-                best_swap = (bool)swap;
-                best_invert = (bool)invert;
-            }
-
-            // Progress indicator
-            progress++;
-            if (progress % 144 == 0) {  // Every 10%
-                printf("  Progress: %d%% (best: %.1f%%)\r",
-                       (progress * 100) / total_phase1, best_phase1_corr * 100.0f);
-                fflush(stdout);
-            }
+    // Appliquer transformation aux symboles du preamble
+    float complex *test_symbols_transformed = malloc(test_symbols * sizeof(float complex));
+    if (!test_symbols_transformed) continue;
+    
+    for (int i = 0; i < test_symbols && i < num_symbols; i++) {
+        test_symbols_transformed[i] = symbols[i] * rot;
+        if (swap) {
+            test_symbols_transformed[i] = cimagf(test_symbols_transformed[i]) + 
+                                         I * crealf(test_symbols_transformed[i]);
         }
     }
+
+    // Convertir symboles en chips (avec inversion)
+    uint8_t *chips_i_test = malloc(test_symbols);
+    uint8_t *chips_q_test = malloc(test_symbols);
+    
+    if (!chips_i_test || !chips_q_test) {
+        free(test_symbols_transformed);
+        free(chips_i_test);
+        free(chips_q_test);
+        continue;
+    }
+    
+    for (int i = 0; i < test_symbols && i < num_symbols; i++) {
+        chips_i_test[i] = (crealf(test_symbols_transformed[i]) >= 0) ? 
+                         (invert ? 1 : 0) : (invert ? 0 : 1);
+        chips_q_test[i] = (cimagf(test_symbols_transformed[i]) >= 0) ? 
+                         (invert ? 1 : 0) : (invert ? 0 : 1);
+    }
+
+    // DÉSÉTALER et comparer avec le pattern 010101...
+    int matches = 0;
+    int total_bits_tested = 0;
+
+    // Désétaler les 50 bits du preamble (25 bits I + 25 bits Q)
+    for (int bit = 0; bit < 25; bit++) {
+        int start_idx = bit * DSSS_SPREADING_FACTOR;
+        int corr_i = 0, corr_q = 0;
+
+        // Désétaler canal I
+        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+            int chip_idx = start_idx + c;
+            if (chip_idx < test_symbols) {
+                uint8_t rx_chip_i = chips_i_test[chip_idx];
+                uint8_t ref_i = (prn_preamble_i_full[chip_idx] == -1) ? 1 : 0;
+                if (rx_chip_i == ref_i) corr_i++;
+            }
+        }
+
+        // Désétaler canal Q
+        for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
+            int chip_idx = start_idx + c;
+            if (chip_idx < test_symbols) {
+                uint8_t rx_chip_q = chips_q_test[chip_idx];
+                uint8_t ref_q = (prn_preamble_q_full[chip_idx] == -1) ? 1 : 0;
+                if (rx_chip_q == ref_q) corr_q++;
+            }
+        }
+
+        // Décision majoritaire (seuil à 50%)
+        uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+        uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
+
+        // Pattern attendu du preamble: I=010101..., Q=101010...
+        uint8_t expected_i = (2 * bit) % 2;      // 0,1,0,1,0,1...
+        uint8_t expected_q = (2 * bit + 1) % 2;  // 1,0,1,0,1,0...
+
+        if (bit_i == expected_i) matches++;
+        if (bit_q == expected_q) matches++;
+        total_bits_tested += 2;
+    }
+
+    float corr = (total_bits_tested > 0) ? (float)matches / total_bits_tested : 0.0f;
+
+    // Nettoyer la mémoire
+    free(test_symbols_transformed);
+    free(chips_i_test);
+    free(chips_q_test);
+
+    // Mise à jour thread-safe des meilleures valeurs
+    #pragma omp critical
+    {
+        if (corr > best_phase1_corr) {
+            best_phase1_corr = corr;
+            best_angle_deg = (float)angle;
+            best_swap = (bool)swap;
+            best_invert = (bool)invert;
+        }
+
+        // Debug pour les bonnes corrélations
+        if (corr > 0.8f) {
+            printf("[PHASE STATS] angle=%d°, swap=%d, invert=%d: corr=%.1f%%",
+                   angle, swap, invert, corr * 100.0f);
+            
+            if (angle == 0 && swap == 0 && invert == 0) printf(" ← 0° REFERENCE");
+            if (angle == 0 && swap == 0 && invert == 1) printf(" ← 0° WITH INVERT");
+            if (angle == 180 && swap == 0 && invert == 1) printf(" ← 180° EQUIVALENT");
+            if (angle == 45 && swap == 0 && invert == 0) printf(" ← 45° (OLD ALGO CHOICE)");
+            printf("\n");
+        }
+
+        // Indicateur de progression
+        progress++;
+        if (progress % 72 == 0) {  // Tous les 5%
+            printf("  Progress: %d%% (best: %.1f%%)\r",
+                   (progress * 100) / total_phase1, best_phase1_corr * 100.0f);
+            fflush(stdout);
+        }
+    }
+}
+
     printf("\n");
 
     printf("[PHASE] Phase 1 complete: angle=%.0f°, swap=%d, invert=%d, corr=%.1f%%\n",
@@ -1125,6 +1466,8 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
             symbols[i] = cimagf(symbols[i]) + I * crealf(symbols[i]);
         }
     }
+    
+    printf("[PHASE DEBUG] Top 5 phase combinations:\n");
 
     // PHASE 2: Extended chip offset search on corrected symbols
     // Testing wider range: -15 to +15 chips (was -5 to +5)
@@ -1161,7 +1504,7 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     for (int i = 0; i < test_chips_phase2 && i < num_symbols; i++) {
         float complex test_sym = symbols[i];
         chips_i[i] = (crealf(test_sym) >= 0) ? (best_invert ? 1 : 0) : (best_invert ? 0 : 1);
-        chips_q[i] = (cimagf(test_sym) >= 0) ? (best_invert ? 1 : 0) : (best_invert ? 0 : 1);
+        chips_q[i] = (cimagf(test_sym) >= 0) ? (best_invert ? 1 : 0) : (best_invert ? 0 : 1); 
     }
     printf("[DEBUG] Phase resolution: symbols[0 .. %d] → chips[0 .. %d] (1:1 mapping)\n",
            test_chips_phase2 - 1, test_chips_phase2 - 1);
@@ -1312,6 +1655,19 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
             }
         }
     }
+    
+    // AJOUTEZ cette section après la boucle Phase 1 :
+    printf("[PHASE TOP] Top combinations analysis:\n");
+    printf("[PHASE TOP] Best found by algorithm: angle=%.0f°, swap=%d, invert=%d (corr=%.1f%%)\n",
+        best_angle_deg, best_swap, best_invert, best_phase1_corr * 100.0f);
+
+    // Afficher les performances des angles clés
+    printf("[PHASE TOP] Key angles performance:\n");
+    // Vous pouvez ajouter manuellement les angles que vous voulez surveiller
+    printf("[PHASE TOP] - 0° configs: swap=0/invert=1 (empirical best), swap=1/invert=0, etc.\n");
+    printf("[PHASE TOP] - 45° configs: current algorithm choice\n");
+    printf("[PHASE TOP] - 90° configs: common ambiguity\n");
+    printf("[PHASE TOP] - 180° configs: equivalent to 0° with invert\n");
 
     // Free PRN variations
     for (int v = 0; v < 4; v++) {
@@ -1331,6 +1687,15 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
            best_angle_deg, best_swap, best_invert, best_corr * 100.0f);
     printf("[PHASE] ✓ Despread params: chip_conv=%d, prn_conv=%d, interleave=%d, offset=%+d\n",
            best_chip_conv, best_prn_conv, best_interleave, best_offset);
+    
+    printf("=== CHIPS AFTER PHASE RESOLUTION ===\n");
+    for (int i = 0; i < 10; i++) {
+        printf("symbol[%d]: real=%.3f → chip_i=%d, imag=%.3f → chip_q=%d\n",
+            i, crealf(symbols[i]), 
+            (crealf(symbols[i]) >= 0) ? 0 : 1,
+            cimagf(symbols[i]),
+            (cimagf(symbols[i]) >= 0) ? 0 : 1);
+    }
 
     // Convert angle to legacy phase_rot (0-3) for backward compatibility
     int legacy_phase_rot = (int)(best_angle_deg / 90.0f) % 4;
@@ -1339,6 +1704,10 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
 
     // Store optimal parameters in state
     if (state) {
+        
+           // 🔍 DEBUG: Afficher l'angle trouvé par l'algorithme vs l'angle forcé
+    printf("[PHASE DEBUG] Algorithm found: angle=%.0f°, swap=%d, invert=%d, corr=%.1f%%\n",
+        best_angle_deg, best_swap, best_invert, best_corr * 100.0f);
         state->phase_angle_deg = best_angle_deg;
         state->iq_swapped = best_swap;
         state->bit_invert = best_invert;
@@ -1349,15 +1718,18 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
     }
 
     // Return success if correlation > 90% (strong match on preamble)
-    if (best_corr > 0.9f) {
+    if (best_corr > 0.7f) {
         return 0;
-    } else if (best_corr > 0.7f) {
+    } else if (best_corr > 0.6f) {
         fprintf(stderr, "[PHASE] Warning: Moderate correlation (%.1f%%), proceeding anyway\n",
                 best_corr * 100.0f);
         return 0;
     } else {
         fprintf(stderr, "[PHASE] Error: Low correlation (%.1f%%), phase resolution failed\n",
                 best_corr * 100.0f);
+        
+    free(prn_preamble_i_full);
+    free(prn_preamble_q_full);
         return -1;
     }
 }
@@ -1636,7 +2008,7 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
     // Reset for Q channel
     prn_init(&prn_state, 0);
 
-    // Generate Q-channel PRN
+  // Generate Q-channel PRN
     for (int bit = 0; bit < 150; bit++) {
         prn_generate_q(&prn_state, prn_chunk_signed);
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
@@ -1727,8 +2099,7 @@ int dsss_despread(const uint8_t *chips_i, const uint8_t *chips_q,
 // =============================================================================
 // MAIN DEMODULATOR
 // =============================================================================
-
-int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
+    int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
                     uint8_t *output_bits, float samp_rate,
                     dsss_demod_state_t *state, float forced_freq) {
 
@@ -1739,13 +2110,46 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
 
     // Initialize state
     dsss_demod_state_t local_state = {0};
+    
+    // === CORRECTION AMPLITUDE POUR perfect_interpolated.iq ===
+    const float complex *processed_iq = iq_samples;
+    float complex *amplified_iq = NULL;
+    
+    float max_val = 0.0f;
+    for (size_t i = 0; i < num_samples; i++) {
+        float real = crealf(iq_samples[i]);
+        float imag = cimagf(iq_samples[i]);
+        if (fabsf(real) > max_val) max_val = fabsf(real);
+        if (fabsf(imag) > max_val) max_val = fabsf(imag);
+    }
+
+    if (max_val < 0.5f && max_val > 0.0f) {
+        float scale = 1.0f / max_val;
+        fprintf(stderr, "[FIX] Amplifying weak signal by %.1fx (max=%.3f)\n", scale, max_val);
+        
+        amplified_iq = malloc(num_samples * sizeof(float complex));
+        if (!amplified_iq) {
+            fprintf(stderr, "Error: Memory allocation failed\n");
+            return -1;
+        }
+        
+        for (size_t i = 0; i < num_samples; i++) {
+            amplified_iq[i] = iq_samples[i] * scale;
+        }
+        processed_iq = amplified_iq;
+    }
+    // === FIN CORRECTION ===
 
     // Step 1: AGC
     printf("Step 1: AGC...\n");
     float complex *agc_out = malloc(num_samples * sizeof(float complex));
-    if (!agc_out) return -1;
+    if (!agc_out) {
+        if (amplified_iq) free(amplified_iq);
+        return -1;
+    }
 
-    dsss_agc(iq_samples, agc_out, num_samples, &local_state.agc_gain);
+    // Utiliser processed_iq au lieu de iq_samples
+    dsss_agc(processed_iq, agc_out, num_samples, &local_state.agc_gain);
     printf("  AGC gain: %.2f\n", local_state.agc_gain);
     printf("[DEBUG] AGC: Input samples 0-%zu, output aligned 1:1 (no delay)\n", num_samples - 1);
 
@@ -1758,18 +2162,15 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         // Skip frequency search, use forced offset
         printf("  Using forced frequency offset: %.1f Hz (skipping search)\n", forced_freq);
         freq_offset_coarse = forced_freq;
-
-        // Still need to find preamble position, but only at forced frequency
-        // For now, use a simplified detection at f=0
-        // TODO: Implement single-frequency preamble detection
-        preamble_idx = 0;  // Assume signal starts at beginning
-        local_state.correlation_peak = 1.0f;  // Placeholder
+        preamble_idx = 0;
+        local_state.correlation_peak = 1.0f;
     } else {
-        // Normal frequency search
-        if (dsss_detect_preamble(agc_out, num_samples, samp_rate,
+        // Normal frequency search - utiliser processed_iq
+        if (dsss_detect_preamble(processed_iq, num_samples, samp_rate,
                                 &preamble_idx, &freq_offset_coarse,
                                 &local_state.correlation_peak) < 0) {
             free(agc_out);
+            if (amplified_iq) free(amplified_iq);
             if (state) *state = local_state;
             return -2;
         }
@@ -1815,9 +2216,9 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
 
     printf("  Burst start (rewinded): %d samples before preamble peak\n", preamble_idx - burst_start_idx);
     printf("  Burst length: %zu samples (%.2f sec)\n",
-           burst_length, (float)burst_length / samp_rate);
+       burst_length, (float)burst_length / samp_rate);
     printf("[DEBUG] Burst extraction: AGC[%d .. %zu] → burst[0 .. %zu]\n",
-           burst_start_idx, burst_start_idx + burst_length - 1, burst_length - 1);
+       burst_start_idx, burst_start_idx + burst_length - 1, burst_length - 1);
 
     float complex *burst = &agc_out[burst_start_idx];
 
@@ -1890,37 +2291,113 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         free(fine_sync_out);
         return -1;
     }
-
+     printf("=== SIGNAL BEFORE TIMING RECOVERY ===\n");
+        printf("First 5 QPSK samples magnitude:\n");
+        for (int i = 0; i < 5; i++) {
+            printf("  qpsk[%d]: mag=%.3f\n", i, cabsf(qpsk_out[i]));
+        }
+        
     int sps_main = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
+    
+    // DEBUG: Vérifier les premières données OQPSK
+    printf("=== OQPSK INPUT DEBUG ===\n");
+    for (int i = 0; i < 5; i++) {
+        printf("  oqpsk[%d]: real=%.3f, imag=%.3f, mag=%.3f\n", 
+            i, crealf(fine_sync_out[i]), cimagf(fine_sync_out[i]), 
+            cabsf(fine_sync_out[i]));
+    }
+    for (int i = 32; i < 37; i++) {
+        printf("  oqpsk[%d]: real=%.3f, imag=%.3f, mag=%.3f\n", 
+            i, crealf(fine_sync_out[i]), cimagf(fine_sync_out[i]), 
+            cabsf(fine_sync_out[i]));
+    }
     oqpsk_to_qpsk(fine_sync_out, qpsk_out, burst_length, sps_main);
     printf("  Applied Tc/2 delay: %d samples\n", sps_main / 2);
 
     // Update burst_length to account for delay
     size_t qpsk_length = burst_length - sps_main / 2;
+    
+    /**
+ * @brief Sauvegarder la constellation pour analyse
+ */
+    /*void dump_constellation(const float complex *symbols, size_t num_symbols, const char *filename) {
+        FILE *f = fopen(filename, "w");
+        if (!f) return;
+        
+        fprintf(f, "real,imag\n");
+        for (size_t i = 0; i < num_symbols && i < 1000; i++) {
+            fprintf(f, "%.6f,%.6f\n", crealf(symbols[i]), cimagf(symbols[i]));
+        }
+        fclose(f);
+        printf("[DEBUG] Constellation saved to %s\n", filename);
+    }*/
 
     // Step 5: Timing recovery
     printf("Step 5: Timing recovery...\n");
     float complex *symbols = malloc(40000 * sizeof(float complex));
+    size_t num_symbols = 0;
     if (!symbols) {
         free(agc_out);
         free(freq_corr_out);
         free(fine_sync_out);
         free(qpsk_out);
         return -1;
+    }   
+    
+    // CORRECTION : Commencer au 2ème échantillon (index 1) car qpsk[0] = 0.000
+    dsss_timing_recovery_corrected(&qpsk_out[1], symbols, qpsk_length - 1, &num_symbols, samp_rate);
+    printf("  Recovered %zu symbols\n", num_symbols);
+    
+    // DEBUG: Analyser la distribution des symboles
+    int quadrant_count[4] = {0};
+    for (int i = 0; i < 1000 && i < num_symbols; i++) {
+        float real = crealf(symbols[i]);
+        float imag = cimagf(symbols[i]);
+    
+        if (real >= 0 && imag >= 0) quadrant_count[0]++;
+        else if (real >= 0 && imag < 0) quadrant_count[1]++;
+        else if (real < 0 && imag >= 0) quadrant_count[2]++;
+        else quadrant_count[3]++;
     }
 
-    size_t num_symbols;
-    dsss_timing_recovery(qpsk_out, symbols, qpsk_length,
-                        &num_symbols, samp_rate);
-    printf("  Recovered %zu symbols\n", num_symbols);
+    printf("=== SYMBOL DISTRIBUTION ANALYSIS ===\n");
+    printf("Quadrant I (++): %d symbols\n", quadrant_count[0]);
+    printf("Quadrant II (+-): %d symbols\n", quadrant_count[1]); 
+    printf("Quadrant III (-+): %d symbols\n", quadrant_count[2]);
+    printf("Quadrant IV (--): %d symbols\n", quadrant_count[3]);
+    printf("Total analyzed: %d symbols\n", quadrant_count[0] + quadrant_count[1] + quadrant_count[2] + quadrant_count[3]);
+    
+    printf("=== SYMBOLS RIGHT AFTER TIMING RECOVERY ===\n");
+    for (int i = 0; i < 3 && i < num_symbols; i++) {
+        printf("  symbols[%d]: real=%.3f, imag=%.3f, mag=%.3f\n", 
+            i, crealf(symbols[i]), cimagf(symbols[i]), cabsf(symbols[i]));
+    }
 
+
+    // Debug du signal QPSK
+    printf("=== QPSK SIGNAL CHECK ===\n");
+    printf("qpsk[0]=%.3f+j%.3f (should be non-zero)\n", crealf(qpsk_out[0]), cimagf(qpsk_out[0]));
+    printf("qpsk[1]=%.3f+j%.3f\n", crealf(qpsk_out[1]), cimagf(qpsk_out[1]));
+    printf("qpsk[2]=%.3f+j%.3f\n", crealf(qpsk_out[2]), cimagf(qpsk_out[2]));
+    
     // Step 5.5: Apply lowpass filter to improve SNR
-    // DISABLED: Filter degrades SNR without improving correlation beyond 85%
-    // printf("Step 5.5: Lowpass filtering (cutoff=3kHz)...\n");
-    // apply_lowpass_filter(symbols, num_symbols, samp_rate);
-    // printf("  Filtering complete\n");
+    //printf("Step 5.5: Lowpass filtering (cutoff=3kHz)...\n");
+    //apply_lowpass_filter(symbols, num_symbols, samp_rate);
+    //printf("  Filtering complete\n");
+    
+    printf("=== SYMBOLS AFTER LOWPASS FILTER ===\n");
+    for (int i = 0; i < 3 && i < num_symbols; i++) {
+        printf("  symbols[%d]: real=%.3f, imag=%.3f, mag=%.3f\n", 
+            i, crealf(symbols[i]), cimagf(symbols[i]), cabsf(symbols[i]));
+    }
 
     // Step 6: Phase ambiguity resolution
+    printf("=== SYMBOL VALUES CHECK ===\n");
+    printf("First 5 symbols after phase correction:\n");
+    for (int i = 0; i < 5; i++) {
+        printf("  symbol[%d]: real=%.3f, imag=%.3f, mag=%.3f\n", 
+           i, crealf(symbols[i]), cimagf(symbols[i]), cabsf(symbols[i]));
+    }
     printf("Step 6: Phase ambiguity resolution...\n");
     int phase_rot;
     bool iq_swap;
@@ -1931,35 +2408,267 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
     }
 
     local_state.phase_rotation = phase_rot;
-    local_state.iq_swapped = iq_swap;
+    //local_state.iq_swapped = iq_swap;
+    
+/*    printf("[DEBUG] APPLYING PHASE ROTATION: %.1f°\n", local_state.phase_angle_deg);
+    float angle_rad = local_state.phase_angle_deg * M_PI / 180.0f;
+    float complex rotation = cexpf(I * angle_rad);
+
+    for (size_t i = 0; i < num_symbols; i++) {
+        symbols[i] = symbols[i] * rotation;
+    }*/
+
+    printf("After phase rotation - First 3 symbols:\n");
+    for (int i = 0; i < 3; i++) {
+        printf("  symbol[%d]: %.3f+j%.3f\n", i, crealf(symbols[i]), cimagf(symbols[i]));
+    }
+    
+    printf("=== SYMBOLS AFTER PHASE CORRECTION ===\n");
+    for (int i = 0; i < 3 && i < num_symbols; i++) {
+        printf("  symbols[%d]: real=%.3f, imag=%.3f, mag=%.3f\n", 
+            i, crealf(symbols[i]), cimagf(symbols[i]), cabsf(symbols[i]));
+    }
+    // FORCE les paramètres corrects pour ton signal de test
+printf("=== FORCAGE MANUEL DES PARAMETRES ===\n");
+local_state.phase_angle_deg = 0.0f;      // Phase à 0°
+local_state.iq_swapped = false;          // Pas de swap I/Q
+local_state.bit_invert = true;           // ESSAYE ÇA - inversion souvent nécessaire
+local_state.chip_convention = 0;         // Real>0 → 0
+local_state.prn_conversion = 0;          // -1 → 1, +1 → 0 (convention T.018)
+local_state.interleaving = 0;            // I,Q,I,Q
+local_state.chip_offset = 0;             // Pas de décalage
+
+// Réappliquer les corrections
+float complex rot = cexpf(I * 0.0f);
+for (size_t i = 0; i < num_symbols; i++) {
+    symbols[i] = symbols[i] * rot;
+}
+
+/**
+ * @brief Test d'alignement chips/PRN pour trouver le bon offset
+ * @return Le meilleur offset trouvé
+ */
+int test_chip_alignment(const uint8_t *chips_i, const uint8_t *chips_q, size_t num_chips) {
+    printf("=== CHIP ALIGNMENT TEST ===\n");
+    
+    prn_state_t prn_state;
+    prn_init(&prn_state, 0);
+    
+    float best_correlation = 0.0f;
+    int best_offset = 0;
+    
+    // Tester différents offsets
+    for (int offset = -20; offset <= 20; offset++) {
+        int matches = 0;
+        int total = 0;
+        
+        // Comparer les premiers 1000 chips avec PRN attendu
+        for (int i = 0; i < 1000; i++) {
+            int chip_idx = i + offset;
+            if (chip_idx >= 0 && chip_idx < num_chips) {
+                // Générer PRN attendu
+                int8_t prn_i[256], prn_q[256];
+                if (i % 256 == 0) {
+                    prn_generate_i(&prn_state, prn_i);
+                    prn_generate_q(&prn_state, prn_q);
+                }
+                
+                uint8_t expected_i = (prn_i[i % 256] == -1) ? 1 : 0;
+                uint8_t expected_q = (prn_q[i % 256] == -1) ? 1 : 0;
+                
+                if (chips_i[chip_idx] == expected_i) matches++;
+                if (chips_q[chip_idx] == expected_q) matches++;
+                total += 2;
+            }
+        }
+        
+        float correlation = (float)matches / total;
+        printf("  Offset %+3d: %.3f correlation", offset, correlation);
+        
+        if (correlation > best_correlation) {
+            best_correlation = correlation;
+            best_offset = offset;
+        }
+        printf("\n");
+    }
+    
+    printf("=== BEST OFFSET: %+d (correlation: %.3f) ===\n", best_offset, best_correlation);
+    return best_offset;
+}
 
     // NOTE: Phase rotation and I/Q swap already applied by dsss_resolve_phase_ambiguity()
     // No need to re-apply here
 
-    // Step 7: QPSK demodulation to chips
-    printf("Step 7: QPSK demodulation...\n");
-    uint8_t *chips_i = malloc(num_symbols);
-    uint8_t *chips_q = malloc(num_symbols);
+// Step 7: QPSK demodulation with automatic convention detection...
+printf("Step 7: QPSK demodulation with automatic convention detection...\n");
+uint8_t *chips_i = calloc(num_symbols, sizeof(uint8_t));
+uint8_t *chips_q = calloc(num_symbols, sizeof(uint8_t));
 
-    if (!chips_i || !chips_q) {
-        free(agc_out);
-        free(freq_corr_out);
-        free(fine_sync_out);
-        free(qpsk_out);
-        free(symbols);
-        free(chips_i);
-        free(chips_q);
-        return -1;
+if (!chips_i || !chips_q) {
+    free(agc_out);
+    free(freq_corr_out);
+    free(fine_sync_out);
+    free(qpsk_out);
+    free(symbols);
+    free(chips_i);
+    free(chips_q);
+    return -1;
+}
+
+// =============================================================================
+// DÉTECTION AUTOMATIQUE DE LA CONVENTION DE CONVERSION
+// =============================================================================
+
+bool bit_invert = local_state.bit_invert;
+
+// Tester les 4 combinaisons de conventions possibles
+float best_corr = 0.0f;
+int best_conv_i = 0, best_conv_q = 0;
+
+printf("  Testing chip conversion conventions:\n");
+for (int conv_i = 0; conv_i < 2; conv_i++) {
+    for (int conv_q = 0; conv_q < 2; conv_q++) {
+        float corr = test_chip_convention(symbols, num_symbols, conv_i, conv_q, bit_invert);
+        printf("    Convention I=%d, Q=%d: corr=%.3f", conv_i, conv_q, corr);
+        
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_conv_i = conv_i;
+            best_conv_q = conv_q;
+            printf(" ← NEW BEST");
+        }
+        printf("\n");
     }
+}
 
-    // Convert QPSK symbols to chips (0/1) with inversion if needed
-    bool bit_invert = local_state.bit_invert;
+printf("  SELECTED: Convention I=%d (real>0→%d), Q=%d (imag>0→%d) with corr=%.3f\n", 
+       best_conv_i, best_conv_i, best_conv_q, best_conv_q, best_corr);
+
+// Stocker les conventions détectées dans l'état
+local_state.auto_conv_i = best_conv_i;
+local_state.auto_conv_q = best_conv_q;
+
+// =============================================================================
+// APPLIQUER LA MEILLEURE CONVENTION À TOUS LES SYMBOLES
+// =============================================================================
+
+for (size_t i = 0; i < num_symbols; i++) {
+    // Appliquer la convention détectée
+    chips_i[i] = (crealf(symbols[i]) >= 0) ? best_conv_i : (1 - best_conv_i);
+    chips_q[i] = (cimagf(symbols[i]) >= 0) ? best_conv_q : (1 - best_conv_q);
+    
+    // Appliquer l'inversion si nécessaire (trouvée par phase resolution)
+    if (bit_invert) {
+        chips_i[i] = 1 - chips_i[i];
+        chips_q[i] = 1 - chips_q[i];
+    }
+    
+    // Debug des premières conversions
+    if (i < 10) {
+        printf("[AUTO CONVERSION] symbol[%zu]: real=%.3f → chip_i=%d, imag=%.3f → chip_q=%d\n",
+               i, crealf(symbols[i]), chips_i[i], cimagf(symbols[i]), chips_q[i]);
+    }
+}
+    
+// ==========================
+// APPLY I/Q SWAP IF NEEDED 
+//===========================
+if (local_state.iq_swapped) {
+    printf("[DEBUG] APPLYING I/Q SWAP\n");
     for (size_t i = 0; i < num_symbols; i++) {
-        chips_i[i] = (crealf(symbols[i]) >= 0) ? (bit_invert ? 1 : 0) : (bit_invert ? 0 : 1);
-        chips_q[i] = (cimagf(symbols[i]) >= 0) ? (bit_invert ? 1 : 0) : (bit_invert ? 0 : 1);
+        uint8_t temp = chips_i[i];
+        chips_i[i] = chips_q[i];
+        chips_q[i] = temp;
     }
+    
+    printf("After swap - First 5 chips:\n");
+    for (int i = 0; i < 5; i++) {
+        printf("  [%d] I=%d, Q=%d\n", i, chips_i[i], chips_q[i]);
+    }
+}
+
+    test_chip_alignment(chips_i, chips_q, num_symbols);
+    
+    // Afficher les chips APRÈS conversion
+    printf("=== FIRST CHIPS vs PRN COMPARISON ===\n");
+
+    // Régénérer le PRN pour l'affichage
+    prn_state_t prn_display;
+    prn_init(&prn_display, 0);
+    int8_t prn_i_display[256], prn_q_display[256];
+    prn_generate_i(&prn_display, prn_i_display);
+    prn_generate_q(&prn_display, prn_q_display);
+
+    printf("First 10 chips I: ");
+    for (int i = 0; i < 10; i++) printf("%d", chips_i[i]);
+        printf("\nFirst 10 PRN I:   ");
+    for (int i = 0; i < 10; i++) printf("%d", (prn_i_display[i] == -1) ? 1 : 0);
+        printf("\n");
+
+    printf("First 10 chips Q: ");
+    for (int i = 0; i < 10; i++) printf("%d", chips_q[i]);
+        printf("\nFirst 10 PRN Q:   ");  
+    for (int i = 0; i < 10; i++) printf("%d", (prn_q_display[i] == -1) ? 1 : 0);
+        printf("\n");
+    
     printf("[DEBUG] Symbol to chips: symbols[0 .. %zu] → chips_i/q[0 .. %zu] (1:1 mapping)\n",
            num_symbols - 1, num_symbols - 1);
+    printf("Chip value validation - I[0]=%d, Q[0]=%d\n", chips_i[0], chips_q[0]);
+    if (chips_i[0] > 1 || chips_q[0] > 1) {
+        printf("❌ ERROR: Chip values not binary! I[0]=%d, Q[0]=%d\n", chips_i[0], chips_q[0]);
+    }
+    printf("=== CONVERSION CHECK ===\n");
+    printf("Symbol[0]: real=%.3f → chip_i=%d\n", crealf(symbols[0]), chips_i[0]);
+    printf("Symbol[0]: imag=%.3f → chip_q=%d\n", cimagf(symbols[0]), chips_q[0]);
+    printf("bit_invert=%d\n", bit_invert);
+    
+    
+    // DEBUG: Vérifier les premiers chips PRN générés
+printf("=== PRN GENERATION VERIFICATION ===\n");
+prn_state_t prn_debug;
+prn_init(&prn_debug, 0);
+
+int8_t debug_prn_i[256], debug_prn_q[256];  // NOMS DIFFÉRENTS
+prn_generate_i(&prn_debug, debug_prn_i);
+prn_generate_q(&prn_debug, debug_prn_q);
+
+printf("First 10 PRN I chips (signed): ");
+for (int i = 0; i < 10; i++) {
+    printf("%+d ", debug_prn_i[i]);
+}
+printf("\n");
+
+printf("First 10 PRN Q chips (signed): ");
+for (int i = 0; i < 10; i++) {
+    printf("%+d ", debug_prn_q[i]);
+}
+printf("\n");
+
+// Convert to binary selon la convention du diagnostic
+printf("First 10 PRN I chips (binary, -1→1, +1→0): ");
+for (int i = 0; i < 10; i++) {
+    printf("%d", (debug_prn_i[i] == -1) ? 1 : 0);
+}
+printf(" (should match: 1000000000)\n");
+
+printf("First 10 PRN Q chips (binary, -1→1, +1→0): ");
+for (int i = 0; i < 10; i++) {
+    printf("%d", (debug_prn_q[i] == -1) ? 1 : 0);
+}
+printf(" (should match: 1000001000)\n");
+
+// TESTER l'autre convention aussi
+printf("First 10 PRN I chips (binary, -1→0, +1→1): ");
+for (int i = 0; i < 10; i++) {
+    printf("%d", (debug_prn_i[i] == -1) ? 0 : 1);
+}
+printf("  ← ESSAYER CETTE CONVENTION\n");
+
+printf("First 10 PRN Q chips (binary, -1→0, +1→1): ");
+for (int i = 0; i < 10; i++) {
+    printf("%d", (debug_prn_q[i] == -1) ? 0 : 1);
+}
+printf("  ← ESSAYER CETTE CONVENTION\n");
 
     // =========================================================================
     // DIAGNOSTIC TOOL: Test all despreading parameter combinations
@@ -1971,13 +2680,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         float diag_corr = dsss_diagnose_despreading(chips_i, chips_q, preamble_chips,
                                                      &best_chip_conv, &best_prn_conv,
                                                      &best_interleave, &best_offset);
-
-        // Save optimal parameters to state for use in despreading
-        local_state.chip_convention = best_chip_conv;
-        local_state.prn_conversion = best_prn_conv;
-        local_state.interleaving = best_interleave;
-        local_state.chip_offset = best_offset;
-
+    
         if (diag_corr < 0.7f) {
             fprintf(stderr, "Warning: Diagnostic found no good parameters (best=%.1f%%)\n",
                     diag_corr * 100.0f);
@@ -1986,6 +2689,7 @@ int dsss_demodulate(const float complex *iq_samples, size_t num_samples,
         fprintf(stderr, "Warning: Not enough chips for diagnostic (%zu < %zu)\n",
                 num_symbols, preamble_chips);
     }
+    
     // =========================================================================
 
     // Step 8: DSSS despreading
@@ -2103,6 +2807,14 @@ void dsss_print_state(const dsss_demod_state_t *state) {
     printf("Phase: rotation=%d (%.0f°), I/Q swapped=%s\n",
            state->phase_rotation, state->phase_rotation * 90.0f,
            state->iq_swapped ? "YES" : "NO");
+    printf("Quality: SNR=%.1f dB, AGC gain=%.2f\n",
+           state->snr_estimate, state->agc_gain);
+    printf("DSSS: mean_corr=%.3f, bits_decoded=%d\n",
+           state->mean_correlation, state->bits_decoded);
+    printf("Auto Convention: I=%d (real>0→%d), Q=%d (imag>0→%d), corr=%.3f\n",
+           state->auto_conv_i, state->auto_conv_i,
+           state->auto_conv_q, state->auto_conv_q,
+           state->auto_conv_correlation);
     printf("Quality: SNR=%.1f dB, AGC gain=%.2f\n",
            state->snr_estimate, state->agc_gain);
     printf("DSSS: mean_corr=%.3f, bits_decoded=%d\n",

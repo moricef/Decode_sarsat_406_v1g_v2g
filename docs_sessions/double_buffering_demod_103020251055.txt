@@ -1,0 +1,202 @@
+Vous avez absolument raison ! Je me suis égaré dans une discussion théorique alors que le vrai problème est pratique. Concentrons-nous sur l'analyse des bugs critiques qui empêchent votre démodulateur de fonctionner.
+
+## 🔍 **ANALYSE DES BUGS CRITIQUES**
+
+En examinant votre code, je vois plusieurs problèmes fondamentaux :
+
+### **🚨 BUG #1 : TIMING RECOVERY DÉFAILLANTE**
+
+**Problème** : Seulement 33,079 symboles récupérés au lieu de 38,400 attendus
+
+```c
+// Dans dsss_timing_recovery_corrected(), le problème est ici :
+while (timing_phase < num_samples - 4 && symbol_count < 40000) {
+    // ...
+    timing_phase += sps;  // ← INCORRECT pour DSSS!
+}
+```
+
+**Correction** : Pour DSSS, vous devez échantillonner à la **fréquence chip** (38.4 kchips/s), pas symbole :
+
+```c
+// Remplacer :
+int sps = (int)(samp_rate / DSSS_CHIP_RATE + 0.5f);
+
+// Par :
+float chips_per_sample = DSSS_CHIP_RATE / samp_rate;  // Inverse!
+float phase_increment = 1.0f / chips_per_sample;      // Échantillonner à 38.4 kHz
+```
+
+### **🚨 BUG #2 : PHASE RESOLUTION TESTE LES MAUVAISES DONNÉES**
+
+**Problème** : Vous testez la phase sur les symboles **avant désétalement** :
+
+```c
+// Dans dsss_resolve_phase_ambiguity(), vous testez :
+float corr = test_chip_convention(symbols, num_symbols, conv_i, conv_q, invert);
+// ↑ TEST SUR SYMBOLES SPREADÉS = ALÉATOIRE!
+```
+
+**Correction** : Il faut d'abord désétaler le préambule, puis tester le pattern :
+
+```c
+// 1. Désétaler les 50 bits du préambule
+uint8_t despread_preamble[50];
+dsss_despread_preamble_only(symbols, despread_preamble);
+
+// 2. Tester contre le pattern attendu [0,1,0,1,...]
+float corr = compare_with_preamble_pattern(despread_preamble);
+```
+
+### **🚨 BUG #3 : CONVERSION SYMBOLE→CHIP INCONSISTANTE**
+
+**Problème** : Multiples conventions de conversion en conflit :
+
+```c
+// Dans dsss_resolve_phase_ambiguity(), ligne ~500 :
+chips_i[i] = (crealf(symbols[i]) >= 0) ? (best_invert ? 1 : 0) : (best_invert ? 0 : 1);
+
+// Mais dans dsss_despread(), vous utilisez state->chip_convention différemment!
+```
+
+**Correction** : Standardiser une seule convention :
+
+```c
+// Convention cohérente : Real>0 → 0, Real<0 → 1
+chips_i[i] = (crealf(symbols[i]) >= 0) ? 0 : 1;
+chips_q[i] = (cimagf(symbols[i]) >= 0) ? 0 : 1;
+```
+
+## 🛠️ **CORRECTIONS IMMÉDIATES**
+
+Voici les corrections les plus urgentes :
+
+### **1. Correction du Timing Recovery**
+
+```c
+int dsss_timing_recovery_corrected(const float complex *input, float complex *output,
+                                  size_t num_samples, size_t *num_symbols, float samp_rate) {
+    
+    // CORRECTION : Échantillonnage à la fréquence CHIP, pas symbole
+    float chips_per_second = DSSS_CHIP_RATE;  // 38.4 kchips/s
+    float samples_per_chip = samp_rate / chips_per_second;
+    float phase_increment = 1.0f / samples_per_chip;  // ← CLÉ!
+
+    printf("[TIMING FIX] Sampling at chip rate: %.2f samples/chip, phase_inc=%.6f\n",
+           samples_per_chip, phase_increment);
+
+    float timing_phase = 2.0f;  // Commencer après la marge
+    size_t chip_count = 0;
+    const size_t max_chips = 38400;  // 150 bits × 256 chips/bit
+
+    while (timing_phase < num_samples - 4 && chip_count < max_chips) {
+        int center_idx = (int)floorf(timing_phase);
+        float mu = timing_phase - center_idx;
+        
+        if (center_idx < 2 || center_idx + 2 >= (int)num_samples) break;
+        
+        // Interpolation cubique
+        output[chip_count] = interpolate_cubic(input, mu, center_idx, num_samples);
+        
+        // CORRECTION : Incrément de phase pour échantillonnage chip rate
+        timing_phase += phase_increment;
+        chip_count++;
+    }
+
+    *num_symbols = chip_count;
+    printf("[TIMING FIX] Recovered %zu chips (attendu: 38400)\n", chip_count);
+    return (chip_count >= 36000) ? 0 : -1;
+}
+```
+
+### **2. Correction de la Phase Resolution**
+
+```c
+int dsss_resolve_phase_ambiguity_fixed(float complex *chips, size_t num_chips,
+                                      int *phase_rot, bool *iq_swap) {
+    
+    // Seulement tester sur le préambule (premiers 12800 chips)
+    const int preamble_chips = 50 * 256;  // 50 bits × 256 chips/bit
+    
+    if (num_chips < preamble_chips) {
+        fprintf(stderr, "Not enough chips for phase resolution\n");
+        return -1;
+    }
+
+    float best_corr = 0.0f;
+    int best_rotation = 0;
+    bool best_swap = false;
+
+    // Tester seulement 4 rotations × 2 swaps = 8 combinaisons
+    for (int rotation = 0; rotation < 4; rotation++) {
+        for (int swap = 0; swap < 2; swap++) {
+            
+            // Appliquer rotation + swap
+            float complex test_chips[preamble_chips];
+            apply_phase_rotation(chips, test_chips, preamble_chips, rotation, swap);
+            
+            // DÉSÉTALER le préambule seulement
+            uint8_t despread_bits[50];
+            despread_preamble(test_chips, despread_bits);
+            
+            // Tester contre le pattern connu [0,1,0,1,...]
+            float corr = check_preamble_pattern(despread_bits);
+            
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_rotation = rotation;
+                best_swap = swap;
+            }
+        }
+    }
+
+    if (best_corr > 0.9f) {
+        *phase_rot = best_rotation;
+        *iq_swap = best_swap;
+        
+        // Appliquer la meilleure combinaison à tous les chips
+        apply_phase_rotation(chips, chips, num_chips, best_rotation, best_swap);
+        return 0;
+    }
+    
+    return -1;
+}
+```
+
+### **3. Instrumentation pour Débuggage**
+
+Ajoutez cette fonction pour visualiser ce qui se passe :
+
+```c
+void debug_first_100_chips(const uint8_t *chips_i, const uint8_t *chips_q, 
+                          const char *stage) {
+    printf("=== DEBUG %s ===\n", stage);
+    printf("First 20 I chips: ");
+    for (int i = 0; i < 20; i++) printf("%d", chips_i[i]);
+    printf("\nFirst 20 Q chips: ");
+    for (int i = 0; i < 20; i++) printf("%d", chips_q[i]);
+    printf("\n");
+    
+    // Comparer avec PRN attendu
+    prn_state_t prn;
+    prn_init(&prn, 0);
+    int8_t prn_i[20], prn_q[20];
+    prn_generate_i(&prn, prn_i);
+    prn_generate_q(&prn, prn_q);
+    
+    printf("First 20 PRN I:   ");
+    for (int i = 0; i < 20; i++) printf("%d", (prn_i[i] == -1) ? 1 : 0);
+    printf("\nFirst 20 PRN Q:   ");
+    for (int i = 0; i < 20; i++) printf("%d", (prn_q[i] == -1) ? 1 : 0);
+    printf("\n");
+}
+```
+
+## 🎯 **PLAN D'ACTION IMMÉDIAT**
+
+1. **Commencez par le Timing Recovery** - C'est le problème le plus critique
+2. **Ajoutez l'instrumentation** pour voir les chips générés vs PRN attendu  
+3. **Corrigez la phase resolution** pour qu'elle teste après désétalement
+4. **Standardisez la conversion symbole→chip**
+
+Voulez-vous que je vous aide à implémenter d'abord la correction du timing recovery ? C'est le problème qui cause la perte de 5,000 symboles et le décalage de -7 bits.

@@ -43,12 +43,14 @@
 #include <math.h>
 #include "dsss_demod.h"
 #include "prn_generator.h"
+#include "dec406.h"
 
 // Stub for decode_beacon (to be implemented)
-void decode_beacon(const uint8_t *bits, int length) {
-    printf("[INFO] decode_beacon() stub: would decode %d bits\n", length);
-    // TODO: Implement full BCH decoder and message parser
-}
+// FIX: Use decode_beacon() from dec406.c (full implementation)
+// void decode_beacon(const uint8_t *bits, int length) {
+//     printf("[INFO] decode_beacon() stub: would decode %d bits\n", length);
+//     // TODO: Implement full BCH decoder and message parser
+// }
 
 // =============================================================================
 // MAIN PROGRAM
