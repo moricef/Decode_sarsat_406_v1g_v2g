@@ -293,7 +293,7 @@ int dsss_agc(const float complex *input, float complex *output,
 /**
  * @brief Generate DSSS preamble reference at chip rate
  *
- * Preamble pattern: 50 bits alternating 0,1,0,1,...
+ * ✅ Preamble pattern: 50 bits ALL ZERO (T.018 §2.2.4)
  * After DSSS spreading: 25×256 = 6,400 chips (I and Q channels)
  */
 static int generate_preamble_chips_for_corr(float complex *preamble_chips) {
@@ -312,9 +312,9 @@ static int generate_preamble_chips_for_corr(float complex *preamble_chips) {
         prn_generate_i(&prn_state_i, prn_i_buf);
         prn_generate_q(&prn_state_q, prn_q_buf);
 
-        // Preamble pattern: alternating 0,1,0,1...
-        int bit_value_i = (bit * 2) % 2;        // Even positions: 0,1,0,1...
-        int bit_value_q = (bit * 2 + 1) % 2;    // Odd positions: 1,0,1,0...
+        // ✅ FIX: Preamble ALL ZERO (T.018 §2.2.4: "All preamble bits are zero")
+        int bit_value_i = 0;  // ALL ZERO
+        int bit_value_q = 0;  // ALL ZERO
 
         // Spread each bit across 256 chips
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
@@ -549,9 +549,7 @@ float dsss_estimate_sample_rate(const float complex *samples, size_t num_samples
  * @brief Generate DSSS preamble reference at chip rate
  *
  * Generates 6,400 chips (25 I bits + 25 Q bits × 256 chips/bit)
- * Preamble pattern: alternating 0,1,0,1,...
- *
- * This matches test_sample_rate.c which successfully detects preamble.
+ * ✅ Preamble pattern: ALL ZERO (T.018 §2.2.4: "All preamble bits are zero")
  *
  * @param preamble_chips Output buffer for chips (6,400 complex chips)
  * @return 0 on success
@@ -572,10 +570,10 @@ static int generate_preamble_chips(float complex *preamble_chips) {
         prn_generate_i(&prn_state_i, prn_i_buf);
         prn_generate_q(&prn_state_q, prn_q_buf);
 
-        // Preamble pattern: alternating 0,1,0,1...
-        // Bit value affects sign of chips
-        int bit_value_i = (bit * 2) % 2;        // Even positions: 0,1,0,1...
-        int bit_value_q = (bit * 2 + 1) % 2;    // Odd positions: 1,0,1,0...
+        // ✅ FIX: Preamble ALL ZERO (T.018 §2.2.4: "All preamble bits are zero")
+        // Bit value affects sign of chips: 0 = preserve, 1 = invert
+        int bit_value_i = 0;  // ALL ZERO
+        int bit_value_q = 0;  // ALL ZERO
 
         // Spread each bit across 256 chips
         for (int c = 0; c < DSSS_SPREADING_FACTOR; c++) {
@@ -1191,7 +1189,7 @@ void validate_cubic_interpolation() {
  * 2. Applique transformation aux symboles
  * 3. Démodule en chips I/Q (SEULEMENT preamble = 12,800 chips)
  * 4. Désétale ces 50 bits de preamble
- * 5. Compare avec pattern attendu [0,1,0,1,...]
+ * 5. ✅ Compare avec pattern attendu [0,0,0,0,...] (T.018 §2.2.4)
  * 6. Garde la meilleure combinaison (corrélation >90%)
  *
  * OPTIMISATION :
@@ -1369,7 +1367,7 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
                          (invert ? 1 : 0) : (invert ? 0 : 1);
     }
 
-    // DÉSÉTALER et comparer avec le pattern 010101...
+    // ✅ DÉSÉTALER et comparer avec le pattern 000000... (T.018 §2.2.4)
     int matches = 0;
     int total_bits_tested = 0;
 
@@ -1402,9 +1400,9 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
         uint8_t bit_i = (corr_i > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
         uint8_t bit_q = (corr_q > DSSS_SPREADING_FACTOR / 2) ? 0 : 1;
 
-        // Pattern attendu du preamble: I=010101..., Q=101010...
-        uint8_t expected_i = (2 * bit) % 2;      // 0,1,0,1,0,1...
-        uint8_t expected_q = (2 * bit + 1) % 2;  // 1,0,1,0,1,0...
+        // ✅ FIX: Pattern attendu = ALL ZERO (T.018 §2.2.4)
+        uint8_t expected_i = 0;  // ALL ZERO
+        uint8_t expected_q = 0;  // ALL ZERO
 
         if (bit_i == expected_i) matches++;
         if (bit_q == expected_q) matches++;
@@ -1624,11 +1622,11 @@ int dsss_resolve_phase_ambiguity(float complex *symbols, size_t num_symbols,
             }
         }
 
-        // Compare with expected pattern (alternating 0101...)
+        // ✅ Compare with expected pattern (ALL ZERO - T.018 §2.2.4)
         int matches = 0;
         int total_test_bits = test_bits_phase2 * 2;
         for (int i = 0; i < total_test_bits; i++) {
-            uint8_t expected_bit = i % 2;
+            uint8_t expected_bit = 0;  // ALL ZERO
             if (despread_bits[i] == expected_bit) matches++;
         }
         float corr = (float)matches / total_test_bits;
