@@ -1,0 +1,111 @@
+Cet exemple montre comment implémenter un récepteur à étalement de spectre à séquence directe (DSSS) pour suivre une balise de sauvetage. Dans cet exemple, le système génère une salve DSSS modulée en OQPSK qui imite le signal d'un émetteur de localisation d'urgence (ELT) défini dans la spécification COSPAS-SARSAT (Search And Rescue Satellite-Aided Tracking) de deuxième génération [1]. Le système transmet la salve via un canal et simule un récepteur qui la détecte, la synchronise, la désétale et la décode.
+
+Avec cet exemple, vous apprendrez à utiliser les objets et fonctions du système MATLAB pour accélérer la conception et la mise en œuvre du système en :
+
+    Calcul des bits de correction d'erreur
+
+    Génération de la séquence de brouillage
+
+    Modulation avec OQPSK
+
+    Altération du canal par décalage de fréquence et de phase
+
+    Mise en œuvre du contrôle automatique du gain
+
+    Détection du préambule
+
+    Estimation du décalage de fréquence grossier et fin
+
+    Récupération de la synchronisation des symboles
+
+    Effectuer la détection et la correction des erreurs
+    
+    COSPAS-SARSAT
+
+Le système COSPAS-SARSAT est un système satellitaire de deuxième génération pour les ELT (balises de détresse) servant de balises de détresse en cas de danger vital pour appeler les autorités gouvernementales [2]. La modulation de transmission utilise la modulation DSSS pour étaler les bits de données modulés par OQPSK. La modulation DSSS ajoute un gain de signal sous forme de gain d'étalement et est idéale pour les transmissions longue distance. L'OQPSK est une modulation résistante aux variations d'amplitude. Ses propriétés de signal à enveloppe constante et à phase continue sont idéales pour une amplification efficace à l'aide d'amplificateurs de puissance. Une rafale de paquets d'une seconde contient les informations suivantes :
+
+Préambule (50 bits, 166,7 ms) : tous les bits du préambule sont à zéro.
+
+    Message d'information (202 bits, 673,3 ms) : les informations contiennent des données de localisation, des codes d'identification et l'état du récepteur.
+
+    Correction d'erreur (parité) (48 bits, 160 ms) : Les 202 bits d'information sont codés à l'aide d'un code de correction d'erreur.
+
+La salve se compose d'un préambule, suivi des informations utiles, et se termine par des bits de parité pour la détection et la correction des erreurs. Le préambule aide le récepteur à établir rapidement la synchronisation, avec une forte probabilité de détection et une faible probabilité de fausse alarme. Pour prolonger la durée de transmission du signal d'urgence, le système préserve l'autonomie de la batterie en émettant la salve toutes les 30 secondes avec un temps de temporisation aléatoire afin d'éviter qu'une autre balise de détresse n'émette accidentellement au même moment. La transmission est traitée comme une salve à accès aléatoire. Par conséquent, l'heure de début du signal, le décalage de fréquence, le décalage de phase, le décalage temporel, l'intensité du signal et le canal sont inconnus du récepteur.
+
+La taille totale du paquet est de 300 bits. Le système répartit chaque bit avec un facteur d'étalement de 256, les branches en phase (I) et en quadrature (Q) de la modulation OQPSK utilisant des codes d'étalement orthogonaux uniques. L'ordre de modulation OQPSK étant de deux bits par symbole, le système envoie deux bits tous les 256 symboles OQPSK. Avec un débit de 38 400 bits par seconde, la durée du paquet est d'une seconde (150 bits transmis par branche I et Q, chaque bit étant réparti sur 256 symboles OQPSK).
+Aperçu de l'exemple
+
+Cet exemple modélise un émetteur et un récepteur ELT. L'émetteur génère une impulsion après un nombre de secondes paramétrable par l'utilisateur. Le récepteur peut être embarqué dans un avion ou un satellite. Cet exemple peut générer des perturbations telles que :
+
+    Évanouissement à grande échelle dû à la perte de trajet
+
+    Bruit blanc gaussien additif (AWGN) issu du bruit thermique
+
+    Décalage de fréquence et de phase dû à la discordance de l'oscillateur émetteur-récepteur et aux effets Doppler
+    
+    Paramètres
+
+Définissez les paramètres de simulation et de réception. La distance affecte la puissance du signal reçu en raison de l'affaiblissement de propagation. La vitesse introduit des effets Doppler, comme ceux des récepteurs d'un avion de recherche se déplaçant à 200 mètres par seconde, ou des récepteurs en orbite basse (LEO) se déplaçant à 7 800 mètres par seconde, qui peuvent entraîner un décalage de fréquence d'environ 10 kHz.
+
+Définissez les paramètres du protocole de transmission. Les paramètres du système COSPAS-SARSAT sont détaillés dans [1].
+
+Calculer les paramètres dérivés des paramètres.
+
+Émetteur DSSS
+
+La communication à spectre étalé à séquence directe (DSSS) est une méthode de codage d'un flux de bits avec une longue séquence de bits présentant une autocorrélation nulle. Cette séquence est appelée bruit pseudo-aléatoire (PRN). Cette méthode étale les bits entrants de telle sorte que la bande passante du spectre augmente et que le spectre de puissance du signal ressemble à un bruit blanc à bande limitée grâce à cette autocorrélation nulle. Cette caractéristique rend le DSSS résistant aux interférences à bande étroite et au brouillage. L'étalement ajoute également des informations au signal, agissant comme un gain d'étalement dépendant du facteur d'étalement, c'est-à-dire du nombre de bits d'étalement par bit d'entrée.
+
+À titre d'exemple générique d'étalement DSSS, considérons les 24 premiers bits de la séquence PRN ci-dessous. Choisissez un facteur d'étalement de 4, de sorte que chaque bit codé soit étalé avec quatre bits d'étalement. Encodez six bits d'information de telle sorte qu'un 1 logique inverse la séquence PRN sur quatre bits et les utilise comme bits d'étalement, tandis qu'un 0 logique préserve la séquence PRN sur quatre bits (la séquence mappée ci-dessous, où les bits soulignés indiquent l'opération inverse).
+
+    Séquence PRN : 1000 0010 0001 1000 1010 0111
+
+    Bits d'information : 1 0 0 1 1 0
+
+    Séquence mappée : 1000 0010 0001 1000 1010 0111
+
+    Bits de sortie DSSS : 0111 0010 0001 0111 0101 0111
+
+L'émetteur DSSS prend un flux binaire série entrant et le divise en deux flux : le flux en phase (I) prend les bits impairs et le flux en quadrature (Q) prend les bits pairs. Deux générateurs de séquences PRN produisent 38 400 bits par flux, utilisés comme séquence d'étalement. Les codes d'étalement reposent sur un polynôme générateur x23+x18+1. Les flux I et Q utilisent une séquence unique en initialisant le générateur PRN avec des polynômes prédéfinis. Le flux Q est décalé d'un demi-chip pour produire la constellation QPSK décalée.
+
+Générez les séquences PRN à l'aide de comm.PNSequence. L'émetteur et le récepteur utilisent cette séquence pour diffuser et désétaler les données, respectivement.
+
+La spécification COSPAS-SARSAT répertorie les 64 premiers éléments des séquences I et Q normales afin de vérifier la bonne implémentation. Utilisez la fonction dec2hex pour générer les valeurs hexadécimales et les vérifier par rapport à la norme.
+
+
+
+
+Récepteur
+
+La détection du préambule détecte et capture une salve complète dans le tampon d'échantillonnage pour traitement. Le récepteur est confronté à des difficultés telles que l'incertitude du temps de transmission, le décalage de fréquence dû à des oscillateurs radio différents et au décalage Doppler, le déphasage dû à l'échantillonnage asynchrone, la dérive temporelle due à des horloges différentes et les conditions de canal dues à la perte de trajet et aux trajets multiples. Le récepteur compense toutes ces altérations avant la fin du préambule afin de pouvoir synchroniser les données utiles pour la démodulation.
+
+Structure du récepteur
+
+Le contrôle automatique de gain (AGC) ajuste les amplitudes du signal entrant affectées par l'affaiblissement de propagation. La détection de préambule recherche en continu le début d'une salve COSPAS-SARSAT dans le tampon d'échantillonnage. Une fois la salve détectée, les échantillons sont extraits du tampon d'échantillonnage et transmis au bloc de correction de fréquence grossière afin d'estimer et de corriger le décalage de fréquence. Une correction de fréquence fine est ensuite effectuée pour que le décalage de fréquence soit le plus proche possible de zéro. La récupération temporelle prend le signal suréchantillonné et corrige la phase correcte afin que la constellation s'aligne sur la constellation QPSK de référence. L'alignement de phase constant compense également la dérive temporelle. Le signal est ensuite démodulé plusieurs fois avec différents décalages de phase et de symboles afin de lever l'ambiguïté de phase résultant des algorithmes de correction de fréquence et de récupération temporelle. Les symboles QPSK sont désétalés et les bits décodés sont transmis à un bloc de détection d'erreurs afin de détecter et de corriger les erreurs dans les données utiles.
+Mise en mémoire tampon des échantillons
+
+Les transmissions de balises étant asynchrones, une partie de la salve peut être capturée dans un tampon, tandis que la seconde partie peut être contenue dans le tampon suivant. Pour garantir la capture d'une salve dans un seul tampon, un système de double mise en mémoire tampon, ou « ping-pong », est utilisé. Il consiste à créer un tampon d'échantillons d'une longueur permettant de stocker deux salves de transmission complètes. Ce tampon est partitionné en deux sections : un tampon d'échantillons précédents et un tampon d'échantillons récents. La seconde moitié du tampon d'échantillons est remplie par une seconde des échantillons les plus récents, tandis que la première moitié contient les échantillons précédents. Lorsque le tampon d'échantillons le plus récent est rempli, une recherche du préambule peut être effectuée dans les deux tampons d'échantillons. Si aucun préambule n'est détecté, le tampon d'échantillons récents remplace l'ancien. La longueur du tampon d'échantillons garantit qu'une salve complète couvre les deux tampons d'échantillons.
+
+Le tampon d'échantillons est représenté à droite dans la figure ci-dessous. Il est rempli de nouvelles données, puis décalé vers la gauche après chaque pas de temps. À l'instant t0, le tampon d'échantillons ne capture aucune partie de la rafale de transmission. À l'instant t1, une partie de la rafale de transmission est capturée dans le tampon d'échantillons. À l'instant t2, la partie restante est capturée, de sorte que la rafale entière est contenue dans le tampon d'échantillons à l'instant t2.
+
+Schéma de double tampon
+
+Créez un tampon d'échantillons d'une longueur deux fois supérieure à celle nécessaire pour stocker une rafale de transmission complète. Commencez à alimenter une seconde d'échantillons, appliquez le contrôle automatique de gain et recherchez le préambule.
+
+
+Contrôle automatique du gain
+
+La plage dynamique du récepteur doit permettre de détecter des signaux faibles à une distance maximale jusqu'à des signaux forts reçus à courte portée. La nature sporadique des signaux ELT signifie que le CAG atteint son gain maximal entre les salves de transmission. Le CAG doit alors ajuster rapidement le gain lorsque la salves est reçue au niveau du récepteur afin d'éviter la saturation du signal au niveau de l'amplificateur de puissance et/ou du convertisseur analogique-numérique (CAN).
+
+Normalisez les signaux d'entrée du récepteur à l'aide d'un objet système comm.AGC de sorte que la puissance du signal soit égale à l'unité. Configurez l'AGC pour une moyenne sur 10 symboles et définissez le gain maximal afin d'amplifier jusqu'au seuil de bruit. Cet exemple ne modélise pas les effets du bruit de quantification du CAN.
+
+
+Détection de préambule
+
+Le premier groupe d'échantillons du préambule est considéré comme inutilisable pendant que le CAG ajuste la puissance du signal d'entrée reçu à la valeur de consigne appropriée. Utilisez uniquement la dernière partie du préambule pour la détection du préambule en spécifiant un décalage. Une corrélation avec un préambule long réduit la probabilité de fausses alarmes (détection erronée des préambules) avec un faible rapport signal/bruit (SNR), mais sa probabilité de détection est faible avec un décalage de fréquence élevé. Raccourcissez la longueur du préambule corrélé pour lutter contre les effets du décalage de fréquence tout en maintenant une faible probabilité de fausses alarmes. Le décalage de fréquence affecte négativement la détection du préambule basée sur le corrélateur ; des décalages de fréquence différents sont donc appliqués au préambule de référence lors de la recherche du préambule.
+
+Corrélez la séquence de préambule avec le tampon d'échantillons sur différents décalages de fréquence pour détecter le préambule décalé en fréquence.
+
+Compensation du décalage de fréquence et de phase
+
+Le décalage de fréquence et de temps entraîne une rotation de la constellation du signal détecté et l'affichage de caractéristiques d'enveloppe non constantes. Le traitement du récepteur en aval détecte ces décalages et les corrige afin de produire un signal stable, adapté à la démodulation et au décodage. Utilisez l'objet système comm.CoarseFrequencyCompensator pour estimer le décalage de fréquence porteuse sur la salve reçue et l'appliquer au tampon d'échantillonnage.
+
