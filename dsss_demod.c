@@ -326,100 +326,176 @@ static void carrier_sync_process(carrier_sync_t *sync, const float complex *inpu
 }
 
 /* ============================================================================
- * SYMBOL TIMING RECOVERY (GARDNER DETECTOR)
+ * SYMBOL TIMING RECOVERY FOR OQPSK
  * ============================================================================ */
 
 typedef struct {
-    float mu;            // Fractional timing offset
-    float mu_gain;       // Loop gain
-    float omega;         // Samples per symbol
-    float omega_rel;     // Relative sample rate
-    float max_deviation;
-    float damping;
-    int sps_in;
-    float prev_sample;
+    float mu;              // Fractional timing offset [0, 1)
+    float omega;           // Samples per symbol
+    float k1;              // Proportional loop filter gain
+    float k2;              // Integrator loop filter gain
+    float W;               // Integrator state
+    int sps;
+
+    // OQPSK state buffer (caches last half symbol of Q channel)
+    float q_buffer[128];
+    int q_buffer_len;
+    float q_delay_fractional;  // Exact fractional delay for Q (sps/2)
+    int state_valid;
+
+    // Strobe counter for symbol-rate output
+    float strobe_counter;
+
+    // TED state
+    float complex prev_symbol;
+    float complex prev_mid;
 } timing_recovery_t;
 
 /**
+ * @brief Farrow piecewise parabolic interpolator (α=0.5)
+ */
+static inline float farrow_interpolate(const float *samples, int base_idx, float mu) {
+    // Farrow structure with α = 0.5
+    // Requires 4 samples: x[k-1], x[k], x[k+1], x[k+2]
+    float v0 = samples[base_idx - 1];
+    float v1 = samples[base_idx];
+    float v2 = samples[base_idx + 1];
+    float v3 = samples[base_idx + 2];
+
+    // Farrow coefficients for piecewise parabolic with α=0.5
+    float c0 = v1;
+    float c1 = -v0/3.0f - v1/2.0f + v2 - v3/6.0f;
+    float c2 = v0/2.0f - v1 + v2/2.0f;
+
+    return c0 + mu * (c1 + mu * c2);
+}
+
+static inline float complex farrow_interpolate_complex(const float complex *samples,
+                                                       int base_idx, float mu) {
+    float re_interp = farrow_interpolate((float*)samples + 2*base_idx - 2, base_idx, mu);
+    float im_interp = farrow_interpolate((float*)samples + 2*base_idx - 1, base_idx, mu);
+    return re_interp + I * im_interp;
+}
+
+/**
  * @brief Initialize timing recovery for OQPSK
+ * PI loop filter: K1, K2 computed from loop_bw, damping, detector_gain
  */
 static void timing_recovery_init(timing_recovery_t *tr, int sps,
                                 float loop_bw, float damping, float detector_gain) {
-    tr->mu = 0.0f;
+    tr->mu = 0.5f;
     tr->omega = (float)sps;
-    tr->omega_rel = 1.0f;
-    tr->damping = damping;
-    tr->sps_in = sps;
-    tr->max_deviation = 0.5f;
+    tr->sps = sps;
+    tr->W = 0.0f;
+    tr->strobe_counter = 0.0f;
+    tr->state_valid = 0;
+    tr->q_delay_fractional = (float)sps / 2.0f;  // Exact: 65/2 = 32.5
+    tr->q_buffer_len = (int)(tr->q_delay_fractional) + 3;  // Integer part + margin for interpolation
+    tr->prev_symbol = 0.0f;
+    tr->prev_mid = 0.0f;
 
-    // Calculate loop filter gain
-    tr->mu_gain = loop_bw * detector_gain;
-    tr->prev_sample = 0.0f;
+    // PI loop filter gains
+    float theta = loop_bw / (float)sps;
+    theta = theta / (damping + 1.0f / (4.0f * damping));
+    float denom = 1.0f + 2.0f * damping * theta + theta * theta;
+    tr->k1 = -(4.0f * damping * theta / denom) / detector_gain;
+    tr->k2 = -(4.0f * theta * theta / denom) / detector_gain;
 }
 
 /**
  * @brief Process OQPSK signal through timing recovery
- * Converts oversampled OQPSK to symbol-rate QPSK
+ * MATLAB: sampleBufferQPSK = [real(rx(1:end-sps/2)) + 1i*imag(rx(sps/2+1:end)); zeros(sps/2,1)]
  */
 static size_t timing_recovery_process(timing_recovery_t *tr,
                                      const float complex *input, size_t in_len,
                                      float complex *output, int sps) {
-    // For OQPSK: delay Q channel by half chip period, then process as QPSK
-    float complex *oqpsk_converted = malloc(in_len * sizeof(float complex));
 
-    // Convert OQPSK to QPSK: align I and Q
-    int delay = sps / 2;
-    for (size_t i = 0; i < in_len - delay; i++) {
-        float re = crealf(input[i]);
-        float im = cimagf(input[i + delay]);
-        oqpsk_converted[i] = re + I * im;
+    int delay_int = (int)tr->q_delay_fractional;
+    float delay_frac = tr->q_delay_fractional - (float)delay_int;
+
+    // Build extended Q with state buffer: [q_state; new_Q]
+    size_t q_ext_len = tr->q_buffer_len + in_len;
+    float *q_ext = malloc(q_ext_len * sizeof(float));
+
+    if (tr->state_valid) {
+        memcpy(q_ext, tr->q_buffer, tr->q_buffer_len * sizeof(float));
+    } else {
+        memset(q_ext, 0, tr->q_buffer_len * sizeof(float));
+        tr->state_valid = 1;
     }
 
-    // Timing recovery using Gardner detector
+    for (size_t i = 0; i < in_len; i++) {
+        q_ext[tr->q_buffer_len + i] = cimagf(input[i]);
+    }
+
+    // Save state for next call
+    memcpy(tr->q_buffer, q_ext + q_ext_len - tr->q_buffer_len, tr->q_buffer_len * sizeof(float));
+
+    // QPSK alignment: I[n] + j*Q[n+delay_fractional]
+    float complex *qpsk_aligned = malloc(in_len * sizeof(float complex));
+    for (size_t i = 0; i < in_len; i++) {
+        float i_val = crealf(input[i]);
+        int q_base_idx = i + delay_int;
+        float q_val = 0.0f;
+        if (q_base_idx >= 1 && q_base_idx + 2 < (int)q_ext_len) {
+            q_val = farrow_interpolate(q_ext, q_base_idx, delay_frac);
+        }
+        qpsk_aligned[i] = i_val + I * q_val;
+    }
+
+    free(q_ext);
+
+    float *i_aligned = malloc(in_len * sizeof(float));
+    float *q_aligned = malloc(in_len * sizeof(float));
+    for (size_t i = 0; i < in_len; i++) {
+        i_aligned[i] = crealf(qpsk_aligned[i]);
+        q_aligned[i] = cimagf(qpsk_aligned[i]);
+    }
+    free(qpsk_aligned);
+
+    size_t total_len = in_len;
     size_t out_idx = 0;
-    size_t in_idx = 0;
-    float complex prev_mid = 0.0f;
+    size_t sample_idx = 2;
 
-    while (in_idx + sps < in_len - delay) {
-        // Interpolate at mu offset
-        int base_idx = in_idx + (int)tr->mu;
-        float frac = tr->mu - floorf(tr->mu);
+    while (sample_idx + 3 < total_len) {
+        tr->strobe_counter += 1.0f / tr->omega;
 
-        // Linear interpolation
-        float complex sample;
-        if (base_idx + 1 < (int)(in_len - delay)) {
-            sample = oqpsk_converted[base_idx] * (1.0f - frac) +
-                    oqpsk_converted[base_idx + 1] * frac;
-        } else {
-            sample = oqpsk_converted[base_idx];
+        if (tr->strobe_counter >= 1.0f) {
+            tr->strobe_counter -= 1.0f;
+
+            if (sample_idx + 3 < total_len) {
+                float i_sym = farrow_interpolate(i_aligned, sample_idx, tr->mu);
+                float q_sym = farrow_interpolate(q_aligned, sample_idx, tr->mu);
+                float complex symbol = i_sym + I * q_sym;
+                output[out_idx++] = symbol;
+
+                int mid_idx = sample_idx - sps/2;
+                if (mid_idx >= 2) {
+                    float i_mid = farrow_interpolate(i_aligned, mid_idx, tr->mu);
+                    float q_mid = farrow_interpolate(q_aligned, mid_idx, tr->mu);
+                    float complex mid_symbol = i_mid + I * q_mid;
+
+                    float err_re = crealf(mid_symbol) * (crealf(tr->prev_symbol) - crealf(symbol));
+                    float err_im = cimagf(mid_symbol) * (cimagf(tr->prev_symbol) - cimagf(symbol));
+                    float timing_error = err_re + err_im;
+
+                    tr->W += tr->k2 * timing_error;
+                    float v = tr->W + tr->k1 * timing_error;
+
+                    tr->mu += v / tr->omega;
+                    while (tr->mu >= 1.0f) tr->mu -= 1.0f;
+                    while (tr->mu < 0.0f) tr->mu += 1.0f;
+
+                    tr->prev_symbol = symbol;
+                }
+            }
         }
 
-        output[out_idx++] = sample;
-
-        // Calculate timing error using Gardner detector
-        // Sample at midpoint between symbols
-        int mid_idx = base_idx + sps / 2;
-        float complex mid_sample = 0.0f;
-        if (mid_idx < (int)(in_len - delay)) {
-            mid_sample = oqpsk_converted[mid_idx];
-        }
-
-        // Gardner timing error detector
-        float error_re = (crealf(sample) - crealf(prev_mid)) * crealf(mid_sample);
-        float error_im = (cimagf(sample) - cimagf(prev_mid)) * cimagf(mid_sample);
-        float timing_error = error_re + error_im;
-
-        prev_mid = sample;
-
-        // Update mu and omega
-        tr->mu += tr->omega + tr->mu_gain * timing_error;
-
-        // Advance to next symbol
-        in_idx += (int)tr->mu;
-        tr->mu -= floorf(tr->mu);
+        sample_idx++;
     }
 
-    free(oqpsk_converted);
+    free(i_aligned);
+    free(q_aligned);
     return out_idx;
 }
 
@@ -731,6 +807,7 @@ preamble_found:
     // Test all phase rotations and I/Q orderings
     int p_best = 0, k_best = 0;
     int best_matches = 0;
+    float best_correlation = 0.0f;
 
     for (int p = 0; p <= 1; p++) {
         for (int k = 0; k < 4; k++) {
@@ -765,17 +842,16 @@ preamble_found:
 
             float correlation = (float)matches / (compare_len * 2);
 
-            if (matches > best_matches) {
+            if (correlation > best_correlation) {
+                best_correlation = correlation;
                 best_matches = matches;
                 p_best = p;
                 k_best = k;
             }
 
-            // Print correlation for first few tests
-            if ((p * 4 + k) < 4) {
-                printf("[PHASE] Testing phase=%d, offset=%d: correlation=%.3f (%d/%zu)\n",
-                       k, p, correlation, matches, compare_len * 2);
-            }
+            // Print all correlation results
+            printf("[PHASE] Testing phase=%d, offset=%d: correlation=%.3f (%d/%zu)\n",
+                   k, p, correlation, matches, compare_len * 2);
 
             free(rx_sig);
             free(rx_ci);
