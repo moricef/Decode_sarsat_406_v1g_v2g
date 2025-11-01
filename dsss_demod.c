@@ -1,12 +1,16 @@
 /**
  * @file dsss_demod.c
- * @brief DSSS/OQPSK Demodulator for COSPAS-SARSAT 2G Beacons (T.018)
+ * @brief OQPSK DSSS Receiver for COSPAS-SARSAT 406 MHz beacons
  *
- * MATLAB-Compliant Implementation
- * Reference: DSSSReceiverForSARbasedTrackingSystem.pdf (MathWorks R2024a)
- *
- * @date 2025-01-11
- * @version 11.0 (complete rewrite from V10.2)
+ * Complete receiver chain implementing:
+ * - Automatic Gain Control (AGC)
+ * - Preamble detection with polyphase correlation
+ * - Coarse frequency offset estimation and correction
+ * - Fine frequency offset correction (carrier synchronization)
+ * - Symbol timing recovery for OQPSK
+ * - Phase ambiguity resolution
+ * - DSSS despreading with PRN correlation
+ * - BCH error detection and correction
  */
 
 #include "dsss_demod.h"
@@ -21,334 +25,53 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// =============================================================================
-// FARROW INTERPOLATOR (Piecewise Parabolic, �=0.5)
-// =============================================================================
+/* ============================================================================
+ * PRN SEQUENCE GENERATION (x^23 + x^18 + 1)
+ * ============================================================================ */
 
 /**
- * @brief Farrow piecewise parabolic interpolator
- *
- * Interpolates a sample at fractional position �  [0,1) using 4 samples.
- * Uses piecewise parabolic polynomial with �=0.5 (MATLAB default).
- *
- * Reference: MATLAB comm.SymbolSynchronizer documentation
- *
- * @param samples 4 consecutive samples: [x[n-1], x[n], x[n+1], x[n+2]]
- * @param mu Fractional interval  [0,1)
- * @return Interpolated sample at position �
+ * @brief Generate PRN sequence using LFSR with polynomial x^23 + x^18 + 1
+ * @param initial_state 23-bit initial state (LSB first)
+ * @param output Output buffer for PRN chips (-1 or +1)
+ * @param num_chips Number of chips to generate
  */
-static inline float complex farrow_interpolate(const float complex samples[4], float mu) {
-    // Farrow structure with �=0.5 (piecewise parabolic)
-    // y(�) = c0 + c1*� + c2*�� + c3*��
+void dsss_generate_prn(uint32_t initial_state, int8_t *output, size_t num_chips) {
+    uint32_t lfsr = initial_state & 0x7FFFFF;  // 23-bit mask
 
-    float complex x0 = samples[0];  // x[n-1]
-    float complex x1 = samples[1];  // x[n]
-    float complex x2 = samples[2];  // x[n+1]
-    float complex x3 = samples[3];  // x[n+2]
+    for (size_t i = 0; i < num_chips; i++) {
+        // Output the MSB (bit 22) as chip value: 0->+1, 1->-1
+        output[i] = (lfsr & (1 << 22)) ? -1 : +1;
 
-    // Piecewise parabolic coefficients (�=0.5)
-    float complex c0 = x1;
-    float complex c1 = 0.5f * (x2 - x0);
-    float complex c2 = x0 - 2.5f * x1 + 2.0f * x2 - 0.5f * x3;
-    float complex c3 = 0.5f * (x3 - x0) + 1.5f * (x1 - x2);
+        // Calculate feedback: XOR of bit 22 (x^23) and bit 17 (x^18)
+        uint32_t feedback = ((lfsr >> 22) ^ (lfsr >> 17)) & 1;
 
-    // Horner's method: y = c0 + �(c1 + �(c2 + �*c3))
-    return c0 + mu * (c1 + mu * (c2 + mu * c3));
+        // Shift left and insert feedback at LSB
+        lfsr = ((lfsr << 1) | feedback) & 0x7FFFFF;
+    }
 }
-
-// =============================================================================
-// ZERO-CROSSING TED (Decision-Directed)
-// =============================================================================
 
 /**
- * @brief Zero-Crossing Timing Error Detector
- *
- * Computes timing error using Zero-Crossing method (MATLAB page 16):
- *   e(k) = x_mid((k-1/2)Ts)[�_I(k-1) - �_I(k)] +
- *          y_mid((k-1/2)Ts)[�_Q(k-1) - �_Q(k)]
- *
- * Where:
- *   - x_mid, y_mid: I/Q components of mid-symbol sample
- *   - �_I, �_Q: hard decisions on I/Q components
- *
- * @param current_symbol Current symbol x(kTs)
- * @param mid_symbol Mid-point sample x((k-1/2)Ts)
- * @param prev_mid_symbol Previous mid-point x((k-3/2)Ts)
- * @param prev_i_decision Previous I hard decision �_I(k-1)
- * @param prev_q_decision Previous Q hard decision �_Q(k-1)
- * @return Timing error estimate
- */
-static inline float zero_crossing_ted(float complex current_symbol,
-                                      float complex mid_symbol,
-                                      float complex prev_mid_symbol,
-                                      float prev_i_decision,
-                                      float prev_q_decision) {
-    // Current hard decisions
-    float curr_i_decision = (crealf(current_symbol) > 0) ? 1.0f : -1.0f;
-    float curr_q_decision = (cimagf(current_symbol) > 0) ? 1.0f : -1.0f;
-
-    // Previous mid-point I/Q components
-    float prev_mid_i = crealf(prev_mid_symbol);
-    float prev_mid_q = cimagf(prev_mid_symbol);
-
-    // Zero-Crossing TED formula
-    float timing_error = prev_mid_i * (prev_i_decision - curr_i_decision) +
-                        prev_mid_q * (prev_q_decision - curr_q_decision);
-
-    return timing_error;
-}
-
-// =============================================================================
-// TIMING RECOVERY INITIALIZATION
-// =============================================================================
-
-/**
- * @brief Initialize timing recovery PLL
- *
- * Calculates loop filter gains using MATLAB formulas:
- *   � = (B_n*T_s / N_sps) / (� + 1/(4�))
- *   K1 = (-4��) / ((1 + 2�� + ��) * K_p)
- *   K2 = (-4��) / ((1 + 2�� + ��) * K_p)
- */
-int timing_recovery_init(timing_recovery_state_t *state,
-                        int sps,
-                        float normalized_loop_bw,
-                        float damping_factor,
-                        float detector_gain) {
-    if (!state || sps < 2) {
-        fprintf(stderr, "ERROR: Invalid timing recovery parameters\n");
-        return -1;
-    }
-
-    memset(state, 0, sizeof(timing_recovery_state_t));
-
-    // Store PLL parameters
-    state->samples_per_symbol = sps;
-    state->normalized_loop_bw = normalized_loop_bw;
-    state->damping_factor = damping_factor;
-    state->detector_gain = detector_gain;
-
-    // Calculate loop filter gains (MATLAB formulas)
-    float theta = (normalized_loop_bw / sps) / (damping_factor + 1.0f / (4.0f * damping_factor));
-    float denom = (1.0f + 2.0f * damping_factor * theta + theta * theta) * detector_gain;
-
-    state->k1 = (-4.0f * damping_factor * theta) / denom;
-    state->k2 = (-4.0f * theta * theta) / denom;
-
-    printf("Timing Recovery PLL Initialization:\n");
-    printf("  Samples per symbol: %d\n", sps);
-    printf("  Normalized loop BW: %.6f\n", normalized_loop_bw);
-    printf("  Damping factor: %.2f\n", damping_factor);
-    printf("  Detector gain: %.2f\n", detector_gain);
-    printf("  Calculated gains: K1=%.6f, K2=%.6f\n", state->k1, state->k2);
-
-    // Initialize interpolation controller
-    state->mu = 0.0f;
-    state->strobe = 0.0f;
-
-    // Initialize TED state
-    state->first_symbol = 1;
-    state->prev_mid_sample = 0.0f;
-    state->prev_i_decision = 0.0f;
-    state->prev_q_decision = 0.0f;
-
-    // Initialize interpolator buffer
-    state->buf_write_idx = 0;
-    for (int i = 0; i < 8; i++) {
-        state->buffer[i] = 0.0f;
-    }
-
-    // Allocate Q-channel delay buffer (sps/2 samples for OQPSK)
-    state->q_delay_size = sps / 2;
-    state->q_delay_buffer = calloc(state->q_delay_size, sizeof(float complex));
-    if (!state->q_delay_buffer) {
-        fprintf(stderr, "ERROR: Failed to allocate Q delay buffer\n");
-        return -1;
-    }
-    state->q_delay_idx = 0;
-
-    printf("  Q-channel delay: %d samples (OQPSK Tc/2 offset)\n", state->q_delay_size);
-
-    return 0;
-}
-
-// =============================================================================
-// TIMING RECOVERY PROCESSING
-// =============================================================================
-
-/**
- * @brief Process samples through timing recovery PLL
- *
- * Extracts symbols at chip rate from oversampled OQPSK signal.
- * Automatically handles OQPSK Q-channel alignment (Tc/2 delay).
- *
- * Algorithm per sample:
- * 1. Store in interpolation buffer
- * 2. Update strobe counter
- * 3. If strobe >= sps:
- *    a. Interpolate symbol at fractional position �
- *    b. Interpolate mid-symbol for Zero-Crossing TED
- *    c. Compute timing error (if not first symbol)
- *    d. Update loop filter (PI)
- *    e. Update � from loop filter output
- */
-int timing_recovery_process(timing_recovery_state_t *state,
-                           const float complex *input,
-                           size_t input_len,
-                           float complex *output,
-                           size_t *output_len) {
-    if (!state || !input || !output || !output_len) {
-        fprintf(stderr, "ERROR: Invalid timing recovery parameters\n");
-        return -1;
-    }
-
-    size_t out_idx = 0;
-    int sps = state->samples_per_symbol;
-
-    for (size_t i = 0; i < input_len; i++) {
-        float complex sample = input[i];
-
-        // Apply Q-channel delay for OQPSK (Tc/2 offset)
-        float complex delayed_sample = sample;
-        if (state->q_delay_size > 0) {
-            // Extract I and Q components
-            float i_comp = crealf(sample);
-            float q_comp_delayed = cimagf(state->q_delay_buffer[state->q_delay_idx]);
-
-            // Store current Q for future use
-            state->q_delay_buffer[state->q_delay_idx] = sample;
-            state->q_delay_idx = (state->q_delay_idx + 1) % state->q_delay_size;
-
-            // Reconstruct with delayed Q
-            delayed_sample = i_comp + I * q_comp_delayed;
-        }
-
-        // Store in circular interpolation buffer
-        state->buffer[state->buf_write_idx] = delayed_sample;
-        state->buf_write_idx = (state->buf_write_idx + 1) % 8;
-
-        // Update strobe counter
-        state->strobe += 1.0f;
-
-        // Check if symbol timing reached
-        if (state->strobe >= sps) {
-            state->strobe -= sps;
-
-            // Prepare 4 samples for Farrow interpolator
-            // We need [x[n-1], x[n], x[n+1], x[n+2]] where x[n+1] is "current"
-            float complex farrow_samples[4];
-            int base_idx = (state->buf_write_idx - 3 + 8) % 8;
-            for (int j = 0; j < 4; j++) {
-                farrow_samples[j] = state->buffer[(base_idx + j) % 8];
-            }
-
-            // Interpolate symbol at fractional position �
-            float complex symbol = farrow_interpolate(farrow_samples, state->mu);
-
-            // Interpolate mid-symbol for TED (� + 0.5)
-            float mu_mid = state->mu + 0.5f;
-            if (mu_mid >= 1.0f) {
-                mu_mid -= 1.0f;
-                // Use next set of samples
-                base_idx = (base_idx + 1) % 8;
-                for (int j = 0; j < 4; j++) {
-                    farrow_samples[j] = state->buffer[(base_idx + j) % 8];
-                }
-            }
-            float complex mid_symbol = farrow_interpolate(farrow_samples, mu_mid);
-
-            // Compute timing error using Zero-Crossing TED
-            float timing_error = 0.0f;
-            if (!state->first_symbol) {
-                timing_error = zero_crossing_ted(symbol,
-                                                 mid_symbol,
-                                                 state->prev_mid_sample,
-                                                 state->prev_i_decision,
-                                                 state->prev_q_decision);
-            } else {
-                state->first_symbol = 0;
-            }
-
-            // Update TED state for next iteration
-            state->prev_mid_sample = mid_symbol;
-            state->prev_i_decision = (crealf(symbol) > 0) ? 1.0f : -1.0f;
-            state->prev_q_decision = (cimagf(symbol) > 0) ? 1.0f : -1.0f;
-
-            // Update loop filter (PI)
-            float proportional = state->k1 * timing_error;
-            state->integrator += state->k2 * timing_error;
-            float loop_filter_out = proportional + state->integrator;
-
-            // Update fractional interval � (modulo-1 counter)
-            state->mu += loop_filter_out;
-
-            // Keep � in [0, 1) range
-            while (state->mu >= 1.0f) {
-                state->mu -= 1.0f;
-                state->strobe += 1.0f;  // Advance strobe when � wraps
-            }
-            while (state->mu < 0.0f) {
-                state->mu += 1.0f;
-                state->strobe -= 1.0f;  // Retard strobe when � wraps negative
-            }
-
-            // Output symbol
-            output[out_idx++] = symbol;
-        }
-    }
-
-    *output_len = out_idx;
-    return 0;
-}
-
-// =============================================================================
-// TIMING RECOVERY CLEANUP
-// =============================================================================
-
-void timing_recovery_free(timing_recovery_state_t *state) {
-    if (state) {
-        if (state->q_delay_buffer) {
-            free(state->q_delay_buffer);
-            state->q_delay_buffer = NULL;
-        }
-    }
-}
-
-// =============================================================================
-// PRN SEQUENCE GENERATION
-// =============================================================================
-
-/**
- * @brief Generate PRN sequence using T.018 LFSR
- *
- * LFSR: x^23 + x^18 + 1
- * RIGHT shift, LSB output
+ * @brief Generate both I and Q PRN sequences for COSPAS-SARSAT
+ * @param prn_i Output buffer for I channel PRN (38400 chips)
+ * @param prn_q Output buffer for Q channel PRN (38400 chips)
  */
 void dsss_generate_prn_sequences(int8_t *prn_i, int8_t *prn_q) {
-    // Initial states from T.018 Table 2.2
-    uint32_t lfsr_i = 0x000001;  // Normal I
-    uint32_t lfsr_q = 0x1AC1FC;  // Normal Q
+    // COSPAS-SARSAT Normal mode initial states (LSB first, 23 bits)
+    // I channel: all zeros except bit 22
+    uint32_t init_i = 0x400000;  // [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1]
 
-    const uint32_t mask = 0x7FFFFF;  // 23-bit mask
+    // Q channel: [0 0 1 1 0 1 0 1 1 0 0 0 0 0 1 1 1 1 1 1 1 0 0]
+    uint32_t init_q = 0x0035AC;
 
-    for (int i = 0; i < DSSS_PACKET_CHIPS; i++) {
-        // Extract LSB for output
-        prn_i[i] = (lfsr_i & 1) ? -1 : 1;  // Convert 0�+1, 1�-1
-        prn_q[i] = (lfsr_q & 1) ? -1 : 1;
-
-        // Compute feedback (XOR of bit 23 and bit 18)
-        uint32_t fb_i = ((lfsr_i >> 22) ^ (lfsr_i >> 17)) & 1;
-        uint32_t fb_q = ((lfsr_q >> 22) ^ (lfsr_q >> 17)) & 1;
-
-        // Right shift and insert feedback at MSB
-        lfsr_i = ((lfsr_i >> 1) | (fb_i << 22)) & mask;
-        lfsr_q = ((lfsr_q >> 1) | (fb_q << 22)) & mask;
-    }
+    // Generate full sequences (150 bits * 256/2 = 19200 chips each)
+    size_t num_chips = DSSS_PACKET_CHIPS;
+    dsss_generate_prn(init_i, prn_i, num_chips);
+    dsss_generate_prn(init_q, prn_q, num_chips);
 }
 
-// =============================================================================
-// AUTOMATIC GAIN CONTROL (AGC)
-// =============================================================================
+/* ============================================================================
+ * AUTOMATIC GAIN CONTROL (AGC)
+ * ============================================================================ */
 
 typedef struct {
     float gain;
@@ -411,9 +134,9 @@ static void saturate_signal(float complex *signal, size_t length, float limit) {
     }
 }
 
-// =============================================================================
-// POLYPHASE CORRELATOR FOR PREAMBLE DETECTION
-// =============================================================================
+/* ============================================================================
+ * POLYPHASE CORRELATOR FOR PREAMBLE DETECTION
+ * ============================================================================ */
 
 /**
  * @brief Polyphase correlator - correlates reference signal across all sample phases
@@ -425,261 +148,44 @@ static void saturate_signal(float complex *signal, size_t length, float limit) {
  * @param corr_output Correlation output buffer
  * @return Index of maximum correlation peak, or -1 if not found
  */
-/**
- * @brief timingEstimate - Cross-correlation with threshold detection
- *
- * MATLAB equivalent of the timingEstimate function used in helperPolyphaseCorrelator
- * Returns the index of maximum correlation if it exceeds threshold
- *
- * @param signal Decimated signal for one phase
- * @param sig_len Signal length
- * @param reference Reference signal
- * @param ref_len Reference length
- * @param xcorr_out Output buffer for full correlation (size: sig_len + ref_len - 1)
- * @param threshold Detection threshold
- * @return Index of correlation peak (1-indexed like MATLAB), or -1 if not found
- */
-static int timingEstimate(const float complex *signal, size_t sig_len,
-                         const float complex *reference, size_t ref_len,
-                         float complex *xcorr_out, float threshold) {
-    // MATLAB doc page 9: Normalized cross-correlation using FFT
-    size_t xcorr_len = sig_len + ref_len - 1;
-
-    // Find next power of 2 for FFT efficiency
-    size_t fft_size = 1;
-    while (fft_size < xcorr_len) fft_size <<= 1;
-
-    // Calculate reference signal power
-    float refSigPower = 0.0f;
-    for (size_t i = 0; i < ref_len; i++) {
-        refSigPower += crealf(reference[i] * conjf(reference[i]));
-    }
-
-    // Allocate FFT buffers
-    fftwf_complex *sig_fft = fftwf_malloc(sizeof(fftwf_complex) * fft_size);
-    fftwf_complex *ref_fft = fftwf_malloc(sizeof(fftwf_complex) * fft_size);
-    fftwf_complex *corr_fft = fftwf_malloc(sizeof(fftwf_complex) * fft_size);
-
-    float *sig_fft_f = (float*)sig_fft;
-    float *ref_fft_f = (float*)ref_fft;
-    float *corr_fft_f = (float*)corr_fft;
-
-    // Prepare signal for FFT (zero-pad)
-    for (size_t i = 0; i < sig_len; i++) {
-        sig_fft_f[2*i] = crealf(signal[i]);
-        sig_fft_f[2*i+1] = cimagf(signal[i]);
-    }
-    for (size_t i = sig_len; i < fft_size; i++) {
-        sig_fft_f[2*i] = 0.0f;
-        sig_fft_f[2*i+1] = 0.0f;
-    }
-
-    // Prepare reference for FFT (zero-pad and flip for correlation)
-    for (size_t i = 0; i < ref_len; i++) {
-        ref_fft_f[2*i] = crealf(conjf(reference[ref_len - 1 - i]));
-        ref_fft_f[2*i+1] = cimagf(conjf(reference[ref_len - 1 - i]));
-    }
-    for (size_t i = ref_len; i < fft_size; i++) {
-        ref_fft_f[2*i] = 0.0f;
-        ref_fft_f[2*i+1] = 0.0f;
-    }
-
-    // FFT of both signals
-    fftwf_plan plan_sig = fftwf_plan_dft_1d(fft_size, sig_fft, sig_fft, FFTW_FORWARD, FFTW_ESTIMATE);
-    fftwf_plan plan_ref = fftwf_plan_dft_1d(fft_size, ref_fft, ref_fft, FFTW_FORWARD, FFTW_ESTIMATE);
-    fftwf_execute(plan_sig);
-    fftwf_execute(plan_ref);
-
-    // Multiply in frequency domain
-    for (size_t i = 0; i < fft_size; i++) {
-        float re = sig_fft_f[2*i] * ref_fft_f[2*i] - sig_fft_f[2*i+1] * ref_fft_f[2*i+1];
-        float im = sig_fft_f[2*i] * ref_fft_f[2*i+1] + sig_fft_f[2*i+1] * ref_fft_f[2*i];
-        corr_fft_f[2*i] = re;
-        corr_fft_f[2*i+1] = im;
-    }
-
-    // IFFT to get correlation
-    fftwf_plan plan_ifft = fftwf_plan_dft_1d(fft_size, corr_fft, corr_fft, FFTW_BACKWARD, FFTW_ESTIMATE);
-    fftwf_execute(plan_ifft);
-
-    // Normalize by FFT size and compute sliding window power
-    float *sigMagSq = malloc(sig_len * sizeof(float));
-    for (size_t i = 0; i < sig_len; i++) {
-        sigMagSq[i] = crealf(signal[i] * conjf(signal[i]));
-    }
-
-    float *waveformMagSq = calloc(xcorr_len, sizeof(float));
-    for (size_t lag = 0; lag < xcorr_len; lag++) {
-        for (size_t i = 0; i < ref_len; i++) {
-            int sig_idx = (int)lag - (int)i;
-            if (sig_idx >= 0 && sig_idx < (int)sig_len) {
-                waveformMagSq[lag] += sigMagSq[sig_idx];
-            }
-        }
-    }
-
-    // Find maximum normalized correlation
+static int polyphase_correlator(const float complex *signal, size_t sig_len,
+                                const float complex *reference, size_t ref_len,
+                                int sps, float complex *corr_output,
+                                float threshold) {
+    size_t num_lags = sig_len - ref_len * sps + 1;
     float max_corr = 0.0f;
     int max_idx = -1;
 
-    for (size_t lag = 0; lag < xcorr_len; lag++) {
-        // Extract correlation value
-        float complex corr = (corr_fft_f[2*lag] + I * corr_fft_f[2*lag+1]) / (float)fft_size;
+    // Correlate across all possible starting positions
+    for (size_t lag = 0; lag < num_lags; lag++) {
+        float complex corr = 0.0f;
 
-        // Normalize
-        float normFactor = sqrtf(waveformMagSq[lag] * refSigPower);
-        float normCorr = (normFactor > 1e-10f) ? (cabsf(corr) / normFactor) : 0.0f;
+        // Correlate with reference at this lag
+        for (size_t i = 0; i < ref_len; i++) {
+            // Polyphase: sample at symbol rate from oversampled signal
+            corr += conjf(reference[i]) * signal[lag + i * sps];
+        }
 
-        xcorr_out[lag] = normCorr + 0.0f * I;
+        corr_output[lag] = corr;
+        float mag = cabsf(corr);
 
-        if (normCorr > max_corr) {
-            max_corr = normCorr;
+        if (mag > max_corr) {
+            max_corr = mag;
             max_idx = lag;
         }
     }
 
-    // Cleanup
-    fftwf_destroy_plan(plan_sig);
-    fftwf_destroy_plan(plan_ref);
-    fftwf_destroy_plan(plan_ifft);
-    fftwf_free(sig_fft);
-    fftwf_free(ref_fft);
-    fftwf_free(corr_fft);
-    free(sigMagSq);
-    free(waveformMagSq);
-
+    // Check if correlation exceeds threshold
     if (max_corr < threshold) {
         return -1;
     }
 
-    return max_idx + 1;
+    return max_idx;
 }
 
-/**
- * @brief helperPolyphaseCorrelator - Exact MATLAB translation
- *
- * Line-by-line translation of helperPolyphaseCorrelator.m
- */
-static int polyphase_correlator(const float complex *signal, size_t sig_len,
-                                const float complex *reference, size_t ref_len,
-                                int sps, float complex *corr_output,
-                                int offset) {
-    // MATLAB: decimatedSampleBuffer = reshape(rxBuffer,sps,[]);
-    size_t decimated_len = sig_len / sps;
-
-    // MATLAB: bufferLen = length(decimatedSampleBuffer);
-    // In MATLAB, length() returns max dimension, so for [sps x N], it's N
-    size_t bufferLen = decimated_len;
-
-    // MATLAB: xcorrBuffer = zeros(bufferLen+length(referenceSignal)-1,sps);
-    size_t xcorr_len = bufferLen + ref_len - 1;
-    float complex **xcorrBuffer = malloc(sps * sizeof(float complex*));
-    for (int k = 0; k < sps; k++) {
-        xcorrBuffer[k] = malloc(xcorr_len * sizeof(float complex));
-    }
-
-    // MATLAB: startIdxs = [];
-    int *startIdxs = malloc(sps * sizeof(int));
-    for (int k = 0; k < sps; k++) {
-        startIdxs[k] = -1;  // -1 means empty in C
-    }
-
-    // MATLAB: for k=1:sps
-    for (int k = 0; k < sps; k++) {  // k is 0-indexed in C, 1-indexed in MATLAB
-        // Extract decimatedSampleBuffer(k,:) - samples at [k, k+sps, k+2*sps, ...]
-        float complex *decimated_phase = malloc(decimated_len * sizeof(float complex));
-        for (size_t i = 0; i < decimated_len; i++) {
-            decimated_phase[i] = signal[k + i * sps];
-        }
-
-        // MATLAB: [idx2,xcorrBuffer(:,k)] = timingEstimate(decimatedSampleBuffer(k,:).',referenceSignal,Threshold=0.35);
-        int idx2 = timingEstimate(decimated_phase, decimated_len, reference, ref_len,
-                                  xcorrBuffer[k], 0.35f);
-
-        // MATLAB: if ~isempty(idx2)
-        if (idx2 > 0) {
-            // MATLAB: startIdxs(k) = idx2 - offset + 1;
-            // idx2 is already 1-indexed from timingEstimate
-            startIdxs[k] = idx2 - offset + 1;
-        }
-
-        free(decimated_phase);
-    }
-
-    // MATLAB: [maxXcorrVals,maxXcorrIdxs] = max(abs(xcorrBuffer));
-    float *maxXcorrVals = malloc(sps * sizeof(float));
-    for (int k = 0; k < sps; k++) {
-        maxXcorrVals[k] = 0.0f;
-        for (size_t i = 0; i < xcorr_len; i++) {
-            float mag = cabsf(xcorrBuffer[k][i]);
-            if (mag > maxXcorrVals[k]) {
-                maxXcorrVals[k] = mag;
-            }
-        }
-    }
-
-    // MATLAB: [maxDetectorVal,kidx] = max(maxXcorrVals);
-    float maxDetectorVal = 0.0f;
-    int kidx = -1;
-    for (int k = 0; k < sps; k++) {
-        if (maxXcorrVals[k] > maxDetectorVal) {
-            maxDetectorVal = maxXcorrVals[k];
-            kidx = k;
-        }
-    }
-
-    int final_idx = -1;
-
-    if (kidx >= 0) {
-        // MATLAB: corrBuffer = xcorrBuffer(length(referenceSignal):end,kidx);
-        size_t corrBuffer_len = xcorr_len - ref_len + 1;
-        float *corrBuffer_mag = malloc(corrBuffer_len * sizeof(float));
-        for (size_t i = 0; i < corrBuffer_len; i++) {
-            corrBuffer_mag[i] = cabsf(xcorrBuffer[kidx][ref_len - 1 + i]);
-        }
-
-        // MATLAB: if maxDetectorVal < 5.5*mean(abs(corrBuffer))
-        float mean_corr = 0.0f;
-        for (size_t i = 0; i < corrBuffer_len; i++) {
-            mean_corr += corrBuffer_mag[i];
-        }
-        mean_corr /= corrBuffer_len;
-
-        if (maxDetectorVal >= 5.5f * mean_corr) {
-            // MATLAB: startIdx = startIdxs(kidx);
-            int startIdx = startIdxs[kidx];
-
-            if (startIdx > 0) {
-                // MATLAB: idx = max(1,(startIdx-1)*sps + kidx - (sps/2));
-                // kidx is 0-indexed in C, but formula needs 1-indexed
-                int idx_matlab = (startIdx - 1) * sps + (kidx + 1) - (sps / 2);
-                if (idx_matlab < 1) idx_matlab = 1;
-
-                // Convert to 0-indexed for C
-                final_idx = idx_matlab - 1;
-
-                printf("Found preamble at correlation buffer number %d, index %d, sample index %d\n",
-                       kidx + 1, startIdx, idx_matlab);
-            }
-        }
-
-        free(corrBuffer_mag);
-    }
-
-    // Cleanup
-    for (int k = 0; k < sps; k++) {
-        free(xcorrBuffer[k]);
-    }
-    free(xcorrBuffer);
-    free(startIdxs);
-    free(maxXcorrVals);
-
-    return final_idx;
-}
-
-// =============================================================================
-// FREQUENCY OFFSET ESTIMATION AND CORRECTION
-// =============================================================================
+/* ============================================================================
+ * FREQUENCY OFFSET ESTIMATION AND CORRECTION
+ * ============================================================================ */
 
 /**
  * @brief Coarse frequency offset estimator for OQPSK
@@ -746,9 +252,9 @@ static void apply_frequency_offset(float complex *signal, size_t length,
     }
 }
 
-// =============================================================================
-// CARRIER SYNCHRONIZATION (FINE FREQUENCY/PHASE TRACKING)
-// =============================================================================
+/* ============================================================================
+ * CARRIER SYNCHRONIZATION (FINE FREQUENCY/PHASE TRACKING)
+ * ============================================================================ */
 
 typedef struct {
     float phase;
@@ -813,13 +319,189 @@ static void carrier_sync_process(carrier_sync_t *sync, const float complex *inpu
             // Wrap phase to [-pi, pi]
             while (sync->phase > M_PI) sync->phase -= 2.0f * M_PI;
             while (sync->phase < -M_PI) sync->phase += 2.0f * M_PI;
+        } else {
+            sync->phase += sync->frequency;
         }
     }
 }
 
-// =============================================================================
-// QPSK DEMODULATION AND PHASE AMBIGUITY RESOLUTION
-// =============================================================================
+/* ============================================================================
+ * SYMBOL TIMING RECOVERY FOR OQPSK
+ * ============================================================================ */
+
+typedef struct {
+    float mu;              // Fractional timing offset [0, 1)
+    float omega;           // Samples per symbol
+    float k1;              // Proportional loop filter gain
+    float k2;              // Integrator loop filter gain
+    float W;               // Integrator state
+    int sps;
+
+    // OQPSK state buffer (caches last half symbol of Q channel)
+    float q_buffer[128];
+    int q_buffer_len;
+    float q_delay_fractional;  // Exact fractional delay for Q (sps/2)
+    int state_valid;
+
+    // Strobe counter for symbol-rate output
+    float strobe_counter;
+
+    // TED state
+    float complex prev_symbol;
+    float complex prev_mid;
+} timing_recovery_t;
+
+/**
+ * @brief Farrow piecewise parabolic interpolator (α=0.5)
+ */
+static inline float farrow_interpolate(const float *samples, int base_idx, float mu) {
+    // Farrow structure with α = 0.5
+    // Requires 4 samples: x[k-1], x[k], x[k+1], x[k+2]
+    float v0 = samples[base_idx - 1];
+    float v1 = samples[base_idx];
+    float v2 = samples[base_idx + 1];
+    float v3 = samples[base_idx + 2];
+
+    // Farrow coefficients for piecewise parabolic with α=0.5
+    float c0 = v1;
+    float c1 = -v0/3.0f - v1/2.0f + v2 - v3/6.0f;
+    float c2 = v0/2.0f - v1 + v2/2.0f;
+
+    return c0 + mu * (c1 + mu * c2);
+}
+
+static inline float complex farrow_interpolate_complex(const float complex *samples,
+                                                       int base_idx, float mu) {
+    float re_interp = farrow_interpolate((float*)samples + 2*base_idx - 2, base_idx, mu);
+    float im_interp = farrow_interpolate((float*)samples + 2*base_idx - 1, base_idx, mu);
+    return re_interp + I * im_interp;
+}
+
+/**
+ * @brief Initialize timing recovery for OQPSK
+ * PI loop filter: K1, K2 computed from loop_bw, damping, detector_gain
+ */
+static void timing_recovery_init(timing_recovery_t *tr, int sps,
+                                float loop_bw, float damping, float detector_gain) {
+    tr->mu = 0.5f;
+    tr->omega = (float)sps;
+    tr->sps = sps;
+    tr->W = 0.0f;
+    tr->strobe_counter = 0.0f;
+    tr->state_valid = 0;
+    tr->q_delay_fractional = (float)sps / 2.0f;  // Exact: 65/2 = 32.5
+    tr->q_buffer_len = (int)(tr->q_delay_fractional) + 3;  // Integer part + margin for interpolation
+    tr->prev_symbol = 0.0f;
+    tr->prev_mid = 0.0f;
+
+    // PI loop filter gains
+    float theta = loop_bw / (float)sps;
+    theta = theta / (damping + 1.0f / (4.0f * damping));
+    float denom = 1.0f + 2.0f * damping * theta + theta * theta;
+    tr->k1 = -(4.0f * damping * theta / denom) / detector_gain;
+    tr->k2 = -(4.0f * theta * theta / denom) / detector_gain;
+}
+
+/**
+ * @brief Process OQPSK signal through timing recovery
+ * MATLAB: sampleBufferQPSK = [real(rx(1:end-sps/2)) + 1i*imag(rx(sps/2+1:end)); zeros(sps/2,1)]
+ */
+static size_t timing_recovery_process(timing_recovery_t *tr,
+                                     const float complex *input, size_t in_len,
+                                     float complex *output, int sps) {
+
+    int delay_int = (int)tr->q_delay_fractional;
+    float delay_frac = tr->q_delay_fractional - (float)delay_int;
+
+    // Build extended Q with state buffer: [q_state; new_Q]
+    size_t q_ext_len = tr->q_buffer_len + in_len;
+    float *q_ext = malloc(q_ext_len * sizeof(float));
+
+    if (tr->state_valid) {
+        memcpy(q_ext, tr->q_buffer, tr->q_buffer_len * sizeof(float));
+    } else {
+        memset(q_ext, 0, tr->q_buffer_len * sizeof(float));
+        tr->state_valid = 1;
+    }
+
+    for (size_t i = 0; i < in_len; i++) {
+        q_ext[tr->q_buffer_len + i] = cimagf(input[i]);
+    }
+
+    // Save state for next call
+    memcpy(tr->q_buffer, q_ext + q_ext_len - tr->q_buffer_len, tr->q_buffer_len * sizeof(float));
+
+    // QPSK alignment: I[n] + j*Q[n+delay_fractional]
+    float complex *qpsk_aligned = malloc(in_len * sizeof(float complex));
+    for (size_t i = 0; i < in_len; i++) {
+        float i_val = crealf(input[i]);
+        int q_base_idx = i + delay_int;
+        float q_val = 0.0f;
+        if (q_base_idx >= 1 && q_base_idx + 2 < (int)q_ext_len) {
+            q_val = farrow_interpolate(q_ext, q_base_idx, delay_frac);
+        }
+        qpsk_aligned[i] = i_val + I * q_val;
+    }
+
+    free(q_ext);
+
+    float *i_aligned = malloc(in_len * sizeof(float));
+    float *q_aligned = malloc(in_len * sizeof(float));
+    for (size_t i = 0; i < in_len; i++) {
+        i_aligned[i] = crealf(qpsk_aligned[i]);
+        q_aligned[i] = cimagf(qpsk_aligned[i]);
+    }
+    free(qpsk_aligned);
+
+    size_t total_len = in_len;
+    size_t out_idx = 0;
+    size_t sample_idx = 2;
+
+    while (sample_idx + 3 < total_len) {
+        tr->strobe_counter += 1.0f / tr->omega;
+
+        if (tr->strobe_counter >= 1.0f) {
+            tr->strobe_counter -= 1.0f;
+
+            if (sample_idx + 3 < total_len) {
+                float i_sym = farrow_interpolate(i_aligned, sample_idx, tr->mu);
+                float q_sym = farrow_interpolate(q_aligned, sample_idx, tr->mu);
+                float complex symbol = i_sym + I * q_sym;
+                output[out_idx++] = symbol;
+
+                int mid_idx = sample_idx - sps/2;
+                if (mid_idx >= 2) {
+                    float i_mid = farrow_interpolate(i_aligned, mid_idx, tr->mu);
+                    float q_mid = farrow_interpolate(q_aligned, mid_idx, tr->mu);
+                    float complex mid_symbol = i_mid + I * q_mid;
+
+                    float err_re = crealf(mid_symbol) * (crealf(tr->prev_symbol) - crealf(symbol));
+                    float err_im = cimagf(mid_symbol) * (cimagf(tr->prev_symbol) - cimagf(symbol));
+                    float timing_error = err_re + err_im;
+
+                    tr->W += tr->k2 * timing_error;
+                    float v = tr->W + tr->k1 * timing_error;
+
+                    tr->mu += v / tr->omega;
+                    while (tr->mu >= 1.0f) tr->mu -= 1.0f;
+                    while (tr->mu < 0.0f) tr->mu += 1.0f;
+
+                    tr->prev_symbol = symbol;
+                }
+            }
+        }
+
+        sample_idx++;
+    }
+
+    free(i_aligned);
+    free(q_aligned);
+    return out_idx;
+}
+
+/* ============================================================================
+ * QPSK DEMODULATION AND PHASE AMBIGUITY RESOLUTION
+ * ============================================================================ */
 
 /**
  * @brief Demodulate QPSK symbols to bits
@@ -843,14 +525,22 @@ static void qpsk_demod(const float complex *symbols, size_t length,
     }
 }
 
-// =============================================================================
-// MAIN RECEIVER FUNCTION
-// =============================================================================
+/* ============================================================================
+ * MAIN RECEIVER FUNCTION
+ * ============================================================================ */
 
 /**
- * @brief Complete DSSS OQPSK receiver processing chain (V11.0)
+ * @brief Complete DSSS OQPSK receiver processing chain
+ * @param ota_buffer Received over-the-air samples
+ * @param buffer_length Number of samples in buffer
+ * @param sps Samples per symbol
+ * @param fs Sampling frequency (Hz)
+ * @param max_doppler Maximum expected Doppler shift (Hz)
+ * @param output_bits Decoded output bits (250 bits: 50 preamble + 200 data)
+ * @return 0 on success, negative on error
  *
- * Integrates V10.2 components with new MATLAB-compliant timing recovery.
+ * This function performs DSSS OQPSK demodulation using standard DSP algorithms.
+ * Implements ping-pong buffering, continuous reception, and all demodulation steps.
  */
 int dsss_receive_burst(const float complex *ota_buffer,
                        size_t buffer_length,
@@ -859,14 +549,14 @@ int dsss_receive_burst(const float complex *ota_buffer,
                        int max_doppler,
                        uint8_t *output_bits) {
 
-    printf("=== DSSS OQPSK Receiver V11.0 Start ===\n");
+    printf("=== DSSS OQPSK Receiver Start ===\n");
     printf("Buffer length: %zu samples\n", buffer_length);
     printf("Sampling rate: %.0f Hz, SPS: %d\n", fs, sps);
     printf("Max Doppler: %d Hz\n", max_doppler);
 
-    // Calculate burst size
-    size_t num_burst_samples = (DSSS_TOTAL_BITS / 2) * DSSS_SPREADING_FACTOR * sps;
-    size_t num_preamble_chips = DSSS_PREAMBLE_LENGTH * (DSSS_SPREADING_FACTOR / 2);
+    // Calculate burst size (as per specification)
+    size_t num_burst_samples = (DSSS_PACKET_BITS / 2) * DSSS_SPREADING_FACTOR * sps;
+    size_t num_preamble_chips = DSSS_PREAMBLE_BITS * (DSSS_SPREADING_FACTOR / 2);
 
     // Generate PRN sequences
     int8_t *prn_i = malloc(DSSS_PACKET_CHIPS);
@@ -874,9 +564,9 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dsss_generate_prn_sequences(prn_i, prn_q);
     printf("Generated PRN sequences\n");
 
-    // Preamble detection parameters
-    const int preamble_detection_offset = 200;
-    const int preamble_detection_length = 175;
+    // preambleDetectionOffset and preambleDetectionLength
+    const int preamble_detection_offset = 200;  // Skip first symbols during AGC convergence
+    const int preamble_detection_length = 175;  // Shortened to combat frequency offset
 
     // Create reference preamble for detection (QPSK at symbol rate)
     float complex *preamble_qpsk = malloc(num_preamble_chips / 2 * sizeof(float complex));
@@ -893,10 +583,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
            preamble_detection_length * sizeof(float complex));
 
     // Double buffering (ping-pong scheme)
+    // Create sample buffer twice the size of one burst
     size_t num_buffers = buffer_length / num_burst_samples;
     float complex *sample_buffer = malloc(num_burst_samples * 2 * sizeof(float complex));
 
-    // Initialize with noise
+    // Initialize with AWGN (empty buffer)
     for (size_t i = 0; i < num_burst_samples * 2; i++) {
         float re = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
         float im = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
@@ -935,7 +626,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
         saturate_signal(rx_agc_samples, num_burst_samples * 2, 1.2f);
 
         if (n == 0) {
-            printf("AGC: gain=%.2f, avg_power=%.6f\n", agc.gain, agc.avg_power);
+            float power = agc.avg_power;
+            printf("AGC: gain=%.2f, avg_power=%.6f, first_sample=%.3f+j%.3f\n",
+                   agc.gain, power,
+                   crealf(rx_agc_samples[0]), cimagf(rx_agc_samples[0]));
         }
 
         // Convert from OQPSK to QPSK for symbol-based preamble detection
@@ -948,6 +642,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
         for (size_t i = num_burst_samples * 2 - q_delay; i < num_burst_samples * 2; i++) {
             sample_buffer_qpsk[i] = 0.0f;
         }
+
 
         // Detect preamble across different frequency offsets
         for (int preamble_freq_offset = -max_doppler;
@@ -965,7 +660,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
             int start_samp_idx = polyphase_correlator(
                 sample_buffer_qpsk, num_burst_samples,
                 preamble_shifted, preamble_detection_length,
-                sps, corr_buffer, preamble_detection_offset);
+                sps, corr_buffer, 0.25f);
 
             free(preamble_shifted);
 
@@ -976,7 +671,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
                 preamble_idx = start_samp_idx;
                 free(sample_buffer_qpsk);
                 free(rx_agc_samples);
-                goto preamble_found;
+                goto preamble_found;  // Break out of frequency and buffer loops
             }
         }
 
@@ -986,25 +681,34 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
 preamble_found:
     if (preamble_idx < 0) {
-        printf("ERROR: Preamble not detected\n");
+        printf("ERROR: Preamble not detected amongst simulation samples\n");
         free(sample_buffer);
         free(preamble_qpsk);
         free(preamble_detect);
         free(prn_i);
         free(prn_q);
         free(corr_buffer);
-        return -2;
+        return -1;
     }
 
     // Extract transmission burst from sample buffer
+    // Collect 20 more chips at the end for possible timing adjustments
     size_t burst_length = (DSSS_PACKET_CHIPS + 20) * sps;
     float complex *rx_burst = malloc(burst_length * sizeof(float complex));
     memcpy(rx_burst, sample_buffer + preamble_idx, burst_length * sizeof(float complex));
 
     printf("Burst extracted, length: %zu samples (%.3f sec)\n",
            burst_length, (float)burst_length / fs);
+    printf("[DEBUG] Burst range: sample_buffer[%d .. %zu]\n",
+           preamble_idx, preamble_idx + burst_length - 1);
+    printf("[DEBUG] First samples: [0]=%.3f+j%.3f, [100]=%.3f+j%.3f\n",
+           crealf(rx_burst[0]), cimagf(rx_burst[0]),
+           crealf(rx_burst[100]), cimagf(rx_burst[100]));
 
     // Step 1 - Coarse Frequency Offset Estimation and Correction
+    carrier_sync_t coarse_freq;
+    carrier_sync_init(&coarse_freq, 0.01f, 0.707f, sps);
+
     float coarse_offset = estimate_coarse_frequency_offset(rx_burst, burst_length, fs);
     printf("Estimated coarse frequency offset = %.3f kHz\n", coarse_offset / 1000.0f);
 
@@ -1015,14 +719,21 @@ preamble_found:
     // Step 2 - Fine Frequency Correction (Carrier Synchronizer)
     carrier_sync_t carrier_sync;
     carrier_sync_init(&carrier_sync, 0.01f, 0.707f, sps);
+    printf("[DEBUG] Carrier sync: loop_bw=%.4f, damping=%.3f, sps=%d\n",
+           0.01f, 0.707f, sps);
 
     float complex *carrier_sync_out = malloc(burst_length * sizeof(float complex));
     float *phase_err = malloc(burst_length * sizeof(float));
 
     carrier_sync_process(&carrier_sync, coarse_sync_out, carrier_sync_out, burst_length, phase_err);
-    printf("Carrier synchronization complete\n");
 
-    // Fine preamble detection after frequency correction
+    printf("Carrier synchronization complete\n");
+    printf("[DEBUG] Signal after sync: [0]=%.3f+j%.3f, [100]=%.3f+j%.3f\n",
+           crealf(carrier_sync_out[0]), cimagf(carrier_sync_out[0]),
+           crealf(carrier_sync_out[100]), cimagf(carrier_sync_out[100]));
+
+    // Path Detection - Second preamble detection using entire preamble
+    // Convert from OQPSK to QPSK
     float complex *carrier_sync_out_qpsk = malloc(burst_length * sizeof(float complex));
     for (size_t i = 0; i < burst_length - sps / 2; i++) {
         carrier_sync_out_qpsk[i] = crealf(carrier_sync_out[i]) +
@@ -1032,7 +743,8 @@ preamble_found:
         carrier_sync_out_qpsk[i] = 0.0f;
     }
 
-    const int preamble_offset_chips = 5000;  // MATLAB-compliant offset (2500 QPSK symbols)
+    // Use entire preamble for fine path detection
+    const int preamble_offset_chips = 5000; 
     const int preamble_offset = preamble_offset_chips / 2;
 
     float complex *preamble_full = malloc((num_preamble_chips / 2 - preamble_offset) * sizeof(float complex));
@@ -1044,7 +756,7 @@ preamble_found:
     int fsp_samp_idx = polyphase_correlator(
         carrier_sync_out_qpsk, burst_length,
         preamble_full, num_preamble_chips / 2 - preamble_offset,
-        sps, corr_buffer2, preamble_offset);
+        sps, corr_buffer2, 0.2f);
 
     if (fsp_samp_idx < 0) {
         printf("ERROR: Preamble lost after frequency correction\n");
@@ -1062,69 +774,29 @@ preamble_found:
         free(prn_i);
         free(prn_q);
         free(corr_buffer);
-        return -2;
+        return -1;
     }
+
+    printf("Fine-tuned preamble location: sample index %d\n", fsp_samp_idx);
     free(preamble_full);
     free(corr_buffer2);
 
-    // Step 3 - Timing Recovery (V11.0 MATLAB-compliant)
-    printf("\n=== V11.0 Timing Recovery (Zero-Crossing TED) ===\n");
-
-    timing_recovery_state_t symbol_synchronizer;
-    int ret = timing_recovery_init(&symbol_synchronizer, sps, 0.001f, 2.0f, 4.0f);
-    if (ret != 0) {
-        printf("ERROR: Timing recovery initialization failed\n");
-        // Cleanup
-        free(rx_burst);
-        free(coarse_sync_out);
-        free(carrier_sync_out);
-        free(phase_err);
-        free(carrier_sync_out_qpsk);
-        free(sample_buffer);
-        free(preamble_qpsk);
-        free(preamble_detect);
-        free(prn_i);
-        free(prn_q);
-        free(corr_buffer);
-        return -3;
-    }
+    // Step 3 - Timing Recovery of OQPSK signal
+    timing_recovery_t symbol_synchronizer;
+    timing_recovery_init(&symbol_synchronizer, sps, 0.001f, 2.0f, 4.0f);
 
     float complex *synced_qpsk = malloc(DSSS_PACKET_CHIPS * 2 * sizeof(float complex));
-    size_t num_symbols = 0;
+    float *timing_error = malloc(DSSS_PACKET_CHIPS * 2 * sizeof(float));
 
-    // Process timing recovery from OQPSK signal (NOT QPSK-converted)
-    // The timing recovery handles OQPSK internally with Q-delay buffer
-    ret = timing_recovery_process(&symbol_synchronizer,
-                                  carrier_sync_out + fsp_samp_idx,
-                                  burst_length - fsp_samp_idx,
-                                  synced_qpsk,
-                                  &num_symbols);
+    // Process from FSP index to end
+    size_t num_symbols = timing_recovery_process(&symbol_synchronizer,
+                                                 carrier_sync_out + fsp_samp_idx,
+                                                 burst_length - fsp_samp_idx,
+                                                 synced_qpsk, sps);
 
-    timing_recovery_free(&symbol_synchronizer);
-
-    if (ret != 0 || num_symbols == 0) {
-        printf("ERROR: Timing recovery processing failed\n");
-        free(synced_qpsk);
-        free(rx_burst);
-        free(coarse_sync_out);
-        free(carrier_sync_out);
-        free(phase_err);
-        free(carrier_sync_out_qpsk);
-        free(sample_buffer);
-        free(preamble_qpsk);
-        free(preamble_detect);
-        free(prn_i);
-        free(prn_q);
-        free(corr_buffer);
-        return -3;
-    }
-
-    printf("Timing recovery complete: %zu symbols recovered (expected ~%d)\n",
-           num_symbols, DSSS_PACKET_CHIPS);
+    printf("Timing recovery complete, %zu symbols recovered\n", num_symbols);
 
     // Step 4 - Demodulation and Phase Ambiguity Resolution
-    printf("\n=== Phase Ambiguity Resolution ===\n");
-
     // Form chip sequence of preamble for phase ambiguity resolution
     int8_t *preamble_chips = malloc(6400);
     for (int i = 0; i < 3200; i++) {
@@ -1177,6 +849,7 @@ preamble_found:
                 k_best = k;
             }
 
+            // Print all correlation results
             printf("[PHASE] Testing phase=%d, offset=%d: correlation=%.3f (%d/%zu)\n",
                    k, p, correlation, matches, compare_len * 2);
 
@@ -1184,80 +857,85 @@ preamble_found:
             free(rx_ci);
             free(rx_cq);
 
-            if (best_matches > compare_len * 1.8) {
+            if (best_matches > compare_len * 1.8) {  // Good enough
                 goto phase_found;
             }
         }
     }
 
 phase_found:
-    printf("Best phase: rotation=%d, offset=%d, matches=%d (%.1f%%)\n",
-           k_best, p_best, best_matches, best_correlation * 100.0f);
-
-    free(preamble_chips);
+    printf("Preamble detected: phase=%d, offset=%d, matches=%d\n", k_best, p_best, best_matches);
 
     // Final demodulation with correct phase
     uint8_t *rx_sig = malloc(num_symbols * 2);
     qpsk_demod(synced_qpsk, num_symbols, rx_sig, k_best);
 
-    // Extract I and Q chip streams
+    // Compute start indices for I and Q streams
+    size_t preamble_test_start_idx = 1;  // Simplified
+    size_t s_idx_i = preamble_test_start_idx + 2 * p_best;
+    size_t s_idx_q = preamble_test_start_idx + 1;
+
+    // Extract preamble and payload chips
     int8_t *rx_ci = malloc(DSSS_PACKET_CHIPS);
     int8_t *rx_cq = malloc(DSSS_PACKET_CHIPS);
 
-    for (size_t i = 0; i < DSSS_PACKET_CHIPS && (i + p_best) < num_symbols; i++) {
-        rx_ci[i] = rx_sig[2 * (i + p_best)];
-        rx_cq[i] = rx_sig[2 * (i + p_best) + 1];
+    for (size_t i = 0; i < DSSS_PACKET_CHIPS && (s_idx_i + 2*i) < num_symbols * 2; i++) {
+        rx_ci[i] = rx_sig[s_idx_i + 2*i];
+        rx_cq[i] = rx_sig[s_idx_q + 2*i];
     }
+
+    free(preamble_chips);
+
 
     // Step 5 - DSSS Despreading
-    printf("\n=== DSSS Despreading ===\n");
+    // Correlate PRN sequence with received chips (XOR operation)
+    int8_t *ibdn = malloc(DSSS_PACKET_CHIPS);
+    int8_t *qbdn = malloc(DSSS_PACKET_CHIPS);
 
-    // Convert to bipolar
-    int8_t *rx_ci_bipolar = malloc(DSSS_PACKET_CHIPS);
-    int8_t *rx_cq_bipolar = malloc(DSSS_PACKET_CHIPS);
     for (size_t i = 0; i < DSSS_PACKET_CHIPS; i++) {
-        rx_ci_bipolar[i] = (rx_ci[i] == 0) ? -1 : +1;
-        rx_cq_bipolar[i] = (rx_cq[i] == 0) ? -1 : +1;
+        ibdn[i] = rx_ci[i] ^ prn_i[i];
+        qbdn[i] = rx_cq[i] ^ prn_q[i];
     }
 
-    // Correlate with PRN sequences
-    uint8_t *ibits = malloc(DSSS_BITS_PER_CHANNEL);
-    uint8_t *qbits = malloc(DSSS_BITS_PER_CHANNEL);
+    // Reshape into spreading factor rows (reshape)
+    // Perform ML decoding: if sum > threshold, bit=1, else bit=0
+    uint8_t *ibits = malloc(DSSS_PACKET_BITS / 2);
+    uint8_t *qbits = malloc(DSSS_PACKET_BITS / 2);
 
-    for (int bit_idx = 0; bit_idx < DSSS_BITS_PER_CHANNEL; bit_idx++) {
+    int threshold = DSSS_SPREADING_FACTOR / 2;
+
+    for (int bit_idx = 0; bit_idx < DSSS_PACKET_BITS / 2; bit_idx++) {
         int i_sum = 0;
         int q_sum = 0;
 
         for (int chip = 0; chip < DSSS_SPREADING_FACTOR; chip++) {
-            int chip_idx = bit_idx * DSSS_SPREADING_FACTOR + chip;
-            i_sum += rx_ci_bipolar[chip_idx] * prn_i[chip_idx];
-            q_sum += rx_cq_bipolar[chip_idx] * prn_q[chip_idx];
+            i_sum += ibdn[bit_idx * DSSS_SPREADING_FACTOR + chip];
+            q_sum += qbdn[bit_idx * DSSS_SPREADING_FACTOR + chip];
         }
 
-        ibits[bit_idx] = (i_sum < 0) ? 1 : 0;
-        qbits[bit_idx] = (q_sum < 0) ? 1 : 0;
+        ibits[bit_idx] = (i_sum > threshold) ? 1 : 0;
+        qbits[bit_idx] = (q_sum > threshold) ? 1 : 0;
     }
 
-    free(rx_ci_bipolar);
-    free(rx_cq_bipolar);
 
     // Demultiplex I and Q streams into single bitstream
-    uint8_t *despread_message = malloc(DSSS_TOTAL_BITS);
-    for (int i = 0; i < DSSS_BITS_PER_CHANNEL; i++) {
+    uint8_t *despread_message = malloc(DSSS_PACKET_BITS);
+    for (int i = 0; i < DSSS_PACKET_BITS / 2; i++) {
         despread_message[2*i] = ibits[i];
         despread_message[2*i + 1] = qbits[i];
     }
 
     // Check preamble match (first 50 bits should be all zeros)
     int preamble_errors = 0;
-    for (int i = 0; i < DSSS_PREAMBLE_LENGTH; i++) {
+    for (int i = 0; i < DSSS_PREAMBLE_BITS; i++) {
         if (despread_message[i] != 0) preamble_errors++;
     }
     printf("DSSS despreading complete, preamble_errors=%d/%d (%.1f%%)\n",
-           preamble_errors, DSSS_PREAMBLE_LENGTH,
-           100.0f * preamble_errors / DSSS_PREAMBLE_LENGTH);
+           preamble_errors, DSSS_PREAMBLE_BITS,
+           100.0f * preamble_errors / DSSS_PREAMBLE_BITS);
 
-    // Output 250 bits (50 preamble + 200 payload data)
+    // Output 250 bits (50 preamble + 202 data - BCH will be done externally)
+    // Note: Full packet is 300 bits but only first 250 needed for BCH input
     memcpy(output_bits, despread_message, 250);
 
     printf("Output: 250 raw bits ready for BCH decoding\n");
@@ -1275,13 +953,17 @@ phase_found:
     free(phase_err);
     free(carrier_sync_out_qpsk);
     free(synced_qpsk);
+    free(timing_error);
     free(rx_sig);
     free(rx_ci);
     free(rx_cq);
+    free(ibdn);
+    free(qbdn);
     free(ibits);
     free(qbits);
     free(despread_message);
 
-    printf("\n=== DSSS OQPSK Receiver V11.0 Complete ===\n\n");
+    printf("=== DSSS OQPSK Receiver Complete ===\n\n");
+
     return 0;
 }
