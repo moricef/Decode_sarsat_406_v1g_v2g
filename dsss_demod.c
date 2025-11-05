@@ -1057,11 +1057,9 @@ preamble_found:
     free(corr_buffer2);
 
     // Step 3 - Timing Recovery of OQPSK signal
-    // Adjusted for SPS=16 with half-sine pulse shaping:
-    // - loop_bw increased 10× (0.001→0.01) for faster convergence with lower SPS
-    // - detector_gain reduced 2× (4.0→2.0) for constant-envelope OQPSK with pulse shaping
+    // MATLAB parameters (SPS=8): NormalizedLoopBandwidth=0.001, DetectorGain=4, DampingFactor=2
     timing_recovery_t symbol_synchronizer;
-    timing_recovery_init(&symbol_synchronizer, sps, 0.001f, 2.0f, 2.0f);
+    timing_recovery_init(&symbol_synchronizer, sps, 0.001f, 2.0f, 4.0f);
 
     float complex *synced_qpsk = malloc(DSSS_PACKET_CHIPS * 2 * sizeof(float complex));
     float *timing_error = malloc(DSSS_PACKET_CHIPS * 2 * sizeof(float));
