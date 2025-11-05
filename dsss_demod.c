@@ -139,48 +139,293 @@ static void saturate_signal(float complex *signal, size_t length, float limit) {
  * ============================================================================ */
 
 /**
- * @brief Polyphase correlator - correlates reference signal across all sample phases
- * @param signal Input signal buffer
- * @param sig_len Length of input signal
- * @param reference Reference signal (preamble)
- * @param ref_len Length of reference
- * @param sps Samples per symbol
- * @param corr_output Correlation output buffer
- * @return Index of maximum correlation peak, or -1 if not found
+ * @brief timingEstimate - Cross-correlation with threshold detection
+ *
+ * MATLAB equivalent of the timingEstimate function used in helperPolyphaseCorrelator
+ * Returns the index of maximum correlation if it exceeds threshold
+ *
+ * @param signal Decimated signal for one phase
+ * @param sig_len Signal length
+ * @param reference Reference signal
+ * @param ref_len Reference length
+ * @param xcorr_out Output buffer for full correlation (size: sig_len + ref_len - 1)
+ * @param threshold Detection threshold
+ * @return Index of correlation peak (1-indexed like MATLAB), or -1 if not found
  */
-static int polyphase_correlator(const float complex *signal, size_t sig_len,
-                                const float complex *reference, size_t ref_len,
-                                int sps, float complex *corr_output,
-                                float threshold) {
-    size_t num_lags = sig_len - ref_len * sps + 1;
+static int timingEstimate(const float complex *signal, size_t sig_len,
+                         const float complex *reference, size_t ref_len,
+                         float complex *xcorr_out, float threshold) {
+    // MATLAB doc page 9: Normalized cross-correlation using FFT
+    size_t xcorr_len = sig_len + ref_len - 1;
+
+    // Find next power of 2 for FFT efficiency
+    size_t fft_size = 1;
+    while (fft_size < xcorr_len) fft_size <<= 1;
+
+    // Calculate reference signal power
+    float refSigPower = 0.0f;
+    for (size_t i = 0; i < ref_len; i++) {
+        refSigPower += crealf(reference[i] * conjf(reference[i]));
+    }
+
+    // Allocate FFT buffers
+    fftwf_complex *sig_fft = fftwf_malloc(sizeof(fftwf_complex) * fft_size);
+    fftwf_complex *ref_fft = fftwf_malloc(sizeof(fftwf_complex) * fft_size);
+    fftwf_complex *corr_fft = fftwf_malloc(sizeof(fftwf_complex) * fft_size);
+
+    float *sig_fft_f = (float*)sig_fft;
+    float *ref_fft_f = (float*)ref_fft;
+    float *corr_fft_f = (float*)corr_fft;
+
+    // Prepare signal for FFT (zero-pad)
+    for (size_t i = 0; i < sig_len; i++) {
+        sig_fft_f[2*i] = crealf(signal[i]);
+        sig_fft_f[2*i+1] = cimagf(signal[i]);
+    }
+    for (size_t i = sig_len; i < fft_size; i++) {
+        sig_fft_f[2*i] = 0.0f;
+        sig_fft_f[2*i+1] = 0.0f;
+    }
+
+    // Prepare reference for FFT (zero-pad and flip for correlation)
+    for (size_t i = 0; i < ref_len; i++) {
+        ref_fft_f[2*i] = crealf(conjf(reference[ref_len - 1 - i]));
+        ref_fft_f[2*i+1] = cimagf(conjf(reference[ref_len - 1 - i]));
+    }
+    for (size_t i = ref_len; i < fft_size; i++) {
+        ref_fft_f[2*i] = 0.0f;
+        ref_fft_f[2*i+1] = 0.0f;
+    }
+
+    // FFT of both signals
+    fftwf_plan plan_sig = fftwf_plan_dft_1d(fft_size, sig_fft, sig_fft, FFTW_FORWARD, FFTW_ESTIMATE);
+    fftwf_plan plan_ref = fftwf_plan_dft_1d(fft_size, ref_fft, ref_fft, FFTW_FORWARD, FFTW_ESTIMATE);
+    fftwf_execute(plan_sig);
+    fftwf_execute(plan_ref);
+
+    // Multiply in frequency domain
+    for (size_t i = 0; i < fft_size; i++) {
+        float re = sig_fft_f[2*i] * ref_fft_f[2*i] - sig_fft_f[2*i+1] * ref_fft_f[2*i+1];
+        float im = sig_fft_f[2*i] * ref_fft_f[2*i+1] + sig_fft_f[2*i+1] * ref_fft_f[2*i];
+        corr_fft_f[2*i] = re;
+        corr_fft_f[2*i+1] = im;
+    }
+
+    // IFFT to get correlation
+    fftwf_plan plan_ifft = fftwf_plan_dft_1d(fft_size, corr_fft, corr_fft, FFTW_BACKWARD, FFTW_ESTIMATE);
+    fftwf_execute(plan_ifft);
+
+    // Normalize by FFT size and compute sliding window power
+    float *sigMagSq = malloc(sig_len * sizeof(float));
+    for (size_t i = 0; i < sig_len; i++) {
+        sigMagSq[i] = crealf(signal[i] * conjf(signal[i]));
+    }
+
+    // MATLAB page 9: waveformMagSq = filter(ones(size(refSignal)),1,[real(waveform.*conj(waveform)); zeros(length(refSignal)-1,1)]);
+    // Implement as O(n) moving sum filter instead of O(n × ref_len) nested loop
+    float *waveformMagSq = calloc(xcorr_len, sizeof(float));
+    float window_sum = 0.0f;
+
+    // Fill positions 0 to ref_len-2 with partial sums (MATLAB filter initialization)
+    for (size_t lag = 0; lag < ref_len - 1 && lag < xcorr_len; lag++) {
+        if (lag < sig_len) {
+            window_sum += sigMagSq[lag];
+        }
+        waveformMagSq[lag] = window_sum;
+    }
+
+    // Position ref_len-1: first complete window
+    if (ref_len - 1 < xcorr_len) {
+        if (ref_len - 1 < sig_len) {
+            window_sum += sigMagSq[ref_len - 1];
+        }
+        waveformMagSq[ref_len - 1] = window_sum;
+    }
+
+    // Slide the window for remaining positions (O(n) complexity)
+    for (size_t lag = ref_len; lag < xcorr_len; lag++) {
+        // Add new sample entering the window
+        if (lag < sig_len) {
+            window_sum += sigMagSq[lag];
+        }
+        // Remove old sample leaving the window
+        size_t old_idx = lag - ref_len;
+        if (old_idx < sig_len) {
+            window_sum -= sigMagSq[old_idx];
+        }
+        waveformMagSq[lag] = window_sum;
+    }
+
+    // Find maximum normalized correlation
     float max_corr = 0.0f;
     int max_idx = -1;
 
-    // Correlate across all possible starting positions
-    for (size_t lag = 0; lag < num_lags; lag++) {
-        float complex corr = 0.0f;
+    for (size_t lag = 0; lag < xcorr_len; lag++) {
+        // Extract correlation value
+        float complex corr = (corr_fft_f[2*lag] + I * corr_fft_f[2*lag+1]) / (float)fft_size;
 
-        // Correlate with reference at this lag
-        for (size_t i = 0; i < ref_len; i++) {
-            // Polyphase: sample at symbol rate from oversampled signal
-            corr += conjf(reference[i]) * signal[lag + i * sps];
-        }
+        // Normalize
+        float normFactor = sqrtf(waveformMagSq[lag] * refSigPower);
+        float normCorr = (normFactor > 1e-10f) ? (cabsf(corr) / normFactor) : 0.0f;
 
-        corr_output[lag] = corr;
-        float mag = cabsf(corr);
+        xcorr_out[lag] = normCorr + 0.0f * I;
 
-        if (mag > max_corr) {
-            max_corr = mag;
+        if (normCorr > max_corr) {
+            max_corr = normCorr;
             max_idx = lag;
         }
     }
 
-    // Check if correlation exceeds threshold
+    // Cleanup
+    fftwf_destroy_plan(plan_sig);
+    fftwf_destroy_plan(plan_ref);
+    fftwf_destroy_plan(plan_ifft);
+    fftwf_free(sig_fft);
+    fftwf_free(ref_fft);
+    fftwf_free(corr_fft);
+    free(sigMagSq);
+    free(waveformMagSq);
+
+    // DEBUG: Print correlation results
+    printf("[timingEstimate] max_corr=%.4f, threshold=%.4f, max_idx=%d, sig_len=%zu, ref_len=%zu\n",
+           max_corr, threshold, max_idx, sig_len, ref_len);
+
     if (max_corr < threshold) {
         return -1;
     }
 
-    return max_idx;
+    return max_idx + 1;
+}
+
+/**
+ * @brief helperPolyphaseCorrelator - Exact MATLAB translation
+ *
+ * Line-by-line translation of helperPolyphaseCorrelator.m
+ */
+static int polyphase_correlator(const float complex *signal, size_t sig_len,
+                                const float complex *reference, size_t ref_len,
+                                int sps, float complex *corr_output,
+                                int offset) {
+    // MATLAB: decimatedSampleBuffer = reshape(rxBuffer,sps,[]);
+    size_t decimated_len = sig_len / sps;
+
+    // MATLAB: bufferLen = length(decimatedSampleBuffer);
+    // In MATLAB, length() returns max dimension, so for [sps x N], it's N
+    size_t bufferLen = decimated_len;
+
+    // MATLAB: xcorrBuffer = zeros(bufferLen+length(referenceSignal)-1,sps);
+    size_t xcorr_len = bufferLen + ref_len - 1;
+    float complex **xcorrBuffer = malloc(sps * sizeof(float complex*));
+    for (int k = 0; k < sps; k++) {
+        xcorrBuffer[k] = malloc(xcorr_len * sizeof(float complex));
+    }
+
+    // MATLAB: startIdxs = [];
+    int *startIdxs = malloc(sps * sizeof(int));
+    for (int k = 0; k < sps; k++) {
+        startIdxs[k] = -1;  // -1 means empty in C
+    }
+
+    // MATLAB: for k=1:sps
+    for (int k = 0; k < sps; k++) {  // k is 0-indexed in C, 1-indexed in MATLAB
+        // Extract decimatedSampleBuffer(k,:) - samples at [k, k+sps, k+2*sps, ...]
+        float complex *decimated_phase = malloc(decimated_len * sizeof(float complex));
+        for (size_t i = 0; i < decimated_len; i++) {
+            decimated_phase[i] = signal[k + i * sps];
+        }
+
+        // MATLAB: [idx2,xcorrBuffer(:,k)] = timingEstimate(decimatedSampleBuffer(k,:).',referenceSignal,Threshold=0.35);
+        int idx2 = timingEstimate(decimated_phase, decimated_len, reference, ref_len,
+                                  xcorrBuffer[k], 0.35f);
+
+        // MATLAB: if ~isempty(idx2)
+        if (idx2 > 0) {
+            // MATLAB: startIdxs(k) = idx2 - offset + 1;
+            // idx2 is already 1-indexed from timingEstimate
+            startIdxs[k] = idx2 - offset + 1;
+        }
+
+        free(decimated_phase);
+    }
+
+    // MATLAB: [maxXcorrVals,maxXcorrIdxs] = max(abs(xcorrBuffer));
+    float *maxXcorrVals = malloc(sps * sizeof(float));
+    for (int k = 0; k < sps; k++) {
+        maxXcorrVals[k] = 0.0f;
+        for (size_t i = 0; i < xcorr_len; i++) {
+            float mag = cabsf(xcorrBuffer[k][i]);
+            if (mag > maxXcorrVals[k]) {
+                maxXcorrVals[k] = mag;
+            }
+        }
+    }
+
+    // MATLAB: [maxDetectorVal,kidx] = max(maxXcorrVals);
+    float maxDetectorVal = 0.0f;
+    int kidx = -1;
+    for (int k = 0; k < sps; k++) {
+        if (maxXcorrVals[k] > maxDetectorVal) {
+            maxDetectorVal = maxXcorrVals[k];
+            kidx = k;
+        }
+    }
+
+    // DEBUG: Print max correlation per phase
+    printf("[polyphase_correlator] maxDetectorVal=%.4f at phase kidx=%d (sps=%d)\n",
+           maxDetectorVal, kidx, sps);
+
+    int final_idx = -1;
+
+    if (kidx >= 0) {
+        // MATLAB: corrBuffer = xcorrBuffer(length(referenceSignal):end,kidx);
+        size_t corrBuffer_len = xcorr_len - ref_len + 1;
+        float *corrBuffer_mag = malloc(corrBuffer_len * sizeof(float));
+        for (size_t i = 0; i < corrBuffer_len; i++) {
+            corrBuffer_mag[i] = cabsf(xcorrBuffer[kidx][ref_len - 1 + i]);
+        }
+
+        // MATLAB: if maxDetectorVal < 5.5*mean(abs(corrBuffer))
+        float mean_corr = 0.0f;
+        for (size_t i = 0; i < corrBuffer_len; i++) {
+            mean_corr += corrBuffer_mag[i];
+        }
+        mean_corr /= corrBuffer_len;
+
+        // DEBUG: Print threshold test
+        printf("[polyphase_correlator] mean_corr=%.4f, threshold=%.4f, maxDetectorVal=%.4f %s\n",
+               mean_corr, 5.5f * mean_corr, maxDetectorVal,
+               (maxDetectorVal >= 5.5f * mean_corr) ? "PASS" : "FAIL");
+
+        if (maxDetectorVal >= 5.5f * mean_corr) {
+            // MATLAB: startIdx = startIdxs(kidx);
+            int startIdx = startIdxs[kidx];
+
+            if (startIdx > 0) {
+                // MATLAB: idx = max(1,(startIdx-1)*sps + kidx - (sps/2));
+                // kidx is 0-indexed in C, but formula needs 1-indexed
+                int idx_matlab = (startIdx - 1) * sps + (kidx + 1) - (sps / 2);
+                if (idx_matlab < 1) idx_matlab = 1;
+
+                // Convert to 0-indexed for C
+                final_idx = idx_matlab - 1;
+
+                printf("Found preamble at correlation buffer number %d, index %d, sample index %d\n",
+                       kidx + 1, startIdx, idx_matlab);
+            }
+        }
+
+        free(corrBuffer_mag);
+    }
+
+    // Cleanup
+    for (int k = 0; k < sps; k++) {
+        free(xcorrBuffer[k]);
+    }
+    free(xcorrBuffer);
+    free(startIdxs);
+    free(maxXcorrVals);
+
+    return final_idx;
 }
 
 /* ============================================================================
@@ -475,8 +720,15 @@ static size_t timing_recovery_process(timing_recovery_t *tr,
                     float q_mid = farrow_interpolate(q_aligned, mid_idx, tr->mu);
                     float complex mid_symbol = i_mid + I * q_mid;
 
-                    float err_re = crealf(mid_symbol) * (crealf(tr->prev_symbol) - crealf(symbol));
-                    float err_im = cimagf(mid_symbol) * (cimagf(tr->prev_symbol) - cimagf(symbol));
+                    // Zero-Crossing TED (decision-directed) - matches MATLAB default
+                    // e(k) = x[k-1/2] * (â[k-1] - â[k]) where â is hard decision (sign)
+                    float decision_prev_re = (crealf(tr->prev_symbol) > 0) ? 1.0f : -1.0f;
+                    float decision_prev_im = (cimagf(tr->prev_symbol) > 0) ? 1.0f : -1.0f;
+                    float decision_curr_re = (crealf(symbol) > 0) ? 1.0f : -1.0f;
+                    float decision_curr_im = (cimagf(symbol) > 0) ? 1.0f : -1.0f;
+
+                    float err_re = crealf(mid_symbol) * (decision_prev_re - decision_curr_re);
+                    float err_im = cimagf(mid_symbol) * (decision_prev_im - decision_curr_im);
                     float timing_error = err_re + err_im;
 
                     tr->W += tr->k2 * timing_error;
@@ -582,6 +834,14 @@ int dsss_receive_burst(const float complex *ota_buffer,
            preamble_qpsk + preamble_detection_offset,
            preamble_detection_length * sizeof(float complex));
 
+    // DEBUG: Show first 10 preamble reference values
+    printf("[DEBUG] First 10 preamble reference symbols (after π/4 rotation):\n");
+    for (int i = 0; i < 10 && i < preamble_detection_length; i++) {
+        printf("  [%d] PRN_I=%+d PRN_Q=%+d -> ref=(%.3f%+.3fj)\n",
+               i, prn_i[preamble_detection_offset + i], prn_q[preamble_detection_offset + i],
+               crealf(preamble_detect[i]), cimagf(preamble_detect[i]));
+    }
+
     // Double buffering (ping-pong scheme)
     // Create sample buffer twice the size of one burst
     size_t num_buffers = buffer_length / num_burst_samples;
@@ -633,14 +893,27 @@ int dsss_receive_burst(const float complex *ota_buffer,
         }
 
         // Convert from OQPSK to QPSK for symbol-based preamble detection
+        // For half-sine pulse shaping at SPS=16: peak is at phase 8 (sin(π×8/16) = 1)
+        // Start at phase 8 to capture peaks instead of zero-crossings
         float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
         int q_delay = sps / 2;
-        for (size_t i = 0; i < num_burst_samples * 2 - q_delay; i++) {
-            sample_buffer_qpsk[i] = crealf(rx_agc_samples[i]) +
-                                   I * cimagf(rx_agc_samples[i + q_delay]);
+        int phase_offset = sps / 2;  // Start at peak (phase 8 for SPS=16)
+        for (size_t i = 0; i < num_burst_samples * 2 - q_delay - phase_offset; i++) {
+            sample_buffer_qpsk[i] = crealf(rx_agc_samples[i + phase_offset]) +
+                                   I * cimagf(rx_agc_samples[i + q_delay + phase_offset]);
         }
-        for (size_t i = num_burst_samples * 2 - q_delay; i < num_burst_samples * 2; i++) {
+        for (size_t i = num_burst_samples * 2 - q_delay - phase_offset; i < num_burst_samples * 2; i++) {
             sample_buffer_qpsk[i] = 0.0f;
+        }
+
+        // DEBUG: Show first 10 received QPSK samples at symbol rate (decimated by sps)
+        if (n == 0) {
+            printf("[DEBUG] First 10 received QPSK symbols (after OQPSK→QPSK, decimated by sps=%d):\n", sps);
+            for (int i = 0; i < 10; i++) {
+                size_t idx = i * sps;
+                printf("  [%d] rx=(%.3f%+.3fj)\n",
+                       i, crealf(sample_buffer_qpsk[idx]), cimagf(sample_buffer_qpsk[idx]));
+            }
         }
 
 
@@ -660,7 +933,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
             int start_samp_idx = polyphase_correlator(
                 sample_buffer_qpsk, num_burst_samples,
                 preamble_shifted, preamble_detection_length,
-                sps, corr_buffer, 0.25f);
+                sps, corr_buffer, preamble_detection_offset);
 
             free(preamble_shifted);
 
@@ -706,6 +979,7 @@ preamble_found:
            crealf(rx_burst[100]), cimagf(rx_burst[100]));
 
     // Step 1 - Coarse Frequency Offset Estimation and Correction
+    // loop_bw=0.01 normalized to symbol rate (matches MATLAB NormalizedLoopBandwidth)
     carrier_sync_t coarse_freq;
     carrier_sync_init(&coarse_freq, 0.01f, 0.707f, sps);
 
@@ -717,6 +991,7 @@ preamble_found:
     memcpy(coarse_sync_out, rx_burst, burst_length * sizeof(float complex));
 
     // Step 2 - Fine Frequency Correction (Carrier Synchronizer)
+    // loop_bw=0.01 normalized to symbol rate (matches MATLAB NormalizedLoopBandwidth)
     carrier_sync_t carrier_sync;
     carrier_sync_init(&carrier_sync, 0.01f, 0.707f, sps);
     printf("[DEBUG] Carrier sync: loop_bw=%.4f, damping=%.3f, sps=%d\n",
@@ -756,7 +1031,7 @@ preamble_found:
     int fsp_samp_idx = polyphase_correlator(
         carrier_sync_out_qpsk, burst_length,
         preamble_full, num_preamble_chips / 2 - preamble_offset,
-        sps, corr_buffer2, 0.2f);
+        sps, corr_buffer2, preamble_offset);
 
     if (fsp_samp_idx < 0) {
         printf("ERROR: Preamble lost after frequency correction\n");
@@ -782,8 +1057,11 @@ preamble_found:
     free(corr_buffer2);
 
     // Step 3 - Timing Recovery of OQPSK signal
+    // Adjusted for SPS=16 with half-sine pulse shaping:
+    // - loop_bw increased 10× (0.001→0.01) for faster convergence with lower SPS
+    // - detector_gain reduced 2× (4.0→2.0) for constant-envelope OQPSK with pulse shaping
     timing_recovery_t symbol_synchronizer;
-    timing_recovery_init(&symbol_synchronizer, sps, 0.001f, 2.0f, 4.0f);
+    timing_recovery_init(&symbol_synchronizer, sps, 0.001f, 2.0f, 2.0f);
 
     float complex *synced_qpsk = malloc(DSSS_PACKET_CHIPS * 2 * sizeof(float complex));
     float *timing_error = malloc(DSSS_PACKET_CHIPS * 2 * sizeof(float));
