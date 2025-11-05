@@ -634,7 +634,7 @@ static void timing_recovery_init(timing_recovery_t *tr, int sps,
     tr->W = 0.0f;
     tr->strobe_counter = 0.0f;
     tr->state_valid = 0;
-    tr->q_delay_fractional = (float)sps / 2.0f;  // Exact: 65/2 = 32.5
+    tr->q_delay_fractional = (float)sps / 2.0f;  // OQPSK Q-channel delay (Tc/2)
     tr->q_buffer_len = (int)(tr->q_delay_fractional) + 3;  // Integer part + margin for interpolation
     tr->prev_symbol = 0.0f;
     tr->prev_mid = 0.0f;
@@ -893,11 +893,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
         }
 
         // Convert from OQPSK to QPSK for symbol-based preamble detection
-        // For half-sine pulse shaping at SPS=16: peak is at phase 8 (sin(π×8/16) = 1)
-        // Start at phase 8 to capture peaks instead of zero-crossings
+        // For half-sine pulse shaping: peak is at phase sps/2 (sin(π×(sps/2)/sps) = 1)
+        // Start at sps/2 to capture peaks instead of zero-crossings
         float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
         int q_delay = sps / 2;
-        int phase_offset = sps / 2;  // Start at peak (phase 8 for SPS=16)
+        int phase_offset = sps / 2;  // Start at peak of half-sine pulse
         for (size_t i = 0; i < num_burst_samples * 2 - q_delay - phase_offset; i++) {
             sample_buffer_qpsk[i] = crealf(rx_agc_samples[i + phase_offset]) +
                                    I * cimagf(rx_agc_samples[i + q_delay + phase_offset]);
