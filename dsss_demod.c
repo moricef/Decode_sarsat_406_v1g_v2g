@@ -62,7 +62,7 @@ void dsss_generate_prn_sequences(int8_t *prn_i, int8_t *prn_q) {
     uint32_t init_i = 0x000001;  // [X22...X1,X0] = [...0,0,1]
 
     // Q channel: [0 0 1 1 0 1 0 1 1 0 0 0 0 0 1 1 1 1 1 1 1 0 0] (produces 3F83 58BA D030 F231)
-    uint32_t init_q = 0x0035AC;  // [X22...X0]
+    uint32_t init_q = 0x1AC1FC;  // [X22...X0]
 
     // Generate full sequences (150 bits * 256/2 = 19200 chips each)
     size_t num_chips = DSSS_PACKET_CHIPS;
@@ -900,55 +900,23 @@ int dsss_receive_burst(const float complex *ota_buffer,
                    crealf(rx_agc_samples[0]), cimagf(rx_agc_samples[0]));
         }
 
-        // Step 1: Convert from OQPSK to QPSK FIRST (align I and Q channels)
+        // Convert from OQPSK to QPSK for symbol-based preamble detection (MATLAB-compatible)
         // MATLAB: sampleBufferQPSK = [real(rxAGCSamples(1:end-sps/2)) + 1i*imag(rxAGCSamples(sps/2+1:end)); zeros(sps/2,1)]
         // I channel: no offset (starts at index 0)
         // Q channel: delayed by sps/2 (OQPSK Tc/2 delay)
-        // This produces aligned QPSK signal (still oversampled at SPS)
+        // NO MATCHED FILTER - MATLAB uses oversampled signal directly with symbol-rate reference
         int q_delay = sps / 2;
-        float complex *rx_qpsk_aligned = malloc(num_burst_samples * 2 * sizeof(float complex));
+        float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
         for (size_t i = 0; i < num_burst_samples * 2 - q_delay; i++) {
-            rx_qpsk_aligned[i] = crealf(rx_agc_samples[i]) +
-                                I * cimagf(rx_agc_samples[i + q_delay]);
+            sample_buffer_qpsk[i] = crealf(rx_agc_samples[i]) +
+                                   I * cimagf(rx_agc_samples[i + q_delay]);
         }
         for (size_t i = num_burst_samples * 2 - q_delay; i < num_burst_samples * 2; i++) {
-            rx_qpsk_aligned[i] = 0.0f;
+            sample_buffer_qpsk[i] = 0.0f;
         }
 
         if (n == 0) {
-            printf("[DEBUG] OQPSK→QPSK: I and Q channels aligned\n");
-        }
-
-        // Step 2: Apply matched filter to the ALIGNED QPSK signal
-        // Matched filter: h[n] = sin(π×(SPS-1-n)/SPS) for n = 0..(SPS-1)
-        // This matches the transmit pulse shaping filter
-        float *mf_coeffs = malloc(sps * sizeof(float));
-        float mf_energy = 0.0f;
-        for (int i = 0; i < sps; i++) {
-            mf_coeffs[i] = sinf(M_PI * (float)(sps - 1 - i) / (float)sps);
-            mf_energy += mf_coeffs[i] * mf_coeffs[i];
-        }
-        // Normalize to unit energy
-        float mf_norm = sqrtf(mf_energy);
-        for (int i = 0; i < sps; i++) {
-            mf_coeffs[i] /= mf_norm;
-        }
-
-        float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
-        for (size_t i = 0; i < num_burst_samples * 2; i++) {
-            float complex sum = 0.0f;
-            for (int k = 0; k < sps; k++) {
-                if (i >= k) {
-                    sum += rx_qpsk_aligned[i - k] * mf_coeffs[k];
-                }
-            }
-            sample_buffer_qpsk[i] = sum;
-        }
-        free(mf_coeffs);
-        free(rx_qpsk_aligned);
-
-        if (n == 0) {
-            printf("[DEBUG] Matched filter applied (half-sine, %d taps) to aligned QPSK\n", sps);
+            printf("[DEBUG] OQPSK→QPSK conversion complete (no matched filter, MATLAB-compatible)\n");
         }
 
         // DEBUG: Show first 10 received QPSK samples at symbol rate (decimated by sps)
