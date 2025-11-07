@@ -336,8 +336,9 @@ static int polyphase_correlator(const float complex *signal, size_t sig_len,
         }
 
         // MATLAB: [idx2,xcorrBuffer(:,k)] = timingEstimate(decimatedSampleBuffer(k,:).',referenceSignal,Threshold=0.35);
+        // TEMPORARY: Reduced threshold for debugging (0.35 → 0.25)
         int idx2 = timingEstimate(decimated_phase, decimated_len, reference, ref_len,
-                                  xcorrBuffer[k], 0.35f);
+                                  xcorrBuffer[k], 0.25f);
 
         // MATLAB: if ~isempty(idx2)
         if (idx2 > 0) {
@@ -393,11 +394,12 @@ static int polyphase_correlator(const float complex *signal, size_t sig_len,
         mean_corr /= corrBuffer_len;
 
         // DEBUG: Print threshold test
+        // TEMPORARY: Reduced threshold for debugging (5.5 → 3.0)
         printf("[polyphase_correlator] mean_corr=%.4f, threshold=%.4f, maxDetectorVal=%.4f %s\n",
-               mean_corr, 5.5f * mean_corr, maxDetectorVal,
-               (maxDetectorVal >= 5.5f * mean_corr) ? "PASS" : "FAIL");
+               mean_corr, 3.0f * mean_corr, maxDetectorVal,
+               (maxDetectorVal >= 3.0f * mean_corr) ? "PASS" : "FAIL");
 
-        if (maxDetectorVal >= 5.5f * mean_corr) {
+        if (maxDetectorVal >= 3.0f * mean_corr) {
             // MATLAB: startIdx = startIdxs(kidx);
             int startIdx = startIdxs[kidx];
 
@@ -1124,8 +1126,9 @@ preamble_found:
             for (size_t i = 0; i < compare_len; i++) {
                 int8_t test_i = (rx_ci[i + p] > 0) ? 1 : 0;
                 int8_t test_q = (rx_cq[i] > 0) ? 1 : 0;
-                int8_t ref_i = (prn_i[i] > 0) ? 1 : 0;
-                int8_t ref_q = (prn_q[i] > 0) ? 1 : 0;
+                // T.018 Table 2.3: Signal +1 → Bit 0, Signal -1 → Bit 1
+                int8_t ref_i = (prn_i[i] > 0) ? 0 : 1;
+                int8_t ref_q = (prn_q[i] > 0) ? 0 : 1;
 
                 if (test_i == ref_i) matches++;
                 if (test_q == ref_q) matches++;
@@ -1179,13 +1182,16 @@ phase_found:
 
 
     // Step 5 - DSSS Despreading
-    // Correlate PRN sequence with received chips (XOR operation)
+    // XOR received chips (0/1) with PRN (convert -1→1, +1→0 for XOR)
     int8_t *ibdn = malloc(DSSS_PACKET_CHIPS);
     int8_t *qbdn = malloc(DSSS_PACKET_CHIPS);
 
     for (size_t i = 0; i < DSSS_PACKET_CHIPS; i++) {
-        ibdn[i] = rx_ci[i] ^ prn_i[i];
-        qbdn[i] = rx_cq[i] ^ prn_q[i];
+        // Convert PRN from (-1/+1) to (1/0) then XOR with rx chip (0/1)
+        uint8_t prn_i_bit = (prn_i[i] < 0) ? 1 : 0;
+        uint8_t prn_q_bit = (prn_q[i] < 0) ? 1 : 0;
+        ibdn[i] = rx_ci[i] ^ prn_i_bit;
+        qbdn[i] = rx_cq[i] ^ prn_q_bit;
     }
 
     // Reshape into spreading factor rows (reshape)
