@@ -39,14 +39,15 @@ void dsss_generate_prn(uint32_t initial_state, int8_t *output, size_t num_chips)
     uint32_t lfsr = initial_state & 0x7FFFFF;  // 23-bit mask
 
     for (size_t i = 0; i < num_chips; i++) {
-        // Output the MSB (bit 22) as chip value: 0->+1, 1->-1
-        output[i] = (lfsr & (1 << 22)) ? -1 : +1;
+        // T.018 Figure 2-2: Output = X0 (LSB), Table 2.3: Logic 1→-1, Logic 0→+1
+        output[i] = (lfsr & 1) ? -1 : +1;
 
-        // Calculate feedback: XOR of bit 22 (x^23) and bit 17 (x^18)
-        uint32_t feedback = ((lfsr >> 22) ^ (lfsr >> 17)) & 1;
+        // T.018 Figure 2-2: Feedback = X0 ⊕ X18 (polynomial G(x) = X23 + X18 + 1)
+        uint32_t feedback = (lfsr ^ (lfsr >> 18)) & 1;
 
-        // Shift left and insert feedback at LSB
-        lfsr = ((lfsr << 1) | feedback) & 0x7FFFFF;
+        // T.018 Figure 2-2: Shift RIGHT (Xn → Xn-1), feedback → X22
+        lfsr = (lfsr >> 1) | (feedback << 22);
+        lfsr &= 0x7FFFFF;
     }
 }
 
@@ -56,12 +57,12 @@ void dsss_generate_prn(uint32_t initial_state, int8_t *output, size_t num_chips)
  * @param prn_q Output buffer for Q channel PRN (38400 chips)
  */
 void dsss_generate_prn_sequences(int8_t *prn_i, int8_t *prn_q) {
-    // COSPAS-SARSAT Normal mode initial states (LSB first, 23 bits)
-    // I channel: all zeros except bit 22
-    uint32_t init_i = 0x400000;  // [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1]
+    // T.018 Table 2.2: Normal mode initial states
+    // I channel: register 0 = 1, all others = 0 (produces 8000 0108 4212 84A1)
+    uint32_t init_i = 0x000001;  // [X22...X1,X0] = [...0,0,1]
 
-    // Q channel: [0 0 1 1 0 1 0 1 1 0 0 0 0 0 1 1 1 1 1 1 1 0 0]
-    uint32_t init_q = 0x0035AC;
+    // Q channel: [0 0 1 1 0 1 0 1 1 0 0 0 0 0 1 1 1 1 1 1 1 0 0] (produces 3F83 58BA D030 F231)
+    uint32_t init_q = 0x0035AC;  // [X22...X0]
 
     // Generate full sequences (150 bits * 256/2 = 19200 chips each)
     size_t num_chips = DSSS_PACKET_CHIPS;
@@ -305,7 +306,7 @@ static int timingEstimate(const float complex *signal, size_t sig_len,
 static int polyphase_correlator(const float complex *signal, size_t sig_len,
                                 const float complex *reference, size_t ref_len,
                                 int sps, float complex *corr_output,
-                                int offset) {
+                                int offset, int *out_optimal_phase) {
     // MATLAB: decimatedSampleBuffer = reshape(rxBuffer,sps,[]);
     size_t decimated_len = sig_len / sps;
 
@@ -424,6 +425,11 @@ static int polyphase_correlator(const float complex *signal, size_t sig_len,
     free(xcorrBuffer);
     free(startIdxs);
     free(maxXcorrVals);
+
+    // Return optimal phase if requested
+    if (out_optimal_phase != NULL) {
+        *out_optimal_phase = kidx;  // kidx is the optimal phase (0 to sps-1), or -1 if not found
+    }
 
     return final_idx;
 }
@@ -821,11 +827,13 @@ int dsss_receive_burst(const float complex *ota_buffer,
     const int preamble_detection_length = 175;  // Shortened to combat frequency offset
 
     // Create reference preamble for detection (QPSK at symbol rate)
+    // MATLAB: pskmod(..., 4, pi/4) generates normalized symbols with amplitude = 1.0
+    // Normalize by 1/√2 to match MATLAB pskmod output and transmitted signal
     float complex *preamble_qpsk = malloc(num_preamble_chips / 2 * sizeof(float complex));
     for (size_t i = 0; i < num_preamble_chips / 2; i++) {
         float complex chip_i = (prn_i[i] > 0) ? 1.0f : -1.0f;
         float complex chip_q = (prn_q[i] > 0) ? 1.0f : -1.0f;
-        preamble_qpsk[i] = (chip_i + I * chip_q) * cexpf(I * M_PI / 4.0f);
+        preamble_qpsk[i] = (chip_i + I * chip_q) * cexpf(I * M_PI / 4.0f) / sqrtf(2.0f);
     }
 
     // Extract shortened preamble for detection
@@ -892,18 +900,55 @@ int dsss_receive_burst(const float complex *ota_buffer,
                    crealf(rx_agc_samples[0]), cimagf(rx_agc_samples[0]));
         }
 
-        // Convert from OQPSK to QPSK for symbol-based preamble detection
-        // For half-sine pulse shaping: peak is at phase sps/2 (sin(π×(sps/2)/sps) = 1)
-        // Start at sps/2 to capture peaks instead of zero-crossings
-        float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
+        // Step 1: Convert from OQPSK to QPSK FIRST (align I and Q channels)
+        // MATLAB: sampleBufferQPSK = [real(rxAGCSamples(1:end-sps/2)) + 1i*imag(rxAGCSamples(sps/2+1:end)); zeros(sps/2,1)]
+        // I channel: no offset (starts at index 0)
+        // Q channel: delayed by sps/2 (OQPSK Tc/2 delay)
+        // This produces aligned QPSK signal (still oversampled at SPS)
         int q_delay = sps / 2;
-        int phase_offset = sps / 2;  // Start at peak of half-sine pulse
-        for (size_t i = 0; i < num_burst_samples * 2 - q_delay - phase_offset; i++) {
-            sample_buffer_qpsk[i] = crealf(rx_agc_samples[i + phase_offset]) +
-                                   I * cimagf(rx_agc_samples[i + q_delay + phase_offset]);
+        float complex *rx_qpsk_aligned = malloc(num_burst_samples * 2 * sizeof(float complex));
+        for (size_t i = 0; i < num_burst_samples * 2 - q_delay; i++) {
+            rx_qpsk_aligned[i] = crealf(rx_agc_samples[i]) +
+                                I * cimagf(rx_agc_samples[i + q_delay]);
         }
-        for (size_t i = num_burst_samples * 2 - q_delay - phase_offset; i < num_burst_samples * 2; i++) {
-            sample_buffer_qpsk[i] = 0.0f;
+        for (size_t i = num_burst_samples * 2 - q_delay; i < num_burst_samples * 2; i++) {
+            rx_qpsk_aligned[i] = 0.0f;
+        }
+
+        if (n == 0) {
+            printf("[DEBUG] OQPSK→QPSK: I and Q channels aligned\n");
+        }
+
+        // Step 2: Apply matched filter to the ALIGNED QPSK signal
+        // Matched filter: h[n] = sin(π×(SPS-1-n)/SPS) for n = 0..(SPS-1)
+        // This matches the transmit pulse shaping filter
+        float *mf_coeffs = malloc(sps * sizeof(float));
+        float mf_energy = 0.0f;
+        for (int i = 0; i < sps; i++) {
+            mf_coeffs[i] = sinf(M_PI * (float)(sps - 1 - i) / (float)sps);
+            mf_energy += mf_coeffs[i] * mf_coeffs[i];
+        }
+        // Normalize to unit energy
+        float mf_norm = sqrtf(mf_energy);
+        for (int i = 0; i < sps; i++) {
+            mf_coeffs[i] /= mf_norm;
+        }
+
+        float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
+        for (size_t i = 0; i < num_burst_samples * 2; i++) {
+            float complex sum = 0.0f;
+            for (int k = 0; k < sps; k++) {
+                if (i >= k) {
+                    sum += rx_qpsk_aligned[i - k] * mf_coeffs[k];
+                }
+            }
+            sample_buffer_qpsk[i] = sum;
+        }
+        free(mf_coeffs);
+        free(rx_qpsk_aligned);
+
+        if (n == 0) {
+            printf("[DEBUG] Matched filter applied (half-sine, %d taps) to aligned QPSK\n", sps);
         }
 
         // DEBUG: Show first 10 received QPSK samples at symbol rate (decimated by sps)
@@ -930,17 +975,18 @@ int dsss_receive_burst(const float complex *ota_buffer,
             }
 
             // Get start index of preamble (search only first half)
+            int optimal_phase = -1;
             int start_samp_idx = polyphase_correlator(
                 sample_buffer_qpsk, num_burst_samples,
                 preamble_shifted, preamble_detection_length,
-                sps, corr_buffer, preamble_detection_offset);
+                sps, corr_buffer, preamble_detection_offset, &optimal_phase);
 
             free(preamble_shifted);
 
             if (start_samp_idx >= 0) {
                 float corr_peak = cabsf(corr_buffer[start_samp_idx]);
-                printf("Preamble found: buffer=%zu, idx=%d, freq_offset=%d Hz, corr=%.3f\n",
-                       n + 1, start_samp_idx, preamble_freq_offset, corr_peak);
+                printf("Preamble found: buffer=%zu, idx=%d, freq_offset=%d Hz, corr=%.3f, phase=%d/%d\n",
+                       n + 1, start_samp_idx, preamble_freq_offset, corr_peak, optimal_phase, sps);
                 preamble_idx = start_samp_idx;
                 free(sample_buffer_qpsk);
                 free(rx_agc_samples);
@@ -1028,10 +1074,11 @@ preamble_found:
            (num_preamble_chips / 2 - preamble_offset) * sizeof(float complex));
 
     float complex *corr_buffer2 = malloc(burst_length * sizeof(float complex));
+    int optimal_phase2 = -1;
     int fsp_samp_idx = polyphase_correlator(
         carrier_sync_out_qpsk, burst_length,
         preamble_full, num_preamble_chips / 2 - preamble_offset,
-        sps, corr_buffer2, preamble_offset);
+        sps, corr_buffer2, preamble_offset, &optimal_phase2);
 
     if (fsp_samp_idx < 0) {
         printf("ERROR: Preamble lost after frequency correction\n");
