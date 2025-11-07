@@ -15,11 +15,11 @@
 #define PRN_LFSR_LENGTH     23          // LFSR register length
 #define PRN_CHIPS_PER_BIT   256         // Spreading factor
 
-// T.018 Table 2.2 initial states
-#define PRN_INIT_NORMAL_I   0x000001    // Normal mode I-channel: bit 0 = 1
-#define PRN_INIT_NORMAL_Q   0x000041    // Normal mode Q-channel: offset 64 chips
-#define PRN_INIT_TEST_I     0x69E780    // Self-test mode I-channel
-#define PRN_INIT_TEST_Q     0x3CB948    // Self-test mode Q-channel
+// T.018 Table 2.2 initial states (verified against Rev.12)
+#define PRN_INIT_NORMAL_I   0x000001    // Normal I:    00000000000000000000001
+#define PRN_INIT_NORMAL_Q   0x1AC1FC    // Normal Q:    00110101100000111111100
+#define PRN_INIT_TEST_I     0x52C9F0    // Self-test I: 10100101100100111110000
+#define PRN_INIT_TEST_Q     0x3CE928    // Self-test Q: 01111001110010100101000
 
 // PRN generator state
 typedef struct {
