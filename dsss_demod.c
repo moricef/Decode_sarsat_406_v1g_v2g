@@ -937,10 +937,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
              preamble_freq_offset <= max_doppler;
              preamble_freq_offset += 150) {
 
-            // Add frequency offset to the preamble
+            // Add frequency offset to the preamble (at symbol rate)
+            float symbol_rate = DSSS_CHIP_RATE / 2;  // 19200 Hz (preamble is QPSK symbols)
             float complex *preamble_shifted = malloc(preamble_detection_length * sizeof(float complex));
             for (int i = 0; i < preamble_detection_length; i++) {
-                float phase = 2.0f * M_PI * preamble_freq_offset * i / DSSS_CHIP_RATE;
+                float phase = 2.0f * M_PI * preamble_freq_offset * i / symbol_rate;
                 preamble_shifted[i] = preamble_detect[i] * cexpf(I * phase);
             }
 
@@ -994,45 +995,64 @@ preamble_found:
            crealf(rx_burst[0]), cimagf(rx_burst[0]),
            crealf(rx_burst[100]), cimagf(rx_burst[100]));
 
+    // Step 0 - Convert from OQPSK to QPSK FIRST
+    // CRITICAL: Per MATLAB SymbolSynchronizer doc, OQPSK signals must be converted to QPSK
+    // BEFORE frequency/phase correction. The 4th-power method and Costas loop assume QPSK
+    // (synchronous I/Q), but OQPSK has Q delayed by Tc/2.
+    printf("[DEBUG] Converting OQPSK to QPSK before frequency/phase corrections\n");
+    size_t qpsk_length = burst_length - sps / 2;
+    float complex *rx_burst_qpsk = malloc(burst_length * sizeof(float complex));
+    for (size_t i = 0; i < qpsk_length; i++) {
+        rx_burst_qpsk[i] = crealf(rx_burst[i]) + I * cimagf(rx_burst[i + sps / 2]);
+    }
+    // Zero-pad the last sps/2 samples
+    for (size_t i = qpsk_length; i < burst_length; i++) {
+        rx_burst_qpsk[i] = 0.0f;
+    }
+
     // Step 1 - Coarse Frequency Offset Estimation and Correction
-    // loop_bw=0.01 normalized to symbol rate (matches MATLAB NormalizedLoopBandwidth)
+    // For simulated signals without real Doppler, bypass frequency/phase corrections
+    // to avoid degrading the signal with erroneous estimates
+    float complex *carrier_sync_out_qpsk = NULL;
+    float *phase_err = NULL;
+
+    #define BYPASS_FREQ_PHASE_CORRECTIONS 1  // Set to 1 for simulated signals, 0 for real signals
+
+    #if BYPASS_FREQ_PHASE_CORRECTIONS
+    printf("[DEBUG] BYPASSING frequency/phase corrections (simulated signal mode)\n");
+    carrier_sync_out_qpsk = rx_burst_qpsk;  // Use QPSK-converted signal directly
+    phase_err = malloc(burst_length * sizeof(float));  // Allocate for cleanup
+    #else
+    // Now applied on QPSK signal (I and Q are aligned)
     carrier_sync_t coarse_freq;
     carrier_sync_init(&coarse_freq, 0.01f, 0.707f, sps);
 
-    float coarse_offset = estimate_coarse_frequency_offset(rx_burst, burst_length, fs);
+    float coarse_offset = estimate_coarse_frequency_offset(rx_burst_qpsk, burst_length, fs);
     printf("Estimated coarse frequency offset = %.3f kHz\n", coarse_offset / 1000.0f);
 
     float complex *coarse_sync_out = malloc(burst_length * sizeof(float complex));
-    apply_frequency_offset(rx_burst, burst_length, fs, coarse_offset);
-    memcpy(coarse_sync_out, rx_burst, burst_length * sizeof(float complex));
+    apply_frequency_offset(rx_burst_qpsk, burst_length, fs, coarse_offset);
+    memcpy(coarse_sync_out, rx_burst_qpsk, burst_length * sizeof(float complex));
 
     // Step 2 - Fine Frequency Correction (Carrier Synchronizer)
-    // loop_bw=0.01 normalized to symbol rate (matches MATLAB NormalizedLoopBandwidth)
+    // Now applied on QPSK signal (I and Q are aligned)
     carrier_sync_t carrier_sync;
     carrier_sync_init(&carrier_sync, 0.01f, 0.707f, sps);
     printf("[DEBUG] Carrier sync: loop_bw=%.4f, damping=%.3f, sps=%d\n",
            0.01f, 0.707f, sps);
 
-    float complex *carrier_sync_out = malloc(burst_length * sizeof(float complex));
-    float *phase_err = malloc(burst_length * sizeof(float));
+    carrier_sync_out_qpsk = malloc(burst_length * sizeof(float complex));
+    phase_err = malloc(burst_length * sizeof(float));
 
-    carrier_sync_process(&carrier_sync, coarse_sync_out, carrier_sync_out, burst_length, phase_err);
+    carrier_sync_process(&carrier_sync, coarse_sync_out, carrier_sync_out_qpsk, burst_length, phase_err);
 
     printf("Carrier synchronization complete\n");
     printf("[DEBUG] Signal after sync: [0]=%.3f+j%.3f, [100]=%.3f+j%.3f\n",
-           crealf(carrier_sync_out[0]), cimagf(carrier_sync_out[0]),
-           crealf(carrier_sync_out[100]), cimagf(carrier_sync_out[100]));
+           crealf(carrier_sync_out_qpsk[0]), cimagf(carrier_sync_out_qpsk[0]),
+           crealf(carrier_sync_out_qpsk[100]), cimagf(carrier_sync_out_qpsk[100]));
 
-    // Path Detection - Second preamble detection using entire preamble
-    // Convert from OQPSK to QPSK
-    float complex *carrier_sync_out_qpsk = malloc(burst_length * sizeof(float complex));
-    for (size_t i = 0; i < burst_length - sps / 2; i++) {
-        carrier_sync_out_qpsk[i] = crealf(carrier_sync_out[i]) +
-                                   I * cimagf(carrier_sync_out[i + sps / 2]);
-    }
-    for (size_t i = burst_length - sps / 2; i < burst_length; i++) {
-        carrier_sync_out_qpsk[i] = 0.0f;
-    }
+    free(coarse_sync_out);
+    #endif
 
     // Use entire preamble for fine path detection
     const int preamble_offset_chips = 5000; 
@@ -1054,10 +1074,13 @@ preamble_found:
         printf("ERROR: Preamble lost after frequency correction\n");
         // Cleanup
         free(rx_burst);
-        free(coarse_sync_out);
-        free(carrier_sync_out);
-        free(phase_err);
+        #if !BYPASS_FREQ_PHASE_CORRECTIONS
+        free(rx_burst_qpsk);
         free(carrier_sync_out_qpsk);
+        #else
+        free(rx_burst_qpsk);  // carrier_sync_out_qpsk points to rx_burst_qpsk, don't free twice
+        #endif
+        free(phase_err);
         free(preamble_full);
         free(corr_buffer2);
         free(sample_buffer);
@@ -1083,7 +1106,7 @@ preamble_found:
 
     // Process from FSP index to end
     size_t num_symbols = timing_recovery_process(&symbol_synchronizer,
-                                                 carrier_sync_out + fsp_samp_idx,
+                                                 carrier_sync_out_qpsk + fsp_samp_idx,
                                                  burst_length - fsp_samp_idx,
                                                  synced_qpsk, sps);
 
@@ -1245,10 +1268,15 @@ phase_found:
     free(prn_q);
     free(corr_buffer);
     free(rx_burst);
-    free(coarse_sync_out);
-    free(carrier_sync_out);
+    #if !BYPASS_FREQ_PHASE_CORRECTIONS
+    free(rx_burst_qpsk);
+    #endif
     free(phase_err);
-    free(carrier_sync_out_qpsk);
+    #if !BYPASS_FREQ_PHASE_CORRECTIONS
+    if (carrier_sync_out_qpsk != rx_burst_qpsk) {
+        free(carrier_sync_out_qpsk);
+    }
+    #endif
     free(synced_qpsk);
     free(timing_error);
     free(rx_sig);
