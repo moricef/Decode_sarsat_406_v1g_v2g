@@ -1,0 +1,19 @@
+--- dsss_demod.c.orig
++++ dsss_demod.c
+@@ -1217,6 +1217,15 @@
+         qbdn[i] = rx_cq[i] ^ prn_q_bit;
+     }
+ 
++    // DEBUG: Dump despread chips for comparison with MATLAB
++    FILE *dump_ibdn = fopen("/home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/our_Ibdn.bin", "wb");
++    FILE *dump_qbdn = fopen("/home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/our_Qbdn.bin", "wb");
++    if (dump_ibdn && dump_qbdn) {
++        fwrite(ibdn, sizeof(int8_t), DSSS_PACKET_CHIPS, dump_ibdn);
++        fwrite(qbdn, sizeof(int8_t), DSSS_PACKET_CHIPS, dump_qbdn);
++        fclose(dump_ibdn);
++        fclose(dump_qbdn);
++    }
++
+     // Reshape into spreading factor rows (reshape)
+     // Perform ML decoding: if sum > threshold, bit=1, else bit=0
+     uint8_t *ibits = malloc(DSSS_PACKET_BITS / 2);

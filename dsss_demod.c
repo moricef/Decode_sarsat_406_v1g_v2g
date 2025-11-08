@@ -866,6 +866,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     int preamble_idx = -1;
     float complex *corr_buffer = malloc(num_burst_samples * sizeof(float complex));
+    float complex *sample_buffer_qpsk = NULL;  // Will hold QPSK-converted buffer when preamble is found
+    float complex *rx_agc_samples_saved = NULL;  // Will hold AGC'd OQPSK samples when preamble is found
 
     printf("Processing %zu samples in %zu buffers (%.2f sec/buffer)\n",
            buffer_length, num_buffers, (float)num_burst_samples / fs);
@@ -908,13 +910,13 @@ int dsss_receive_burst(const float complex *ota_buffer,
         // Q channel: delayed by sps/2 (OQPSK Tc/2 delay)
         // NO MATCHED FILTER - MATLAB uses oversampled signal directly with symbol-rate reference
         int q_delay = sps / 2;
-        float complex *sample_buffer_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
+        float complex *buf_qpsk = malloc(num_burst_samples * 2 * sizeof(float complex));
         for (size_t i = 0; i < num_burst_samples * 2 - q_delay; i++) {
-            sample_buffer_qpsk[i] = crealf(rx_agc_samples[i]) +
+            buf_qpsk[i] = crealf(rx_agc_samples[i]) +
                                    I * cimagf(rx_agc_samples[i + q_delay]);
         }
         for (size_t i = num_burst_samples * 2 - q_delay; i < num_burst_samples * 2; i++) {
-            sample_buffer_qpsk[i] = 0.0f;
+            buf_qpsk[i] = 0.0f;
         }
 
         if (n == 0) {
@@ -927,7 +929,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
             for (int i = 0; i < 10; i++) {
                 size_t idx = i * sps;
                 printf("  [%d] rx=(%.3f%+.3fj)\n",
-                       i, crealf(sample_buffer_qpsk[idx]), cimagf(sample_buffer_qpsk[idx]));
+                       i, crealf(buf_qpsk[idx]), cimagf(buf_qpsk[idx]));
             }
         }
 
@@ -948,7 +950,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
             // Get start index of preamble (search only first half)
             int optimal_phase = -1;
             int start_samp_idx = polyphase_correlator(
-                sample_buffer_qpsk, num_burst_samples,
+                buf_qpsk, num_burst_samples,
                 preamble_shifted, preamble_detection_length,
                 sps, corr_buffer, preamble_detection_offset, &optimal_phase);
 
@@ -959,13 +961,13 @@ int dsss_receive_burst(const float complex *ota_buffer,
                 printf("Preamble found: buffer=%zu, idx=%d, freq_offset=%d Hz, corr=%.3f, phase=%d/%d\n",
                        n + 1, start_samp_idx, preamble_freq_offset, corr_peak, optimal_phase, sps);
                 preamble_idx = start_samp_idx;
-                free(sample_buffer_qpsk);
-                free(rx_agc_samples);
+                sample_buffer_qpsk = buf_qpsk;  // Save QPSK buffer for potential use
+                rx_agc_samples_saved = rx_agc_samples;  // Save AGC'd OQPSK buffer for burst extraction
                 goto preamble_found;  // Break out of frequency and buffer loops
             }
         }
 
-        free(sample_buffer_qpsk);
+        free(buf_qpsk);
         free(rx_agc_samples);
     }
 
@@ -981,25 +983,28 @@ preamble_found:
         return -1;
     }
 
-    // Extract transmission burst from sample buffer
+    // Extract transmission burst from AGC'd OQPSK sample buffer
+    // MATLAB BEHAVIOR: helperPolyphaseCorrelator returns index for rxAGCSamples (OQPSK after AGC)
+    // Line 130: rxBurst = sampleBuffer(startSampIdx:startSampIdx+((numChips+20)*sps)-1);
+    // But MATLAB's sampleBuffer is after AGC, not the raw double-buffer
+    // Then applies frequency compensation with Modulation="OQPSK"
     // Collect 20 more chips at the end for possible timing adjustments
     size_t burst_length = (DSSS_PACKET_CHIPS + 20) * sps;
     float complex *rx_burst = malloc(burst_length * sizeof(float complex));
-    memcpy(rx_burst, sample_buffer + preamble_idx, burst_length * sizeof(float complex));
+    memcpy(rx_burst, rx_agc_samples_saved + preamble_idx, burst_length * sizeof(float complex));
 
-    printf("Burst extracted, length: %zu samples (%.3f sec)\n",
+    printf("Burst extracted from AGC'd OQPSK buffer, length: %zu samples (%.3f sec)\n",
            burst_length, (float)burst_length / fs);
-    printf("[DEBUG] Burst range: sample_buffer[%d .. %zu]\n",
+    printf("[DEBUG] Burst range: rx_agc_samples[%d .. %zu]\n",
            preamble_idx, preamble_idx + burst_length - 1);
     printf("[DEBUG] First samples: [0]=%.3f+j%.3f, [100]=%.3f+j%.3f\n",
            crealf(rx_burst[0]), cimagf(rx_burst[0]),
            crealf(rx_burst[100]), cimagf(rx_burst[100]));
 
-    // Step 0 - Convert from OQPSK to QPSK FIRST
-    // CRITICAL: Per MATLAB SymbolSynchronizer doc, OQPSK signals must be converted to QPSK
-    // BEFORE frequency/phase correction. The 4th-power method and Costas loop assume QPSK
-    // (synchronous I/Q), but OQPSK has Q delayed by Tc/2.
-    printf("[DEBUG] Converting OQPSK to QPSK before frequency/phase corrections\n");
+    // Step 0 - Convert from OQPSK to QPSK
+    // MATLAB: Frequency/phase corrections done on OQPSK, then converted to QPSK
+    // Since we BYPASS frequency/phase corrections, we convert here
+    printf("[DEBUG] Converting OQPSK to QPSK after burst extraction\n");
     size_t qpsk_length = burst_length - sps / 2;
     float complex *rx_burst_qpsk = malloc(burst_length * sizeof(float complex));
     for (size_t i = 0; i < qpsk_length; i++) {
@@ -1009,6 +1014,7 @@ preamble_found:
     for (size_t i = qpsk_length; i < burst_length; i++) {
         rx_burst_qpsk[i] = 0.0f;
     }
+    free(rx_burst);  // No longer needed after conversion
 
     // Step 1 - Coarse Frequency Offset Estimation and Correction
     // For simulated signals without real Doppler, bypass frequency/phase corrections
@@ -1073,7 +1079,6 @@ preamble_found:
     if (fsp_samp_idx < 0) {
         printf("ERROR: Preamble lost after frequency correction\n");
         // Cleanup
-        free(rx_burst);
         #if !BYPASS_FREQ_PHASE_CORRECTIONS
         free(rx_burst_qpsk);
         free(carrier_sync_out_qpsk);
@@ -1263,15 +1268,14 @@ phase_found:
 
     // Cleanup all allocated memory
     free(sample_buffer);
+    free(sample_buffer_qpsk);
+    free(rx_agc_samples_saved);
     free(preamble_qpsk);
     free(preamble_detect);
     free(prn_i);
     free(prn_q);
     free(corr_buffer);
-    free(rx_burst);
-    #if !BYPASS_FREQ_PHASE_CORRECTIONS
     free(rx_burst_qpsk);
-    #endif
     free(phase_err);
     #if !BYPASS_FREQ_PHASE_CORRECTIONS
     if (carrier_sync_out_qpsk != rx_burst_qpsk) {

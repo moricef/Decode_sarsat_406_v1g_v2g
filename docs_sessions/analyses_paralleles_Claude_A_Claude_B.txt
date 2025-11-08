@@ -1,0 +1,280 @@
+=========================
+      INSTANCE A
+=========================
+
+● SYNTHÈSE COMPLÈTE DES ANALYSES
+
+  1. CONTEXTE INITIAL
+
+  Problème de départ:
+  - Le récepteur DSSS OQPSK ne détectait pas le préambule sur le signal test SPS=64
+  - Corrélation maximale: 0.29 (seuil: 0.35 dans MATLAB, abaissé à 0.25 pour debug)
+  - Suspicion initiale: séquences PRN différentes entre émetteur et récepteur
+
+  2. VÉRIFICATIONS DES SÉQUENCES PRN
+
+  Résultats:
+  - ✅ LFSR identique MATLAB/Émetteur/Récepteur:
+    - RIGHT shift, output X0 (LSB)
+    - Feedback: X0 ⊕ X18
+    - Init I: 0x000001
+    - Init Q: 0x1AC1FC
+  - ✅ 64 premiers chips: 100% identiques entre émetteur et récepteur
+  - ✅ Divergence après 6400 chips: normale (données du message, pas PRN brut)
+
+  Conclusion: Les séquences PRN sont correctes.
+
+  3. ANALYSE DU CODE MATLAB DE RÉFÉRENCE
+
+  Extraction du dossier MATLAB:
+  /media/fab2/.../DSSSReceiverForSARbasedTrackingSystemExample/
+  ├── DSSSReceiverForSARbasedTrackingSystemExample.mlx
+  ├── helperDSSSTransmitter.m
+  ├── helperPolyphaseCorrelator.m
+  └── matlab.mat (87 MB - variables intermédiaires)
+
+  Découvertes critiques:
+
+  3.1 Conversion OQPSK→QPSK dans MATLAB
+
+  % Convert from OQPSK to QPSK for symbol-based preamble detection
+  sampleBufferQPSK = [real(rxAGCSamples(1:end-sps/2)) + 1i*imag(rxAGCSamples(sps/2+1:end)); zeros(sps/2,1)];
+
+  % Detect the preamble
+  [startSampIdx,corrBuffer] = helperPolyphaseCorrelator(
+      sampleBufferQPSK(1:numBurstSamples), preambleShifted, sps, preambleDetectionOffset);
+
+  MATLAB fait la conversion OQPSK→QPSK AVANT la détection du préambule!
+
+  3.2 Polyphase Correlator
+
+  - Seuil timingEstimate: 0.35 (pas 0.25)
+  - Seuil ratio: 5.5x mean (pas 3.0x)
+  - Travaille sur signal converti en QPSK
+
+  3.3 Despreading MATLAB
+
+  % Correlate the PRN sequence with the received chips
+  Ibdn = (xor(rx.Ci, DSSS.PRN_I));  % logical XOR
+  Qbdn = (xor(rx.Cq, DSSS.PRN_Q));
+  Ichips = reshape(Ibdn, system.spreadingFactor, []);  % [256 x 150]
+  Qchips = reshape(Qbdn, system.spreadingFactor, []);
+
+  % Perform ML decoding
+  threshold = system.spreadingFactor/2;  % 128
+  Ibits = sum(Ichips,1) > threshold;
+  Qbits = sum(Qchips,1) > threshold;
+
+  % Demultiplex the I and Q streams into a single bitstream
+  despreadMessage = reshape([Ibits;Qbits],[],1);
+
+  Types de données MATLAB:
+  - PRN_I, PRN_Q: logical 0/1
+  - rx.Ci, rx.Cq: logical 0/1 (après démodulation QPSK)
+  - XOR: logical 0/1
+
+  4. COMPARAISON AVEC NOTRE CODE C
+
+  4.1 Conversion OQPSK→QPSK
+
+  Notre code (dsss_demod.c:998-1011):
+  printf("[DEBUG] Converting OQPSK to QPSK before frequency/phase corrections\n");
+  size_t qpsk_length = burst_length - sps / 2;
+  float complex *rx_burst_qpsk = malloc(burst_length * sizeof(float complex));
+  for (size_t i = 0; i < qpsk_length; i++) {
+      rx_burst_qpsk[i] = crealf(rx_burst[i]) + I * cimagf(rx_burst[i + sps / 2]);
+  }
+
+  ✅ Formule identique à MATLAB
+
+  Mais: Cette conversion se fait APRÈS extraction du burst, alors que pour preamble detection, on devrait aussi convertir avant.
+
+  4.2 QPSK Demodulation
+
+  Notre code (dsss_demod.c:521-534):
+  static void qpsk_demod(const float complex *symbols, size_t length,
+                        uint8_t *bits, int phase_rotation) {
+      ...
+      // QPSK demodulation: I and Q hard decisions
+      bits[2*i] = (re > 0.0f) ? 0 : 1;      // I bit
+      bits[2*i + 1] = (im > 0.0f) ? 0 : 1;  // Q bit
+  }
+
+  Sortie: uint8_t valeurs 0 ou 1 ✅
+
+  4.3 Despreading - BUG TROUVÉ!
+
+  Notre code (dsss_demod.c:814-822):
+  // Step 5 - DSSS Despreading
+  int8_t *rx_ci = malloc(DSSS_PACKET_CHIPS);  // uint8_t 0/1 de qpsk_demod
+  int8_t *rx_cq = malloc(DSSS_PACKET_CHIPS);
+  ...
+  int8_t *ibdn = malloc(DSSS_PACKET_CHIPS);
+  int8_t *qbdn = malloc(DSSS_PACKET_CHIPS);
+
+  for (size_t i = 0; i < DSSS_PACKET_CHIPS; i++) {
+      ibdn[i] = rx_ci[i] ^ prn_i[i];  // ❌ BUG ICI!
+      qbdn[i] = rx_cq[i] ^ prn_q[i];
+  }
+
+  Problème identifié:
+  - rx_ci[i]: uint8_t avec valeurs 0 ou 1
+  - prn_i[i]: int8_t avec valeurs -1 (+0xFF) ou +1
+
+  Exemple du bug:
+  rx_ci[0] = 1 (uint8_t)
+  prn_i[0] = -1 (int8_t) = 0xFF en représentation binaire
+  XOR: 0x01 ^ 0xFF = 0xFE = 254 ❌
+
+  Attendu (MATLAB):
+  rx.Ci[0] = 1 (logical)
+  PRN_I[0] = 1 (logical)  
+  XOR: 1 ^ 1 = 0 ✅
+
+  5. TEST AVEC SIGNAL MATLAB DE RÉFÉRENCE
+
+  Extraction des données:
+  # Sauvegardé dans:
+  - matlab_tx_samples.bin (307200 samples, complex64)
+  - matlab_burst_bits.txt (300 bits)
+  - matlab_despread_expected.txt (300 bits)
+
+  Résultat du test:
+  Preamble: 20% erreurs (10/50 bits)
+  Données: 52% erreurs (104/200 bits)
+  Total: 45.6% erreurs
+
+  Conclusion: Le bug de despreading cause ~50% d'erreurs aléatoires.
+
+  6. ANALYSE DES TYPES DE DONNÉES
+
+  | Composant              | MATLAB            | Notre Code       | Status         |
+  |------------------------|-------------------|------------------|----------------|
+  | PRN sequences          | logical 0/1       | int8_t -1/+1     | ❌ Incompatible |
+  | RX chips (après demod) | logical 0/1       | uint8_t 0/1      | ✅ Compatible   |
+  | XOR despreading        | logical ^ logical | uint8_t ^ int8_t | ❌ BUG          |
+  | ML threshold           | sum > 128         | sum > 128        | ✅ Compatible   |
+
+  7. ROOT CAUSE
+
+  Le bug est dans dsss_demod.c:820-821:
+
+  ibdn[i] = rx_ci[i] ^ prn_i[i];  // XOR entre uint8_t (0/1) et int8_t (-1/+1)
+
+  Pourquoi ça ne marche pas:
+  - En C, XOR bit-à-bit: 1 ^ (-1) = 0x01 ^ 0xFF = 0xFE (254)
+  - Attendu (logique): 1 ^ 1 = 0
+
+  Solution requise:
+  Soit convertir prn_i/prn_q de (-1,+1) vers (0,1) avant XOR,
+  Soit utiliser une comparaison logique au lieu de XOR.
+
+  8. PROBLÈMES SECONDAIRES IDENTIFIÉS
+
+  1. Seuils trop bas:
+    - timingEstimate: 0.25 vs 0.35 (MATLAB)
+    - Ratio mean: 3.0 vs 5.5 (MATLAB)
+  2. Offset preamble detection:
+    - offset=200 peut causer confusion (comparaison chip 0 émetteur vs chip 200 récepteur)
+  3. Code actuel ne détecte pas le préambule sur signal SPS=64 à cause de conversion OQPSK→QPSK faite au mauvais endroit dans le flux.
+
+  9. ACTIONS REQUISES (PAR PRIORITÉ)
+
+  1. CRITIQUE: Corriger le bug XOR dans despreading (dsss_demod.c:820-821)
+  2. IMPORTANT: Restaurer seuils nominaux (0.35, 5.5x)
+  3. IMPORTANT: Vérifier le flux complet OQPSK→QPSK pour preamble detection
+  4. OPTIONNEL: Recompiler et tester avec signal MATLAB de référence
+ 
+
+=========================
+      INSTANCE B
+=========================    
+ 
+ 
+ SYNTHÈSE DES ANALYSES
+
+  1. VÉRIFICATION DES PRN (✅ CORRECT)
+
+  Init values:
+  - MATLAB: 0x000001 (I), 0x1AC1FC (Q) - MSB first
+  - Notre code: 0x000001 (I), 0x1AC1FC (Q) - LSB first
+  - Les deux sont équivalents et conformes à T.018 Table 2.2 ✅
+
+  Génération LFSR:
+  - MATLAB et notre code utilisent TOUS LES DEUX: RIGHT shift, output X0, feedback X0⊕X18
+  - Séquences générées identiques: 8000 0108 4212 84A1 (I), 3F83 58BA D030 F231 (Q) ✅
+
+  Première conclusion: Les PRN sont 100% corrects et identiques entre MATLAB et notre implémentation.
+
+  ---
+  2. VÉRIFICATION DU SPREADING (✅ CORRECT)
+
+  Convention MATLAB (vérifiée dans helperDSSSTransmitter.m ligne 51-52):
+  % Bit 0 → PRN preserved
+  % Bit 1 → PRN inverted
+  Ci = Ibit XOR PRN_I
+  Cq = Qbit XOR PRN_Q
+
+  Notre implémentation: Identique (XOR entre bit et PRN)
+
+  Vérification sur préambule (bits = 0):
+  - Ci devrait égaler PRN_I ✅
+  - Cq devrait égaler PRN_Q ✅
+
+  Deuxième conclusion: Le spreading est correct.
+
+  ---
+  3. TESTS AVEC SIGNAL MATLAB
+
+  Signal MATLAB de référence:
+  - 307200 samples @ SPS=8
+  - Payload: 202 bits aléatoires
+  - MATLAB décode correctement: 0% erreurs
+
+  Notre récepteur avec signal MATLAB:
+  - Préambule: 20% erreurs (10/50 bits)
+  - Données: 52% erreurs (104/200 bits)
+  - Total: 45.6% erreurs
+
+  Troisième conclusion: Le problème est dans notre RÉCEPTEUR, pas dans l'émetteur.
+
+  ---
+  4. ANALYSE DU DESPREADING MATLAB
+
+  Observations critiques:
+  - Received chips (Ichips/Qchips): TOUS à zéro pour le préambule
+  - Despread chips (Ibdn/Qbdn): TOUS à zéro pour le préambule ✅ correct
+  - Message décodé: 100% correct ✅
+
+  Incohérence apparente:
+  - Si chips reçus = 0 et PRN_I[0]=1, alors Ibdn = 0 XOR 1 = 1 ❌
+  - Mais MATLAB montre Ibdn = 0 ✅
+
+  Hypothèse: Les "received chips" dans le workspace MATLAB ne sont PAS les chips après slicing, OU MATLAB utilise une convention différente pour le slicing/despreading que je n'ai pas identifiée.
+
+  ---
+  5. COMPARAISON VERSION ACTUELLE VS 7e9f0e9
+
+  Commit 7e9f0e9 + PRN fix:
+  - 18% erreurs préambule
+  - Message incorrect
+
+  Version actuelle (feature/no-matched-filter):
+  - 54% erreurs préambule
+  - Message incorrect
+
+  Les 10 commits ajoutés après 7e9f0e9 ont empiré le résultat de 18% → 54%
+
+  ---
+  CONCLUSIONS
+
+  1. ✅ PRN corrects - 100% conformes T.018 et identiques MATLAB
+  2. ✅ Spreading correct - Convention XOR vérifiée
+  3. ❌ Récepteur défaillant - 45.6% erreurs sur signal MATLAB parfait
+  4. ❓ Étape problématique non identifiée - Besoin de comparer étape par étape:
+    - AGC
+    - OQPSK→QPSK conversion
+    - Carrier sync
+    - Timing recovery
+    - Slicing (conversion symbole → chip)
+    - Despreading
