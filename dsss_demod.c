@@ -1188,9 +1188,10 @@ phase_found:
     qpsk_demod(synced_qpsk, num_symbols, rx_sig, k_best);
 
     // Compute start indices for I and Q streams
-    size_t preamble_test_start_idx = 1;  // Simplified
-    size_t s_idx_i = preamble_test_start_idx + 2 * p_best;
-    size_t s_idx_q = preamble_test_start_idx + 1;
+    // MATLAB convention: rx.Ci = rxSig(1:2:end), rx.Cq = rxSig(2:2:end) [1-based]
+    // In 0-based indexing: I takes even indices [0,2,4,...], Q takes odd [1,3,5,...]
+    size_t s_idx_i = 2 * p_best;      // Even indices: 0, 2, 4, 6, ...
+    size_t s_idx_q = 2 * p_best + 1;  // Odd indices: 1, 3, 5, 7, ...
 
     // Extract preamble and payload chips
     int8_t *rx_ci = malloc(DSSS_PACKET_CHIPS);
