@@ -1,0 +1,64 @@
+# CompilerName=mingw64
+# Mode=optim
+ninja_required_version = 1.3
+
+# Basic folders
+root = .
+builddir = $root/build/win64
+matlabdir = C:/Program Files/MATLAB/R2024a
+startdir = D:/Fab/Documents/MATLAB/Examples/R2024a/comm/DSSSReceiverForSARbasedTrackingSystemExample/dsss-receiver-for-sar-based-tracking-system
+
+# Toolchain information
+cc = C:\ProgramData\MATLAB\SupportPackages\R2024a\3P.instrset\mingw_w64.instrset\bin\gcc
+cxx = C:\ProgramData\MATLAB\SupportPackages\R2024a\3P.instrset\mingw_w64.instrset\bin\g++
+linker = C:\ProgramData\MATLAB\SupportPackages\R2024a\3P.instrset\mingw_w64.instrset\bin\gcc
+linkerxx = C:\ProgramData\MATLAB\SupportPackages\R2024a\3P.instrset\mingw_w64.instrset\bin\g++
+
+cflags =  -c -fexceptions -fno-omit-frame-pointer -m64 -DMATLAB_MEX_FILE  -DMATLAB_MEX_FILE -O2 -fwrapv -DNDEBUG -std=c99 -I "D:\Fab\Documents\MATLAB\Examples\R2024a\comm\DSSSReceiverForSARbasedTrackingSystemExample\dsss-receiver-for-sar-based-tracking-system\codegen\mex\test_dsss_receiver" -I "D:\Fab\Documents\MATLAB\Examples\R2024a\comm\DSSSReceiverForSARbasedTrackingSystemExample\dsss-receiver-for-sar-based-tracking-system" -I "D:\Fab\Documents\MATLAB\Examples\R2024a\comm\DSSSReceiverForSARbasedTrackingSystemExample\dsss-receiver-for-sar-based-tracking-system\codegen\mex\test_dsss_receiver\interface" -I "C:\Program Files\MATLAB\R2024a\extern\include" -I "." -DMODEL=test_dsss_receiver_mex -D__USE_MINGW_ANSI_STDIO=1 -msse2 -fno-predictive-commoning 
+
+cxxflags =  -c -fexceptions -fno-omit-frame-pointer -m64 -DMATLAB_MEX_FILE  -DMATLAB_MEX_FILE -O2 -fwrapv -DNDEBUG -std=c++11 -I "D:\Fab\Documents\MATLAB\Examples\R2024a\comm\DSSSReceiverForSARbasedTrackingSystemExample\dsss-receiver-for-sar-based-tracking-system\codegen\mex\test_dsss_receiver" -I "D:\Fab\Documents\MATLAB\Examples\R2024a\comm\DSSSReceiverForSARbasedTrackingSystemExample\dsss-receiver-for-sar-based-tracking-system" -I "D:\Fab\Documents\MATLAB\Examples\R2024a\comm\DSSSReceiverForSARbasedTrackingSystemExample\dsss-receiver-for-sar-based-tracking-system\codegen\mex\test_dsss_receiver\interface" -I "C:\Program Files\MATLAB\R2024a\extern\include" -I "." -DMODEL=test_dsss_receiver_mex -D__USE_MINGW_ANSI_STDIO=1 -msse2 -fno-predictive-commoning 
+
+ldflags =  -m64 -Wl,--no-undefined -shared -static -L"C:\Program Files\MATLAB\R2024a\extern\lib\win64\mingw64" -llibmx -llibmex -llibmat -lm -llibmwlapack -llibmwblas -o "test_dsss_receiver_mex.mexw64" -L"$matlabdir\extern\lib\win64\mingw64" -llibmwblas -llibemlrt -llibcovrt -llibut -llibmwmathutil  test_dsss_receiver_mex.def
+
+linkobjs = 
+
+# Build Rules
+rule cc
+    command = $cc $cflags $in -o $out
+
+rule cxx
+    command = $cxx $cxxflags $in -o $out
+
+rule link
+    command = $linker @$out.rsp $linkobjs $ldflags
+    rspfile = $out.rsp
+    rspfile_content = $in
+
+rule linkxx
+    command = $linkerxx $in $linkobjs $ldflags
+
+# Build
+build $builddir/test_dsss_receiver_data.o : cc $root/test_dsss_receiver_data.c
+build $builddir/rt_nonfinite.o : cc $root/rt_nonfinite.c
+build $builddir/test_dsss_receiver_initialize.o : cc $root/test_dsss_receiver_initialize.c
+build $builddir/test_dsss_receiver_terminate.o : cc $root/test_dsss_receiver_terminate.c
+build $builddir/test_dsss_receiver.o : cc $root/test_dsss_receiver.c
+build $builddir/randn.o : cc $root/randn.c
+build $builddir/dsss_receiver.o : cc $root/dsss_receiver.c
+build $builddir/pskmod.o : cc $root/pskmod.c
+build $builddir/conv.o : cc $root/conv.c
+build $builddir/sumMatrixIncludeNaN.o : cc $root/sumMatrixIncludeNaN.c
+build $builddir/pskdemod.o : cc $root/pskdemod.c
+build $builddir/int2bit.o : cc $root/int2bit.c
+build $builddir/indexShapeCheck.o : cc $root/indexShapeCheck.c
+build $builddir/_coder_test_dsss_receiver_api.o : cc $root/interface/_coder_test_dsss_receiver_api.c
+build $builddir/_coder_test_dsss_receiver_mex.o : cc $root/interface/_coder_test_dsss_receiver_mex.c
+build $builddir/helperPolyphaseCorrelator.o : cc $root/helperPolyphaseCorrelator.c
+build $builddir/sign.o : cc $root/sign.c
+build $builddir/exp.o : cc $root/exp.c
+build $builddir/test_dsss_receiver_emxutil.o : cc $root/test_dsss_receiver_emxutil.c
+build $builddir/_coder_test_dsss_receiver_info.o : cc $root/interface/_coder_test_dsss_receiver_info.c
+build $builddir/c_mexapi_version.o : cc $matlabdir/extern/version/c_mexapi_version.c
+
+# Link
+build $root\test_dsss_receiver_mex.mexw64 : link $builddir/test_dsss_receiver_data.o $builddir/rt_nonfinite.o $builddir/test_dsss_receiver_initialize.o $builddir/test_dsss_receiver_terminate.o $builddir/test_dsss_receiver.o $builddir/randn.o $builddir/dsss_receiver.o $builddir/pskmod.o $builddir/conv.o $builddir/sumMatrixIncludeNaN.o $builddir/pskdemod.o $builddir/int2bit.o $builddir/indexShapeCheck.o $builddir/_coder_test_dsss_receiver_api.o $builddir/_coder_test_dsss_receiver_mex.o $builddir/helperPolyphaseCorrelator.o $builddir/sign.o $builddir/exp.o $builddir/test_dsss_receiver_emxutil.o $builddir/_coder_test_dsss_receiver_info.o $builddir/c_mexapi_version.o 

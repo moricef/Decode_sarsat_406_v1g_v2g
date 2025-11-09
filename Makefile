@@ -7,8 +7,26 @@ LDFLAGS = -lm -lgomp -lfftw3f
 
 # Source files
 COMMON_SRC = dec406_v2g.c display_utils.c country_codes.h
-DSSS_SRC = dsss_demod.c
+DSSS_SRC = dsss_demod_matlab.c
 MAIN_SRC = dec406_main.c
+
+# MATLAB Coder generated files
+MATLAB_DIR = test_matlab_coder
+MATLAB_SRCS = \
+	$(MATLAB_DIR)/dsss_receiver.c \
+	$(MATLAB_DIR)/dsss_receiver_emxutil.c \
+	$(MATLAB_DIR)/dsss_receiver_initialize.c \
+	$(MATLAB_DIR)/dsss_receiver_rtwutil.c \
+	$(MATLAB_DIR)/dsss_receiver_terminate.c \
+	$(MATLAB_DIR)/helperPolyphaseCorrelator.c \
+	$(MATLAB_DIR)/minOrMax.c \
+	$(MATLAB_DIR)/pskdemod.c \
+	$(MATLAB_DIR)/rtGetInf.c \
+	$(MATLAB_DIR)/rtGetNaN.c \
+	$(MATLAB_DIR)/rt_nonfinite.c \
+	$(MATLAB_DIR)/sign.c
+
+MATLAB_OBJS = $(MATLAB_SRCS:.c=.o)
 
 # Object files
 COMMON_OBJ = $(COMMON_SRC:.c=.o)
@@ -28,18 +46,18 @@ check_deps:
 	@pkg-config --exists fftw3f || (echo "ERROR: libfftw3f-dev not installed. Run: sudo apt-get install libfftw3-dev" && exit 1)
 	@echo "All dependencies OK"
 
-# DSSS test program
-dec406_dsss_test: test_dsss_main.o dsss_demod.o dec406_v2g.o display_utils.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+# DSSS test program (with MATLAB Coder)
+dec406_dsss_test: test_dsss_main.o dsss_demod_matlab.o dec406_v2g.o display_utils.o $(MATLAB_OBJS)
+	$(CC) $(CFLAGS) -I$(MATLAB_DIR) -o $@ $^ $(LDFLAGS)
 	@echo "Built: $@"
 
 # Compilation rules
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(MATLAB_DIR) -c $< -o $@
 
 # Dependencies
-dsss_demod.o: dsss_demod.c dsss_demod.h
-	$(CC) $(CFLAGS) -c dsss_demod.c -o dsss_demod.o
+dsss_demod_matlab.o: dsss_demod_matlab.c dsss_demod.h
+	$(CC) $(CFLAGS) -I$(MATLAB_DIR) -c dsss_demod_matlab.c -o dsss_demod_matlab.o
 
 dec406_v2g.o: dec406_v2g.c dec406.h display_utils.h country_codes.h
 	$(CC) $(CFLAGS) -c dec406_v2g.c -o dec406_v2g.o
@@ -52,7 +70,7 @@ test_dsss_main.o: test_dsss_main.c dsss_demod.h dec406.h
 
 # Clean
 clean:
-	rm -f *.o $(TARGETS)
+	rm -f *.o $(MATLAB_DIR)/*.o $(TARGETS)
 	@echo "Cleaned build artifacts"
 
 # Install dependencies (Debian/Ubuntu)
