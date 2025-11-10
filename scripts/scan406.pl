@@ -32,8 +32,8 @@ my @db;
 my $i;
 my $j;
 my $frq=0;
-my $dec = './dec406 --100 --M3 --une_minute';
-my $dec1 = './dec406 --100 --M3 --une_minute --osm'; 
+my $dec = './build/dec406_audio --100 --M3 --une_minute';
+my $dec1 = './build/dec406_audio --100 --M3 --une_minute --osm'; 
 my $filter = "lowpass 3000 highpass 10"; #highpass de 10Hz à 400Hz selon la qualité du signal
 
 my $largeur = "12k";

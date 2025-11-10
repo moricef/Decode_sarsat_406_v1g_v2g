@@ -195,22 +195,50 @@ int main(int argc, char *argv[]) {
     }
     printf("\n");
 
-    // Allocate output buffer for 300 bits
-    uint8_t output_bits[DSSS_TOTAL_BITS];
+    // Allocate output buffer for 300 bits (preamble + payload + parity)
+    uint8_t output_bits[DSSS_PACKET_BITS];
     memset(output_bits, 0, sizeof(output_bits));
 
-    // State structure for statistics
-    dsss_demod_state_t state;
-    memset(&state, 0, sizeof(state));
-
     // =========================================================================
-    // STEP 1: DEMODULATE IQ FILE
+    // STEP 1: LOAD IQ FILE
     // =========================================================================
     printf("Input file: %s\n", filename);
     printf("\n");
-    printf("=== DEMODULATION PROCESS ===\n");
+    printf("=== LOADING IQ FILE ===\n");
 
-    int ret = dsss_demodulate_file(filename, output_bits, &state, manual_sample_rate, forced_freq_offset);
+    // Load IQ samples (MATLAB version needs 307200 samples minimum for sps=8)
+    size_t required_samples = 307200;
+    float complex *iq_buffer = malloc(required_samples * sizeof(float complex));
+    if (!iq_buffer) {
+        fprintf(stderr, "ERROR: Cannot allocate IQ buffer\n");
+        return 1;
+    }
+
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        fprintf(stderr, "ERROR: Cannot open file: %s\n", filename);
+        free(iq_buffer);
+        return 1;
+    }
+
+    size_t samples_read = fread(iq_buffer, sizeof(float complex), required_samples, fp);
+    fclose(fp);
+
+    if (samples_read < required_samples) {
+        fprintf(stderr, "WARNING: File has only %zu samples (need %zu), padding with zeros\n",
+                samples_read, required_samples);
+        memset(iq_buffer + samples_read, 0, (required_samples - samples_read) * sizeof(float complex));
+    }
+
+    printf("Loaded %zu samples\n", samples_read);
+
+    // =========================================================================
+    // STEP 2: DEMODULATE WITH MATLAB CODER
+    // =========================================================================
+    printf("\n=== DEMODULATION PROCESS ===\n");
+
+    int ret = dsss_receive_burst(iq_buffer, required_samples, 8, 307200.0, 0, output_bits);
+    free(iq_buffer);
 
     if (ret == -2) {
         fprintf(stderr, "\n❌ DEMODULATION FAILED: Preamble not found\n");
@@ -230,27 +258,20 @@ int main(int argc, char *argv[]) {
     printf("\n✅ DEMODULATION SUCCESS\n");
 
     // =========================================================================
-    // STEP 2: DISPLAY STATISTICS
-    // =========================================================================
-    printf("\n");
-    printf("=== DEMODULATOR STATISTICS ===\n");
-    dsss_print_state(&state);
-
-    // =========================================================================
-    // STEP 3: DEBUG OUTPUT (enabled for diagnosis)
+    // STEP 2: DEBUG OUTPUT (enabled for diagnosis)
     // =========================================================================
     print_preamble_analysis(output_bits);
-    print_bits_hex(output_bits, DSSS_TOTAL_BITS);
+    print_bits_hex(output_bits, DSSS_PACKET_BITS);
 
     // =========================================================================
-    // STEP 4: EXTRACT PAYLOAD AND DECODE
+    // STEP 3: EXTRACT PAYLOAD AND DECODE
     // =========================================================================
     printf("\n");
     printf("=== FRAME DECODING ===\n");
 
-    // Skip 50-bit preamble, extract 250-bit payload
-    uint8_t payload[DSSS_PAYLOAD_LENGTH];
-    memcpy(payload, output_bits + DSSS_PREAMBLE_LENGTH, DSSS_PAYLOAD_LENGTH);
+    // Skip 50-bit preamble, extract 250-bit payload (202 data + 48 BCH)
+    uint8_t payload[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
+    memcpy(payload, output_bits + DSSS_PREAMBLE_BITS, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
 
     // Pass to existing decoder (250 bits = 202 data + 48 BCH)
     // The decoder will:
@@ -258,7 +279,7 @@ int main(int argc, char *argv[]) {
     //   2. Extract 23-HEX ID, Country Code, TAC
     //   3. Decode GPS position, Vessel ID
     //   4. Display formatted output + OSM link
-    decode_beacon(payload, DSSS_PAYLOAD_LENGTH);
+    decode_beacon(payload, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════╗\n");

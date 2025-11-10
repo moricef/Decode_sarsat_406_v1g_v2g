@@ -1,1 +1,0 @@
-# symbol_idx timing_phase center_idx mu

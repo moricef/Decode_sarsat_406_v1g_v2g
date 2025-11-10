@@ -7,10 +7,10 @@
  */
 
 #include "dsss_demod.h"
-#include "test_matlab_coder/dsss_receiver.h"
-#include "test_matlab_coder/dsss_receiver_types.h"
-#include "test_matlab_coder/dsss_receiver_initialize.h"
-#include "test_matlab_coder/dsss_receiver_terminate.h"
+#include "dsss_receiver.h"
+#include "dsss_receiver_types.h"
+#include "dsss_receiver_initialize.h"
+#include "dsss_receiver_terminate.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

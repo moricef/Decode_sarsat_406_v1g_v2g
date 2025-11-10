@@ -18,10 +18,10 @@ my @db;
 my $i;
 my $j;
 my $frq=0;
-#my $dec = './dec406 --100 --M3 --une_minute';
-#my $dec1 = './dec406 --100 --M3 --une_minute --osm';
-my $dec = './dec406 --100 --M3';
-my $dec1 = './dec406 --100 --M3 --osm';
+#my $dec = './build/dec406_audio --100 --M3 --une_minute';
+#my $dec1 = './build/dec406_audio --100 --M3 --une_minute --osm';
+my $dec = './build/dec406_audio --100 --M3';
+my $dec1 = './build/dec406_audio --100 --M3 --osm';
 my $timeout_duration = 15; # Timeout optimisé: 15s pour tests (5s), 50s pour balises réelles
 my $timeout_min = 30;      # Timeout minimum (balises test/urgence)
 my $timeout_max = 120;     # Timeout maximum (balises faibles)

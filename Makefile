@@ -1,16 +1,19 @@
-# Makefile for COSPAS-SARSAT 406 MHz Decoder with DSSS Support
+# Makefile for COSPAS-SARSAT 406 MHz Decoder
+# Support FGB (1G) BPSK et SGB (2G) DSSS/OQPSK
 # Licence Creative Commons CC BY-NC-SA
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O3 -march=native -fopenmp -g
-LDFLAGS = -lm -lgomp -lfftw3f
+CFLAGS = -Wall -Wextra -O2 -march=native -g -Iinclude
+LDFLAGS = -lm
+LDFLAGS_DSSS = -lm -fopenmp -lgomp -lfftw3f
 
-# Source files
-COMMON_SRC = dec406_v2g.c display_utils.c country_codes.h
-DSSS_SRC = dsss_demod_matlab.c
-MAIN_SRC = dec406_main.c
+# Directories
+SRC_DIR = src
+INC_DIR = include
+BUILD_DIR = build
+UTILS_DIR = utils
 
-# MATLAB Coder generated files
+# MATLAB Coder generated files (for DSSS/SGB)
 MATLAB_DIR = test_matlab_coder
 MATLAB_SRCS = \
 	$(MATLAB_DIR)/dsss_receiver.c \
@@ -26,16 +29,15 @@ MATLAB_SRCS = \
 	$(MATLAB_DIR)/rt_nonfinite.c \
 	$(MATLAB_DIR)/sign.c
 
-MATLAB_OBJS = $(MATLAB_SRCS:.c=.o)
-
-# Object files
-COMMON_OBJ = $(COMMON_SRC:.c=.o)
-DSSS_OBJ = $(DSSS_SRC:.c=.o)
-
 # Executables
-TARGETS = dec406_dsss_test
+TARGETS = \
+	$(BUILD_DIR)/dec406_hex \
+	$(BUILD_DIR)/dec406_audio \
+	$(BUILD_DIR)/dec406_iq \
+	$(BUILD_DIR)/dec406_dsss_test \
+	$(BUILD_DIR)/generate_2g_hex
 
-.PHONY: all clean check_deps
+.PHONY: all clean check_deps help
 
 all: check_deps $(TARGETS)
 
@@ -43,34 +45,86 @@ all: check_deps $(TARGETS)
 check_deps:
 	@echo "Checking dependencies..."
 	@which $(CC) > /dev/null || (echo "ERROR: gcc not found" && exit 1)
-	@pkg-config --exists fftw3f || (echo "ERROR: libfftw3f-dev not installed. Run: sudo apt-get install libfftw3-dev" && exit 1)
-	@echo "All dependencies OK"
+	@echo "All basic dependencies OK"
+	@pkg-config --exists fftw3f 2>/dev/null || echo "WARNING: libfftw3f-dev not installed. DSSS programs will fail to link."
 
-# DSSS test program (with MATLAB Coder)
-dec406_dsss_test: test_dsss_main.o dsss_demod_matlab.o dec406_v2g.o display_utils.o $(MATLAB_OBJS)
-	$(CC) $(CFLAGS) -I$(MATLAB_DIR) -o $@ $^ $(LDFLAGS)
+# ============================================================================
+# FGB (1G) BPSK Programs
+# ============================================================================
+
+# dec406_hex - Decode from hex string
+$(BUILD_DIR)/dec406_hex: $(SRC_DIR)/dec406_hex.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "Built: $@"
 
-# Compilation rules
-%.o: %.c
-	$(CC) $(CFLAGS) -I$(MATLAB_DIR) -c $< -o $@
+# dec406_audio - Decode from audio (WAV file or stdin)
+$(BUILD_DIR)/dec406_audio: $(SRC_DIR)/main_audio.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
 
-# Dependencies
-dsss_demod_matlab.o: dsss_demod_matlab.c dsss_demod.h
-	$(CC) $(CFLAGS) -I$(MATLAB_DIR) -c dsss_demod_matlab.c -o dsss_demod_matlab.o
+# ============================================================================
+# SGB (2G) DSSS/OQPSK Programs
+# ============================================================================
 
-dec406_v2g.o: dec406_v2g.c dec406.h display_utils.h country_codes.h
-	$(CC) $(CFLAGS) -c dec406_v2g.c -o dec406_v2g.o
+# Compile MATLAB Coder object files
+$(BUILD_DIR)/matlab_%.o: $(MATLAB_DIR)/%.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -c $< -o $@
 
-display_utils.o: display_utils.c display_utils.h
-	$(CC) $(CFLAGS) -c display_utils.c -o display_utils.o
+# dec406_iq - Decode 2G from IQ file (⚠️  NOT FUNCTIONAL - 55% accuracy)
+$(BUILD_DIR)/dec406_iq: $(SRC_DIR)/main_iq.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/dsss_demod_matlab.c $(SRC_DIR)/prn_generator.c $(SRC_DIR)/display_utils.c \
+	$(BUILD_DIR)/matlab_dsss_receiver.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_emxutil.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_initialize.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_rtwutil.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_terminate.o \
+	$(BUILD_DIR)/matlab_helperPolyphaseCorrelator.o \
+	$(BUILD_DIR)/matlab_minOrMax.o \
+	$(BUILD_DIR)/matlab_pskdemod.o \
+	$(BUILD_DIR)/matlab_rtGetInf.o \
+	$(BUILD_DIR)/matlab_rtGetNaN.o \
+	$(BUILD_DIR)/matlab_rt_nonfinite.o \
+	$(BUILD_DIR)/matlab_sign.o
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -o $@ $^ $(LDFLAGS_DSSS)
+	@echo "Built: $@ (⚠️  WARNING: NOT FUNCTIONAL)"
 
-test_dsss_main.o: test_dsss_main.c dsss_demod.h dec406.h
-	$(CC) $(CFLAGS) -c test_dsss_main.c -o test_dsss_main.o
+# dec406_dsss_test - Test DSSS demodulator
+$(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/dsss_demod_matlab.c $(SRC_DIR)/display_utils.c \
+	$(BUILD_DIR)/matlab_dsss_receiver.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_emxutil.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_initialize.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_rtwutil.o \
+	$(BUILD_DIR)/matlab_dsss_receiver_terminate.o \
+	$(BUILD_DIR)/matlab_helperPolyphaseCorrelator.o \
+	$(BUILD_DIR)/matlab_minOrMax.o \
+	$(BUILD_DIR)/matlab_pskdemod.o \
+	$(BUILD_DIR)/matlab_rtGetInf.o \
+	$(BUILD_DIR)/matlab_rtGetNaN.o \
+	$(BUILD_DIR)/matlab_rt_nonfinite.o \
+	$(BUILD_DIR)/matlab_sign.o
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -o $@ $^ $(LDFLAGS_DSSS)
+	@echo "Built: $@"
 
-# Clean
+# ============================================================================
+# Utility Programs
+# ============================================================================
+
+# generate_2g_hex - Generate 2G test frame in hex
+$(BUILD_DIR)/generate_2g_hex: $(UTILS_DIR)/generate_2g_hex.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# ============================================================================
+# Maintenance
+# ============================================================================
+
 clean:
-	rm -f *.o $(MATLAB_DIR)/*.o $(TARGETS)
+	rm -rf $(BUILD_DIR)/*
 	@echo "Cleaned build artifacts"
 
 # Install dependencies (Debian/Ubuntu)
@@ -82,7 +136,8 @@ install-deps:
 
 # Help
 help:
-	@echo "COSPAS-SARSAT 406 MHz DSSS Decoder Makefile"
+	@echo "COSPAS-SARSAT 406 MHz Decoder Makefile"
+	@echo "======================================="
 	@echo ""
 	@echo "Targets:"
 	@echo "  all              - Build all executables (default)"
@@ -91,7 +146,18 @@ help:
 	@echo "  install-deps     - Install required dependencies (requires sudo)"
 	@echo "  help             - Show this help message"
 	@echo ""
-	@echo "Usage example:"
-	@echo "  make                     # Build everything"
-	@echo "  make clean               # Clean build"
-	@echo "  ./dec406_dsss_test file.iq  # Test with IQ file"
+	@echo "Executables:"
+	@echo "  dec406_hex       - FGB decoder from hex string"
+	@echo "  dec406_audio     - FGB decoder from audio (WAV/stdin)"
+	@echo "  dec406_iq        - SGB decoder from IQ file (⚠️  NOT FUNCTIONAL)"
+	@echo "  dec406_dsss_test - Test DSSS demodulator"
+	@echo "  generate_2g_hex  - Generate 2G test frame"
+	@echo ""
+	@echo "Usage examples:"
+	@echo "  make                                    # Build all"
+	@echo "  make clean                              # Clean build"
+	@echo "  ./build/dec406_hex 1AD050B7D8A06F     # Decode hex FGB"
+	@echo "  ./build/dec406_audio capture.wav        # Decode WAV FGB"
+	@echo "  ./build/dec406_iq file.iq               # Test SGB (buggy)"
+	@echo "  ./build/generate_2g_hex                 # Generate 2G frame"
+	@echo ""

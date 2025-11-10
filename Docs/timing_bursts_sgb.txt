@@ -1,0 +1,20 @@
+SGB (2G) - Période de répétition variable :
+
+  | Phase           | Durée       | Intervalle      | Randomisation |
+  |-----------------|-------------|-----------------|---------------|
+  | Initiale        | 0-30s       | 5s (6 bursts)   | 0 (fixe)      |
+  | Action/Planning | 30s - 30min | 30s (59 bursts) | ±5s           |
+  | Prolongée       | 30min+      | 120s            | ±5s           |
+
+  Impact sur scan406.pl :
+
+  Le timeout 56s (ligne 147) signifie :
+  - Phase initiale SGB : peut capter 11 bursts (5s × 11 = 55s)
+  - Phase action SGB : peut capter 1-2 bursts (~30s)
+  - Phase prolongée SGB : peut capter 0-1 burst (~120s)
+  - FGB : peut capter 1 burst (répète tous les 50s)
+
+  Conséquence pour architecture parallèle :
+  - Les deux démodulateurs tournent en parallèle pendant 56s
+  - Le premier qui trouve un préambule valide décode
+  - Possibilité de multiples bursts SGB en phase initiale → décoder le premier seulement

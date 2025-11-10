@@ -18,6 +18,7 @@
 #include "rt_nonfinite.h"
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 /* Function Declarations */
 static void carrierSynchronizer(const emxArray_creal_T *input,
@@ -621,6 +622,14 @@ void dsss_receiver(const creal_T otaBuffer[307200], const struct0_T *settings,
             }
             /*  Correction d'erreurs BCH */
             if (k >= 51) {
+              /* Affichage du préambule (50 premiers bits) */
+              printf("\n=== PRÉAMBULE (50 bits despread) ===\n");
+              for (int preamble_i = 0; preamble_i < 50; preamble_i++) {
+                printf("%d", despreadMessage_data[preamble_i] ? 1 : 0);
+                if ((preamble_i + 1) % 10 == 0) printf(" ");
+              }
+              printf("\n====================================\n");
+
               memset(&rxPayload[0], 0, 202U * sizeof(boolean_T));
               if (k - 50 >= 202) {
                 memcpy(&rxPayload[0], &despreadMessage_data[50],
