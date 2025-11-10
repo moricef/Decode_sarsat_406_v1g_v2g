@@ -20,8 +20,8 @@ my $j;
 my $frq=0;
 #my $dec = './build/dec406_audio --100 --M3 --une_minute';
 #my $dec1 = './build/dec406_audio --100 --M3 --une_minute --osm';
-my $dec = './build/dec406_audio --100 --M3';
-my $dec1 = './build/dec406_audio --100 --M3 --osm';
+my $dec = '../build/dec406_audio --100 --M3';
+my $dec1 = '../build/dec406_audio --100 --M3 --osm';
 my $timeout_duration = 15; # Timeout optimisé: 15s pour tests (5s), 50s pour balises réelles
 my $timeout_min = 30;      # Timeout minimum (balises test/urgence)
 my $timeout_max = 120;     # Timeout maximum (balises faibles)
@@ -77,11 +77,11 @@ while (1) {
         print "  [PulseAudio détecté]\n" if ($scan_count == 0);
     }
     
-    system("timeout ${timeout_duration}s  stdbuf -i0 -o0 -e0 $audio_cmd -t wav - $filter 2>/dev/null | stdbuf -i0 -o0 -e0 $dec 1>./trame.asc 2>./code ");  
+    system("timeout ${timeout_duration}s  stdbuf -i0 -o0 -e0 $audio_cmd -t wav - $filter 2>/dev/null | stdbuf -i0 -o0 -e0 $dec 1>../data/trame.asc 2>../data/code ");  
       
     $trouve="PAS encore trouve";
     my $ligne;
-    if (open (F2, '<', './code')) {
+    if (open (F2, '<', '../data/code')) {
 	while (defined ($ligne = <F2>)) {
 	    chomp $ligne;
 	    #print "\nligne : $ligne\n";
@@ -126,10 +126,10 @@ while (1) {
 
 
 sub envoi_mail {
-    my $a='"./trame.asc"';
+    my $a='"../data/trame.asc"';
     my $u='"Alerte_Balise_406"';
     my $m='" Date et Heure (UTC) du decodage: '.$utc.'"';
-    my $l='email.log';
+    my $l='../data/email.log';
     my $s='"'.$smtp_serveur.'"';;
     my $o='tls=yes';
     my $f='"'.$utilisateur.'"';
@@ -145,7 +145,7 @@ system("sendemail -l $l -f $f -u $u -t $t -s $s -o $o -xu $xu -xp $xp -m $m -a $
 # affichage fichier ./trame
 sub affiche_trame {
 					my $ligne;
-					if (open (F3, '<', './trame.asc')) {
+					if (open (F3, '<', '../data/trame.asc')) {
 						while (defined ($ligne = <F3>)) {
 							#chomp $ligne;
 							print "$ligne";

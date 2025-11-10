@@ -42,7 +42,7 @@ my $squelch=-200;
 my $snr = 6;
 my $trouve;
 my $mean;
-my $powfile = sprintf '../log_power.csv';
+my $powfile = sprintf '../data/log_power.csv';
 my $smtp_serveur='smtp.gmail.com:587';
 my $utilisateur='toto@gmail.com';
 my $password='mot_de_passe_mail';
@@ -146,11 +146,11 @@ else {
     # Pipeline optimisé RAW I/Q (basé sur tests réussis)
     system("timeout 56s rtl_fm -p $ppm -M fm $WFM -s $largeur -f $frq  2>/dev/null |\
 	    sox -t raw -r $largeur -e s -b 16 -c 1 - -t wav - $filter 2>/dev/null |\
-	    $dec 1>../trame 2>../code ");  
+	    $dec 1>../data/trame 2>../data/code ");  
       
     $trouve="PAS encore trouve";
     my $ligne;
-    if (open (F2, '<', '../code')) {
+    if (open (F2, '<', '../data/code')) {
 	while (defined ($ligne = <F2>)) {
 	    chomp $ligne;
 	    #print "\nligne : $ligne\n";
@@ -230,7 +230,7 @@ sub reset_dvbt {
 
 
 sub envoi_mail {
-    my $a='"../trame"';
+    my $a='"../data/trame"';
     my $u='"Alerte_Balise_406"';
     my $m='" Date et Heure (UTC) du decodage: '.$utc.'"';
     my $l='../data/email.log';
@@ -249,7 +249,7 @@ system("sendemail -l $l -f $f -u $u -t $t -s $s -o $o -xu $xu -xp $xp -m $m -a $
 # affichage fichier ./trame
 sub affiche_trame {
 					my $ligne;
-					if (open (F3, '<', '../trame')) {
+					if (open (F3, '<', '../data/trame')) {
 						while (defined ($ligne = <F3>)) {
 							#chomp $ligne;
 							print "$ligne";
