@@ -35,7 +35,8 @@ TARGETS = \
 	$(BUILD_DIR)/dec406_audio \
 	$(BUILD_DIR)/dec406_iq \
 	$(BUILD_DIR)/dec406_dsss_test \
-	$(BUILD_DIR)/generate_2g_hex
+	$(BUILD_DIR)/generate_2g_hex \
+	$(BUILD_DIR)/reset_usb
 
 .PHONY: all clean check_deps help
 
@@ -117,6 +118,12 @@ $(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $
 $(BUILD_DIR)/generate_2g_hex: $(UTILS_DIR)/generate_2g_hex.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# reset_usb - USB device reset utility (for scan406.pl)
+$(BUILD_DIR)/reset_usb: $(UTILS_DIR)/reset_usb.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -o $@ $^
 	@echo "Built: $@"
 
 # ============================================================================

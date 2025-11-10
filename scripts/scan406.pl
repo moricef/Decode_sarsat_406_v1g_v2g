@@ -32,8 +32,8 @@ my @db;
 my $i;
 my $j;
 my $frq=0;
-my $dec = './build/dec406_audio --100 --M3 --une_minute';
-my $dec1 = './build/dec406_audio --100 --M3 --une_minute --osm'; 
+my $dec = '../build/dec406_audio --100 --M3 --une_minute';
+my $dec1 = '../build/dec406_audio --100 --M3 --une_minute --osm'; 
 my $filter = "lowpass 3000 highpass 10"; #highpass de 10Hz à 400Hz selon la qualité du signal
 
 my $largeur = "12k";
@@ -42,7 +42,7 @@ my $squelch=-200;
 my $snr = 6;
 my $trouve;
 my $mean;
-my $powfile = sprintf 'log_power.csv';
+my $powfile = sprintf '../log_power.csv';
 my $smtp_serveur='smtp.gmail.com:587';
 my $utilisateur='toto@gmail.com';
 my $password='mot_de_passe_mail';
@@ -146,11 +146,11 @@ else {
     # Pipeline optimisé RAW I/Q (basé sur tests réussis)
     system("timeout 56s rtl_fm -p $ppm -M fm $WFM -s $largeur -f $frq  2>/dev/null |\
 	    sox -t raw -r $largeur -e s -b 16 -c 1 - -t wav - $filter 2>/dev/null |\
-	    $dec 1>./trame 2>./code ");  
+	    $dec 1>../trame 2>../code ");  
       
     $trouve="PAS encore trouve";
     my $ligne;
-    if (open (F2, '<', './code')) {
+    if (open (F2, '<', '../code')) {
 	while (defined ($ligne = <F2>)) {
 	    chomp $ligne;
 	    #print "\nligne : $ligne\n";
@@ -222,7 +222,7 @@ sub reset_dvbt {
     foreach my $line (@devices) {
         if ($line =~ /\w+\s(\d+)\s\w+\s(\d+):\sID\s([0-9a-f]+):([0-9a-f]+).+Realtek Semiconductor Corp\./) {
             if ($4 eq "2832"  ||  $4 eq "2838") {
-                system("./reset_usb /dev/bus/usb/$1/$2");
+                system("../build/reset_usb /dev/bus/usb/$1/$2");
             }
         }
     }
@@ -230,10 +230,10 @@ sub reset_dvbt {
 
 
 sub envoi_mail {
-    my $a='"./trame"';
+    my $a='"../trame"';
     my $u='"Alerte_Balise_406"';
     my $m='" Date et Heure (UTC) du decodage: '.$utc.'"';
-    my $l='email.log';
+    my $l='../data/email.log';
     my $s='"'.$smtp_serveur.'"';;
     my $o='tls=yes';
     my $f='"'.$utilisateur.'"';
@@ -249,7 +249,7 @@ system("sendemail -l $l -f $f -u $u -t $t -s $s -o $o -xu $xu -xp $xp -m $m -a $
 # affichage fichier ./trame
 sub affiche_trame {
 					my $ligne;
-					if (open (F3, '<', './trame')) {
+					if (open (F3, '<', '../trame')) {
 						while (defined ($ligne = <F3>)) {
 							#chomp $ligne;
 							print "$ligne";
@@ -262,7 +262,7 @@ sub affiche_trame {
 sub lit_config_mail {
 		my ($k, $v);
 		my %h;
-		if (open(F4, "<config_mail.txt")){		
+		if (open(F4, "<../data/config_mail.txt")){		
 			#copie key/value depuis le fichier 'config_mail' dans hash.
 			while (<F4>) {
 				chomp;
