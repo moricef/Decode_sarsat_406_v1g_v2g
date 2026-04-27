@@ -36,7 +36,7 @@
 #define DESPREAD_TOTAL_BITS       150      /* per channel */
 #define DESPREAD_PREAMBLE_CHIPS   (DESPREAD_PREAMBLE_BITS * DESPREAD_CHIPS_PER_BIT)
 #define DESPREAD_SYNC_RANGE       200
-#define DESPREAD_SYNC_THRESHOLD   0.85f
+#define DESPREAD_SYNC_THRESHOLD   0.75f
 #define DESPREAD_OUTPUT_BITS      250      /* 125 I + 125 Q interleaved */
 
 /**

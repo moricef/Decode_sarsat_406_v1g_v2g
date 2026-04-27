@@ -28,72 +28,158 @@
 // ===================================================
 // Generator polynomial g(X) from T.018 Appendix B (49 bits):
 // 1110001111110101110000101110111110011110010010111
-#define BCH_POLY_HIGH 0xE3F5C2EFUL  // Upper 32 bits of 0x1C7EB85DF3C97
-#define BCH_POLY_LOW  0x13C97UL      // Lower 17 bits
+#define BCH_GEN 0x1C7EB85DF3C97ULL
+
+/* =============================================================
+ * GF(2^8) arithmetic for BCH error correction (t ≤ 6)
+ * Primitive polynomial: X^8 + X^4 + X^3 + X^2 + 1 (0x11D)
+ * ============================================================= */
+static uint8_t gf_exp[512];
+static uint8_t gf_log[256];
+static int    gf_init_done = 0;
+
+static void gf_init(void)
+{
+    if (gf_init_done) return;
+    uint16_t x = 1;
+    for (int i = 0; i < 255; i++) {
+        gf_exp[i] = (uint8_t)x;
+        gf_log[x] = (uint8_t)i;
+        x <<= 1;
+        if (x & 0x100) x ^= 0x11D;
+    }
+    for (int i = 255; i < 512; i++)
+        gf_exp[i] = gf_exp[i - 255];
+    gf_init_done = 1;
+}
+static uint8_t gf_mul(uint8_t a, uint8_t b) {
+    if (!a || !b) return 0;
+    return gf_exp[(gf_log[a] + gf_log[b]) % 255];
+}
+static uint8_t gf_div(uint8_t a, uint8_t b) {
+    if (!a) return 0;
+    return gf_exp[(gf_log[a] - gf_log[b] + 255) % 255];
+}
+
+/* Evaluate 250-bit codeword at alpha^pow in GF(2^8).
+ * bits[0] = coefficient of X^249. */
+static uint8_t eval_at_alpha(const uint8_t *cw, int pow)
+{
+    uint8_t r = 0;
+    for (int i = 0; i < 250; i++)
+        if (cw[i])
+            r ^= gf_exp[((249 - i) * pow) % 255];
+    return r;
+}
+
+/* Compute syndromes S1..S12 */
+static void compute_syndromes(const uint8_t *cw, uint8_t syn[12])
+{
+    for (int i = 1; i <= 12; i++)
+        syn[i - 1] = eval_at_alpha(cw, i);
+}
+
+/* Berlekamp-Massey — find error locator polynomial lambda(x).
+ * Returns degree L. */
+static int berlekamp_massey(const uint8_t syn[12], uint8_t lam[13])
+{
+    uint8_t B[13] = {1};
+    lam[0] = 1;
+    int L = 0, m = 1;
+    uint8_t b = 1;
+    for (int n = 0; n < 12; n++) {
+        uint8_t d = syn[n];
+        for (int i = 1; i <= L; i++)
+            d ^= gf_mul(lam[i], syn[n - i]);
+        if (d == 0) { m++; }
+        else if (2 * L <= n) {
+            uint8_t T[13]; memcpy(T, lam, sizeof(T));
+            uint8_t coef = gf_div(d, b);
+            for (int i = 0; i < 13; i++) {
+                uint8_t sb = (i >= m && B[i - m]) ? gf_mul(coef, B[i - m]) : 0;
+                lam[i] ^= sb;
+            }
+            L = n + 1 - L; memcpy(B, T, sizeof(B));
+            b = d; m = 1;
+        } else {
+            uint8_t coef = gf_div(d, b);
+            for (int i = 0; i < 13; i++) {
+                uint8_t sb = (i >= m && B[i - m]) ? gf_mul(coef, B[i - m]) : 0;
+                lam[i] ^= sb;
+            }
+            m++;
+        }
+    }
+    while (L > 0 && lam[L] == 0) L--;
+    return L;
+}
+
+/* Chien search: find error positions alpha^-i in 0..249 */
+static int chien_search(const uint8_t lam[13], int L, int pos[6])
+{
+    int cnt = 0;
+    for (int i = 0; i < 250 && cnt < 6; i++) {
+        uint8_t sum = 0;
+        for (int j = 0; j <= L; j++)
+            if (lam[j])
+                sum ^= gf_mul(lam[j], gf_exp[((255 - i) * j) % 255]);
+        if (sum == 0) {
+            int msb = 249 - i;
+            if (msb >= 0 && msb < 250)
+                pos[cnt++] = msb;
+        }
+    }
+    return cnt;
+}
 
 /**
- * @brief Decodes BCH(250,202) encoded message
- * @param msg Input: 250-bit raw message
- * @param out Output: 202-bit corrected data
+ * @brief BCH(250,202) error correction — detects AND corrects up to 6 bit errors.
+ * @param msg  Input: 250-bit raw codeword (202 data + 48 BCH)
+ * @param out  Output: 202-bit corrected data (may be modified in msg too)
  *
- * Implements BCH error detection/correction as specified in
- * C/S T.018 Appendix B using modulo-2 polynomial division.
- * The algorithm follows the exact specification:
- * 1. Add 5 padding zeros before 202 data bits
- * 2. Add 48 zeros after to form 255-bit message
- * 3. Perform modulo-2 division by g(X)
- * 4. Check if remainder (syndrome) is zero
+ * Uses full syndrome + Berlekamp-Massey + Chien search.
+ * Falls back to uncorrected copy if decoding fails.
  */
-static void bch_decode_250_202(const uint8_t *msg, uint8_t *out) {
-    // BCH(250,202) verification according to T.018 Appendix B
-    // Quote: "all calculations shall be performed with the full 255 length code.
-    // Therefore, 5 zeros are placed before the 202 data bits"
+static void bch_decode_250_202(const uint8_t *msg, uint8_t *out)
+{
+    gf_init();
 
-    // Construct the 255-bit verification message:
-    // 5 padding zeros + 202 data bits + 48 BCH bits = 255 bits
-    uint8_t bch_message[255];
+    uint8_t cw[250];
+    memcpy(cw, msg, 250);
 
-    // 5 padding zeros as specified in T.018
-    memset(bch_message, 0, 5);
+    uint8_t syn[12];
+    compute_syndromes(cw, syn);
 
-    // 202 data bits from received message
-    memcpy(bch_message + 5, msg, 202);
+    int all_zero = 1;
+    for (int i = 0; i < 12; i++) if (syn[i]) { all_zero = 0; break; }
 
-    // 48 BCH bits from received message
-    memcpy(bch_message + 207, msg + 202, 48);
-
-    // Generator polynomial g(X) from T.018 Appendix B (49 bits):
-    // Binary: 1110001111110101110000101110111110011110010010111
-    // This is the exact polynomial shown in the specification
-    const uint64_t generator_poly = 0x1C7EB85DF3C97ULL;
-
-    // Perform polynomial long division as shown in T.018 Figure B-1
-    // This implements the modulo-2 division process exactly as specified
-    uint64_t remainder = 0;
-
-    for (int i = 0; i < 255; i++) {
-        // Shift remainder left and input next message bit
-        remainder = (remainder << 1) | bch_message[i];
-
-        // If MSB (bit 48) is set, divide by generator polynomial
-        if (remainder & (1ULL << 48)) {
-            remainder ^= generator_poly;
+    if (!all_zero) {
+        uint8_t lam[13] = {0};
+        int L = berlekamp_massey(syn, lam);
+        if (L >= 1 && L <= 6) {
+            int pos[6];
+            int npos = chien_search(lam, L, pos);
+            if (npos == L) {
+                for (int i = 0; i < npos; i++)
+                    cw[pos[i]] ^= 1;
+                /* re-verify */
+                uint8_t syn2[12];
+                compute_syndromes(cw, syn2);
+                all_zero = 1;
+                for (int i = 0; i < 12; i++) if (syn2[i]) { all_zero = 0; break; }
+                if (!all_zero)
+                    memcpy(cw, msg, 250);  /* miscorrect — restore */
+            }
         }
     }
 
-    // According to T.018: valid codeword has remainder = 0
-    if (remainder == 0) {
-        // Message is valid according to BCH(255,207) / BCH(250,202) specification
-        // No detectable errors in the 250-bit message
+    if (all_zero) {
+        /* No errors detected or corrected successfully */
     } else {
-        fprintf(stderr, "BCH: Errors detected (syndrome: 0x%013llX)\n",
-                (unsigned long long)remainder);
-        // The BCH(250,202) code can detect and correct up to 6 bit errors
-        // In a complete implementation, syndrome decoding would attempt correction
+        fprintf(stderr, "BCH: Errors detected, could not correct\n");
     }
 
-    // Extract the 202 information bits for message decoding
-    memcpy(out, msg, 202);
+    memcpy(out, cw, 202);
 }
 
 // ===================================================
