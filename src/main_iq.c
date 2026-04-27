@@ -42,7 +42,6 @@
 #include <string.h>
 #include <math.h>
 #include "dsss_demod.h"
-#include "prn_generator.h"
 #include "dec406.h"
 
 // Stub for decode_beacon (to be implemented)
@@ -85,7 +84,25 @@ static void print_usage(const char *progname) {
  * @brief Print bits in hex format (for debugging)
  */
 static void print_bits_hex(const uint8_t *bits, int length) {
-    printf("\n[DEBUG] Demodulated bits (hex):\n");
+    /* dec406_hex 2G convention: 63 hex chars = 252 bits = 2 leading
+     * padding bits + 250 BCH frame bits. Prepend "00" so the printed
+     * string can be passed directly to dec406_hex / the official decoder. */
+    printf("\n[DEBUG] Demodulated bits (hex, dec406_hex format, 63 chars):\n");
+    if (length == 250) {
+        /* Build 252-bit padded stream: 2 zero pads + 250 message bits. */
+        for (int i = 0; i < 252; i += 4) {
+            uint8_t nib = 0;
+            for (int j = 0; j < 4; j++) {
+                int idx = i + j - 2;  /* shift by leading 2-pad */
+                int b = (idx < 0 || idx >= length) ? 0 : bits[idx];
+                nib = (uint8_t)((nib << 1) | b);
+            }
+            printf("%X", nib);
+        }
+        printf("\n");
+        return;
+    }
+    /* Fallback: original byte-packed format. */
     for (int i = 0; i < length; i += 8) {
         uint8_t byte = 0;
         for (int j = 0; j < 8 && (i + j) < length; j++) {
@@ -98,37 +115,12 @@ static void print_bits_hex(const uint8_t *bits, int length) {
 }
 
 /**
- * @brief Print preamble analysis (for debugging)
- */
-static void print_preamble_analysis(const uint8_t *bits) {
-    printf("\n[DEBUG] Preamble Analysis (50 bits):\n");
-    printf("Expected: 0000000000... (T.018 §2.2.4: all bits '0')\n");
-    printf("Received: ");
-
-    int errors = 0;
-    for (int i = 0; i < 50; i++) {
-        printf("%d", bits[i]);
-
-        // T.018 §2.2.4: All preamble bits should be '0'
-        uint8_t expected = 0;
-        if (bits[i] != expected) {
-            errors++;
-        }
-
-        if ((i + 1) % 10 == 0) printf(" ");
-    }
-
-    printf("\nErrors: %d/50 (%.1f%%)\n", errors, (errors * 100.0) / 50.0);
-}
-
-/**
  * @brief Main entry point
  */
 int main(int argc, char *argv[]) {
     // Parse arguments
     const char *filename = NULL;
     float manual_sample_rate = 0.0f;  // 0 = auto-detect
-    float forced_freq_offset = NAN;   // NAN = auto-search
 
     if (argc < 2 || argc > 6) {
         print_usage(argv[0]);
@@ -150,8 +142,9 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
         } else if (strcmp(argv[i], "-f") == 0) {
+            /* -f <freq>: ignored in v1 (Stage A has no Doppler comp). */
             if (i + 1 < argc) {
-                forced_freq_offset = atof(argv[++i]);
+                (void)atof(argv[++i]);
             } else {
                 fprintf(stderr, "Error: -f requires frequency offset argument\n");
                 print_usage(argv[0]);
@@ -168,18 +161,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Check file extension
-    int len = strlen(filename);
-    if (len < 3) {
-        fprintf(stderr, "Error: Invalid filename\n");
-        return 1;
-    }
-
-    const char *ext = filename + len - 3;
-    if (strcmp(ext, ".iq") != 0 && strcmp(ext + 1, "file") != 0) {
-        fprintf(stderr, "Error: Unsupported format. Use .iq or .cfile\n");
-        return 1;
-    }
+    /* Accept any extension: .iq, .cfile, .sigmf-data, .raw — the loader
+     * just reads cf32_le interleaved samples. */
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════╗\n");
@@ -187,16 +170,9 @@ int main(int argc, char *argv[]) {
     printf("╚════════════════════════════════════════════════════════════════╝\n");
     printf("\n");
 
-    // Verify PRN generator compliance with T.018
-    printf("=== PRN GENERATOR VALIDATION ===\n");
-    if (!prn_verify_table_2_2()) {
-        fprintf(stderr, "FATAL: PRN generator does not match T.018 specification!\n");
-        return 1;
-    }
-    printf("\n");
-
-    // Allocate output buffer for 300 bits (preamble + payload + parity)
-    uint8_t output_bits[DSSS_PACKET_BITS];
+    /* Allocate output buffer for the 250-bit message (202 data + 48 BCH).
+     * Preamble bits (50 zeros) are stripped by the despreader. */
+    uint8_t output_bits[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
     memset(output_bits, 0, sizeof(output_bits));
 
     // =========================================================================
@@ -206,9 +182,10 @@ int main(int argc, char *argv[]) {
     printf("\n");
     printf("=== LOADING IQ FILE ===\n");
 
-    // Load IQ samples (MATLAB version needs 307200 samples minimum for sps=8)
-    size_t required_samples = 307200;
-    float complex *iq_buffer = malloc(required_samples * sizeof(float complex));
+    /* Load IQ samples. 2.4576 MHz × 1 s = 2,457,600; the modulator emits
+     * 32 extra samples (Q-tail), so allow a small margin. */
+    size_t required_samples = 2457700;
+    float complex *iq_buffer = calloc(required_samples, sizeof(float complex));
     if (!iq_buffer) {
         fprintf(stderr, "ERROR: Cannot allocate IQ buffer\n");
         return 1;
@@ -224,10 +201,11 @@ int main(int argc, char *argv[]) {
     size_t samples_read = fread(iq_buffer, sizeof(float complex), required_samples, fp);
     fclose(fp);
 
-    if (samples_read < required_samples) {
-        fprintf(stderr, "WARNING: File has only %zu samples (need %zu), padding with zeros\n",
-                samples_read, required_samples);
-        memset(iq_buffer + samples_read, 0, (required_samples - samples_read) * sizeof(float complex));
+    if (samples_read < 2400000) {
+        fprintf(stderr, "ERROR: File has only %zu samples (need >= 2.4 M)\n",
+                samples_read);
+        free(iq_buffer);
+        return 1;
     }
 
     printf("Loaded %zu samples\n", samples_read);
@@ -237,7 +215,9 @@ int main(int argc, char *argv[]) {
     // =========================================================================
     printf("\n=== DEMODULATION PROCESS ===\n");
 
-    int ret = dsss_receive_burst(iq_buffer, required_samples, 8, 307200.0, 0, output_bits);
+    /* Pass the full allocated buffer (zero-padded tail past samples_read) so
+     * symbol_sync can produce the extra chip sample needed when off_Q != 0. */
+    int ret = dsss_receive_burst(iq_buffer, required_samples, 64, 2457600.0, 0, output_bits);
     free(iq_buffer);
 
     if (ret == -2) {
@@ -257,29 +237,15 @@ int main(int argc, char *argv[]) {
 
     printf("\n✅ DEMODULATION SUCCESS\n");
 
-    // =========================================================================
-    // STEP 2: DEBUG OUTPUT (enabled for diagnosis)
-    // =========================================================================
-    print_preamble_analysis(output_bits);
-    print_bits_hex(output_bits, DSSS_PACKET_BITS);
+    /* Debug dump of the 250 message bits. */
+    print_bits_hex(output_bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
 
-    // =========================================================================
-    // STEP 3: EXTRACT PAYLOAD AND DECODE
-    // =========================================================================
     printf("\n");
     printf("=== FRAME DECODING ===\n");
 
-    // Skip 50-bit preamble, extract 250-bit payload (202 data + 48 BCH)
-    uint8_t payload[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
-    memcpy(payload, output_bits + DSSS_PREAMBLE_BITS, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
-
-    // Pass to existing decoder (250 bits = 202 data + 48 BCH)
-    // The decoder will:
-    //   1. Verify BCH(250,202) checksum
-    //   2. Extract 23-HEX ID, Country Code, TAC
-    //   3. Decode GPS position, Vessel ID
-    //   4. Display formatted output + OSM link
-    decode_beacon(payload, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    /* The despreader output is the 250-bit payload (202 data + 48 BCH).
+     * Pass straight to the existing decoder: BCH check + T.018 parsing. */
+    decode_beacon(output_bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════╗\n");

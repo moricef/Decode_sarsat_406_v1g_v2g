@@ -74,40 +74,24 @@ $(BUILD_DIR)/matlab_%.o: $(MATLAB_DIR)/%.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -c $< -o $@
 
-# dec406_iq - Decode 2G from IQ file (⚠️  NOT FUNCTIONAL - 55% accuracy)
-$(BUILD_DIR)/dec406_iq: $(SRC_DIR)/main_iq.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/dsss_demod_matlab.c $(SRC_DIR)/prn_generator.c $(SRC_DIR)/display_utils.c \
-	$(BUILD_DIR)/matlab_dsss_receiver.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_emxutil.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_initialize.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_rtwutil.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_terminate.o \
-	$(BUILD_DIR)/matlab_helperPolyphaseCorrelator.o \
-	$(BUILD_DIR)/matlab_minOrMax.o \
-	$(BUILD_DIR)/matlab_pskdemod.o \
-	$(BUILD_DIR)/matlab_rtGetInf.o \
-	$(BUILD_DIR)/matlab_rtGetNaN.o \
-	$(BUILD_DIR)/matlab_rt_nonfinite.o \
-	$(BUILD_DIR)/matlab_sign.o
+# Pure-C DSSS demodulator sources (replaces MATLAB Coder wrapper)
+DSSS_SRCS = \
+	$(SRC_DIR)/dsss_demod.c \
+	$(SRC_DIR)/rrc_filter.c \
+	$(SRC_DIR)/symbol_sync.c \
+	$(SRC_DIR)/costas4.c \
+	$(SRC_DIR)/despread.c
+
+# dec406_iq - Decode 2G from IQ file (pure-C DSSS chain)
+$(BUILD_DIR)/dec406_iq: $(SRC_DIR)/main_iq.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -o $@ $^ $(LDFLAGS_DSSS)
-	@echo "Built: $@ (⚠️  WARNING: NOT FUNCTIONAL)"
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
 
 # dec406_dsss_test - Test DSSS demodulator
-$(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/dsss_demod_matlab.c $(SRC_DIR)/display_utils.c \
-	$(BUILD_DIR)/matlab_dsss_receiver.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_emxutil.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_initialize.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_rtwutil.o \
-	$(BUILD_DIR)/matlab_dsss_receiver_terminate.o \
-	$(BUILD_DIR)/matlab_helperPolyphaseCorrelator.o \
-	$(BUILD_DIR)/matlab_minOrMax.o \
-	$(BUILD_DIR)/matlab_pskdemod.o \
-	$(BUILD_DIR)/matlab_rtGetInf.o \
-	$(BUILD_DIR)/matlab_rtGetNaN.o \
-	$(BUILD_DIR)/matlab_rt_nonfinite.o \
-	$(BUILD_DIR)/matlab_sign.o
+$(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -o $@ $^ $(LDFLAGS_DSSS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "Built: $@"
 
 # ============================================================================
@@ -156,7 +140,7 @@ help:
 	@echo "Executables:"
 	@echo "  dec406_hex       - FGB decoder from hex string"
 	@echo "  dec406_audio     - FGB decoder from audio (WAV/stdin)"
-	@echo "  dec406_iq        - SGB decoder from IQ file (⚠️  NOT FUNCTIONAL)"
+	@echo "  dec406_iq        - SGB decoder from IQ file (pure-C DSSS chain)"
 	@echo "  dec406_dsss_test - Test DSSS demodulator"
 	@echo "  generate_2g_hex  - Generate 2G test frame"
 	@echo ""
@@ -165,6 +149,6 @@ help:
 	@echo "  make clean                              # Clean build"
 	@echo "  ./build/dec406_hex 1AD050B7D8A06F     # Decode hex FGB"
 	@echo "  ./build/dec406_audio capture.wav        # Decode WAV FGB"
-	@echo "  ./build/dec406_iq file.iq               # Test SGB (buggy)"
+	@echo "  ./build/dec406_iq file.iq               # Decode SGB from IQ"
 	@echo "  ./build/generate_2g_hex                 # Generate 2G frame"
 	@echo ""

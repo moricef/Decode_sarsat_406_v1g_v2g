@@ -1,11 +1,17 @@
 /**
  * @file dsss_demod.h
- * @brief DSSS OQPSK Receiver API - MATLAB Coder Implementation
+ * @brief DSSS OQPSK Receiver API — pure C implementation
  *
- * This header provides the public API for COSPAS-SARSAT DSSS OQPSK demodulation.
- * The implementation uses MATLAB Coder generated code for 100% MATLAB compatibility.
+ * Replaces the previous MATLAB Coder wrapper. Implements the receive chain
+ * validated bit-perfect (248/248 bits) against the SARSAT 2G modulator:
  *
- * Previous manual C implementation archived in: archive/dsss_demod.c
+ *   delay Q by SPS/2  →  RRC matched filter  →  Stage A symbol sync (energy
+ *   max + decimation)  →  Costas loop (QPSK, BW=0.0628)  →  binary slicer  →
+ *   T.018 despreader (PRN sync 2-pass + per-bit majority over 256 chips).
+ *
+ * The output of dsss_receive_burst() is 250 bits suitable for direct
+ * consumption by decode_2g(rx_bits[250]) in dec406_v2g.c (BCH(250,202) +
+ * frame parsing).
  */
 
 #ifndef DSSS_DEMOD_H
@@ -15,50 +21,30 @@
 #include <stddef.h>
 #include <complex.h>
 
-// DSSS Signal Parameters (COSPAS-SARSAT T.018)
-#define DSSS_CHIP_RATE          38400   // 38.4 kchips/s
-#define DSSS_SPREADING_FACTOR   256     // 256 chips per symbol
+/* T.018 SGB receive parameters (must match the modulator). */
+#define DSSS_CHIP_RATE          38400      /* 38.4 kchips/s */
+#define DSSS_SPREADING_FACTOR   256        /* chips per data bit */
+#define DSSS_SAMP_RATE_HZ       2457600    /* 2.4576 MHz (SPS=64) */
+#define DSSS_SPS                64
 
-// Frame Structure
-#define DSSS_PREAMBLE_BITS      50      // 50-bit preamble (all zeros)
-#define DSSS_PAYLOAD_BITS       202     // 202 information bits
-#define DSSS_PARITY_BITS        48      // 48 BCH parity bits
-#define DSSS_PACKET_BITS        300     // Total: 50 + 202 + 48 = 300 bits
-
-// Total frame length in chips (for OQPSK, 2 bits per symbol)
-#define DSSS_PACKET_CHIPS       (DSSS_PACKET_BITS * DSSS_SPREADING_FACTOR / 2)  // 38400 chips
+/* Frame structure (per T.018 §2.2.3). */
+#define DSSS_PREAMBLE_BITS      50         /* total preamble (25 I + 25 Q) */
+#define DSSS_PAYLOAD_BITS       202        /* information bits */
+#define DSSS_PARITY_BITS        48         /* BCH parity */
+#define DSSS_PACKET_BITS        300        /* 50 + 202 + 48 */
 
 /**
- * @brief Receive and demodulate DSSS OQPSK burst
+ * @brief Receive and demodulate one DSSS OQPSK burst from an IQ buffer.
  *
- * This function performs complete DSSS OQPSK demodulation using MATLAB Coder generated code.
- * The implementation is 100% identical to the MATLAB reference implementation.
+ * @param ota_buffer    Complex baseband samples (cf32, fs=2.4576 MHz).
+ * @param buffer_length Sample count (≥ ~2,457,600 for one full burst).
+ * @param sps           Samples per chip; must be 64 in v1.
+ * @param fs            Sampling frequency in Hz; must be 2457600.0f in v1.
+ * @param max_doppler   Reserved (Doppler compensation deferred to Stage B).
+ * @param output_bits   Output buffer of 250 bytes (each is a bit, 0 or 1)
+ *                      ready to feed decode_2g().
  *
- * Processing steps:
- * 1. AGC normalization (updates every 10*sps samples)
- * 2. Polyphase correlator for preamble detection
- * 3. Carrier synchronization (processes ALL samples)
- * 4. Timing recovery
- * 5. OQPSK demodulation
- * 6. DSSS despreading
- * 7. BCH error correction
- *
- * @param ota_buffer    Input IQ samples (complex baseband, float complex)
- * @param buffer_length Number of input samples (must be >= 307200 for sps=8)
- * @param sps           Samples per symbol (must be 8)
- * @param fs            Sampling frequency in Hz (307200 Hz nominal)
- * @param max_doppler   Maximum Doppler shift to search in Hz (unused in MATLAB version)
- * @param output_bits   Output buffer for decoded bits (202 information bits + 48 zeros)
- *
- * @return 0 on success, -1 on error
- *
- * @note The MATLAB implementation requires exactly:
- *       - sps = 8 (samples per symbol)
- *       - 307200 samples minimum (38.4 kHz * 8 sps = 307.2 kHz sampling)
- *       - No Doppler compensation (assumes signal is pre-centered)
- *
- * @note Output contains 202 information bits (BCH payload) followed by 48 zeros.
- *       The 48 BCH parity bits are computed internally but not returned.
+ * @return 0 on success; -1 on parameter error or sync failure.
  */
 int dsss_receive_burst(const float complex *ota_buffer,
                        size_t buffer_length,
@@ -66,25 +52,5 @@ int dsss_receive_burst(const float complex *ota_buffer,
                        float fs,
                        int max_doppler,
                        uint8_t *output_bits);
-
-/**
- * @brief Generate PRN sequence (DEPRECATED)
- *
- * This function is deprecated. PRN generation is handled internally
- * by the MATLAB Coder implementation.
- *
- * @deprecated Use MATLAB Coder internal PRN generation
- */
-void dsss_generate_prn(uint32_t initial_state, int8_t *output, size_t num_chips);
-
-/**
- * @brief Generate PRN I/Q sequences (DEPRECATED)
- *
- * This function is deprecated. PRN generation is handled internally
- * by the MATLAB Coder implementation.
- *
- * @deprecated Use MATLAB Coder internal PRN generation
- */
-void dsss_generate_prn_sequences(int8_t *prn_i, int8_t *prn_q);
 
 #endif /* DSSS_DEMOD_H */
