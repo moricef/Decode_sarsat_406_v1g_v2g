@@ -15,6 +15,9 @@ code
 *.iq
 *.cfile
 
+# Documentation
+docs/*
+
 # Fichiers audio/données
 *.wav
 *.asc
