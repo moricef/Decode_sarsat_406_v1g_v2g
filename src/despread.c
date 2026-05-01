@@ -1,13 +1,12 @@
 /**
  * @file despread.c
- * @brief T.018 SGB DSSS despreader (PRN gen + 2-pass sync + despread)
+ * @brief T.018 SGB DSSS despreader (PRN gen + 2-pass sync + soft despread)
  *
- * Direct port of decode_sgb_epy_block_0.py (validated bit-perfect 248/248
- * on the modulator output). Same LFSR seeds, same sync logic, same per-bit
- * majority despread with the four Costas-phase formulas.
+ * Soft-correlation version: correlates complex chip samples directly with
+ * the expected ±1±j pattern instead of hard-slicing to 0/1 first.  This
+ * preserves amplitude information critical for weak-signal reception.
  *
- * Input: chip-rate complex samples (output of the Costas loop). Internal
- *        slicer: chip_I = (Re>=0) ? 1 : 0, chip_Q = (Im>=0) ? 1 : 0.
+ * Input: chip-rate complex samples (output of the Costas loop).
  * Output: 250 message bits interleaved I[0],Q[0],...,I[124],Q[124].
  */
 
@@ -15,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 void despread_gen_prn(uint32_t seed, int length, int8_t *out)
 {
@@ -26,20 +26,20 @@ void despread_gen_prn(uint32_t seed, int length, int8_t *out)
     }
 }
 
-/* Count chip matches between two int8 sequences over `n` chips.
- * Both sequences are in {0, 1}. */
-static int count_matches(const int8_t *a, const int8_t *b, int n)
-{
-    int m = 0;
-    for (int i = 0; i < n; i++)
-        if (a[i] == b[i]) m++;
-    return m;
-}
-
-/* Build a "NOT" copy of a chip sequence: 1 - x. */
 static void chip_not(const int8_t *src, int n, int8_t *dst)
 {
     for (int i = 0; i < n; i++) dst[i] = (int8_t)(1 - src[i]);
+}
+
+/* Build expected chip signs (±1.0) for a given Costas phase.
+ * pred_i / pred_q are 0/1 tables; output is +1.0 or -1.0. */
+static void build_expected(const int8_t *pred_i, const int8_t *pred_q,
+                           int n, float *exp_i, float *exp_q)
+{
+    for (int k = 0; k < n; k++) {
+        exp_i[k] = 2.0f * (float)pred_i[k] - 1.0f;
+        exp_q[k] = 2.0f * (float)pred_q[k] - 1.0f;
+    }
 }
 
 int despread_sync(const float complex *samples, int num_chips,
@@ -51,27 +51,11 @@ int despread_sync(const float complex *samples, int num_chips,
 
     memset(sync, 0, sizeof(*sync));
 
-    /* Slice preamble region. */
-    int slice_len = num_chips;
-    if (slice_len > DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE)
-        slice_len = DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE;
-
-    int8_t *chip_i = (int8_t *)malloc((size_t)slice_len);
-    int8_t *chip_q = (int8_t *)malloc((size_t)slice_len);
-    if (!chip_i || !chip_q) { free(chip_i); free(chip_q); return -1; }
-
-    for (int k = 0; k < slice_len; k++) {
-        chip_i[k] = (__real__ samples[k] >= 0.0f) ? 1 : 0;
-        chip_q[k] = (__imag__ samples[k] >= 0.0f) ? 1 : 0;
-    }
-
-    /* PRN + predictions (preamble length only). */
     int8_t *prn_i = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
     int8_t *prn_q = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
     int8_t *npi   = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
     int8_t *npq   = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
     if (!prn_i || !prn_q || !npi || !npq) {
-        free(chip_i); free(chip_q);
         free(prn_i); free(prn_q); free(npi); free(npq);
         return -1;
     }
@@ -83,54 +67,121 @@ int despread_sync(const float complex *samples, int num_chips,
     const int8_t *pred_i_tab[4] = { npi, prn_q, prn_i, npq };
     const int8_t *pred_q_tab[4] = { npq, npi,   prn_q, prn_i };
 
-    /* Pass A — I channel. */
-    int search_hi = DESPREAD_SYNC_RANGE;
-    if (DESPREAD_PREAMBLE_CHIPS + search_hi > slice_len)
-        search_hi = slice_len - DESPREAD_PREAMBLE_CHIPS;
+    /* Pre-compute expected complex signs for each Costas phase. */
+    float *exp_i[4], *exp_q[4];
+    int alloc_ok = 1;
+    for (int p = 0; p < 4; p++) {
+        exp_i[p] = (float *)malloc((size_t)DESPREAD_PREAMBLE_CHIPS * sizeof(float));
+        exp_q[p] = (float *)malloc((size_t)DESPREAD_PREAMBLE_CHIPS * sizeof(float));
+        if (!exp_i[p] || !exp_q[p]) alloc_ok = 0;
+    }
+    if (!alloc_ok) {
+        for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
+        free(prn_i); free(prn_q); free(npi); free(npq);
+        return -1;
+    }
+    for (int p = 0; p < 4; p++)
+        build_expected(pred_i_tab[p], pred_q_tab[p],
+                       DESPREAD_PREAMBLE_CHIPS, exp_i[p], exp_q[p]);
 
-    int best_i = -1, best_off_i = 0, best_phase = 0;
+    /* ---------- Pass A: soft-correlate I channel to find offset + phase ---------- */
+    int search_hi = DESPREAD_SYNC_RANGE;
+    if (DESPREAD_PREAMBLE_CHIPS + search_hi > num_chips)
+        search_hi = num_chips - DESPREAD_PREAMBLE_CHIPS;
+
+    float best_i_abs = -1e30f, best_i_raw = 0.0f;
+    int   best_off_i = 0, best_phase = 0;
+    float sum_i = 0.0f, sum2_i = 0.0f;
+    int   cnt_i = 0;
+
     for (int off = 0; off < search_hi; off++) {
         for (int p = 0; p < 4; p++) {
-            int s = count_matches(chip_i + off, pred_i_tab[p],
-                                  DESPREAD_PREAMBLE_CHIPS);
-            if (s > best_i) { best_i = s; best_off_i = off; best_phase = p; }
+            float corr = 0.0f;
+            for (int k = 0; k < DESPREAD_PREAMBLE_CHIPS; k++) {
+                float re = __real__ samples[off + k];
+                corr += re * exp_i[p][k];
+            }
+            sum_i += corr;
+            sum2_i += corr * corr;
+            cnt_i++;
+            float acorr = (corr > 0.0f) ? corr : -corr;
+            if (acorr > best_i_abs) {
+                best_i_abs = acorr;
+                best_i_raw = corr;
+                best_off_i = off;
+                best_phase = p;
+            }
         }
     }
 
-    /* Pass B — Q channel. */
-    int best_q = -1, best_off_q = best_off_i;
+    /* ---------- Pass B: soft-correlate Q channel around best I offset ---------- */
     int qlo = best_off_i - 5; if (qlo < 0) qlo = 0;
     int qhi = best_off_i + 6; if (qhi > search_hi) qhi = search_hi;
+
+    float best_q_abs = -1e30f, best_q_raw = 0.0f;
+    int   best_off_q = best_off_i;
+    float sum_q = 0.0f, sum2_q = 0.0f;
+    int   cnt_q = 0;
+
     for (int off = qlo; off < qhi; off++) {
-        int s = count_matches(chip_q + off, pred_q_tab[best_phase],
-                              DESPREAD_PREAMBLE_CHIPS);
-        if (s > best_q) { best_q = s; best_off_q = off; }
+        float corr = 0.0f;
+        for (int k = 0; k < DESPREAD_PREAMBLE_CHIPS; k++) {
+            float im = __imag__ samples[off + k];
+            corr += im * exp_q[best_phase][k];
+        }
+        sum_q += corr;
+        sum2_q += corr * corr;
+        cnt_q++;
+        float acorr = (corr > 0.0f) ? corr : -corr;
+        if (acorr > best_q_abs) {
+            best_q_abs = acorr;
+            best_q_raw = corr;
+            best_off_q = off;
+        }
     }
 
-    int thr = (int)(DESPREAD_SYNC_THRESHOLD * (float)DESPREAD_PREAMBLE_CHIPS);
-    if (best_i < thr || best_q < thr) {
+    /* ---------- Quality check: peak z-score ----------
+     * For each pass we measure how many standard deviations the best
+     * correlation stands above the mean of the other candidates.
+     * Pure noise gives z < 3; a real preamble gives z >> 10. */
+    float mean_i = cnt_i > 1 ? (sum_i - best_i_raw) / (float)(cnt_i - 1) : 0.0f;
+    float mean_q = cnt_q > 1 ? (sum_q - best_q_raw) / (float)(cnt_q - 1) : 0.0f;
+    float var_i  = cnt_i > 1 ? (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
+                               - mean_i * mean_i : 1e-10f;
+    float var_q  = cnt_q > 1 ? (sum2_q - best_q_raw * best_q_raw) / (float)(cnt_q - 1)
+                               - mean_q * mean_q : 1e-10f;
+    if (var_i < 1e-10f) var_i = 1e-10f;
+    if (var_q < 1e-10f) var_q = 1e-10f;
+    float z_i = fabsf(best_i_raw - mean_i) / sqrtf(var_i);
+    float z_q = fabsf(best_q_raw - mean_q) / sqrtf(var_q);
+
+    float z_comb = sqrtf(z_i * z_i + z_q * z_q);
+    float thr = DESPREAD_SYNC_THRESHOLD;
+    if (z_comb < thr) {
         fprintf(stderr,
-                "[despread] SYNC FAILED: I=%.1f%% Q=%.1f%% (need %.0f%% each)\n",
-                100.0f * best_i / DESPREAD_PREAMBLE_CHIPS,
-                100.0f * best_q / DESPREAD_PREAMBLE_CHIPS,
-                100.0f * DESPREAD_SYNC_THRESHOLD);
-        free(chip_i); free(chip_q); free(prn_i); free(prn_q); free(npi); free(npq);
+                "[despread] SYNC FAILED: "
+                "I z=%.1f Q z=%.1f combined=%.1f (need %.1f)\n",
+                (double)z_i, (double)z_q, (double)z_comb, (double)thr);
+        for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
+        free(prn_i); free(prn_q); free(npi); free(npq);
         return -1;
     }
 
     sync->off_i   = best_off_i;
     sync->off_q   = best_off_q;
     sync->phase   = best_phase;
-    sync->score_i = best_i;
-    sync->score_q = best_q;
+    sync->score_i = (int)(z_i * 10.0f);
+    sync->score_q = (int)(z_q * 10.0f);
 
     fprintf(stderr,
-            "[despread] Synced: off_I=%d (%.1f%%), off_Q=%d (%.1f%%), phase=%d°\n",
-            best_off_i, 100.0f * best_i / DESPREAD_PREAMBLE_CHIPS,
-            best_off_q, 100.0f * best_q / DESPREAD_PREAMBLE_CHIPS,
-            best_phase * 90);
+            "[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
+            "combined=%.1f, phase=%d°\n",
+            best_off_i, (double)z_i,
+            best_off_q, (double)z_q,
+            (double)z_comb, best_phase * 90);
 
-    free(chip_i); free(chip_q); free(prn_i); free(prn_q); free(npi); free(npq);
+    for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
+    free(prn_i); free(prn_q); free(npi); free(npq);
     return 0;
 }
 
@@ -145,23 +196,10 @@ int despread_bits(const float complex *samples, int num_chips,
     int off_q = sync->off_q;
     int phase = sync->phase;
 
-    /* Slice the whole chip buffer. */
-    int8_t *chip_i = (int8_t *)malloc((size_t)num_chips);
-    int8_t *chip_q = (int8_t *)malloc((size_t)num_chips);
-    if (!chip_i || !chip_q) { free(chip_i); free(chip_q); return -1; }
-
-    for (int k = 0; k < num_chips; k++) {
-        chip_i[k] = (__real__ samples[k] >= 0.0f) ? 1 : 0;
-        chip_q[k] = (__imag__ samples[k] >= 0.0f) ? 1 : 0;
-    }
-
-    /* Full-length PRN for message despreading. */
+    /* Full-length PRN for message despreading (raw, NOT predicted). */
     int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
     int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
-    if (!prn_i || !prn_q) {
-        free(chip_i); free(chip_q); free(prn_i); free(prn_q);
-        return -1;
-    }
+    if (!prn_i || !prn_q) { free(prn_i); free(prn_q); return -1; }
     despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_i);
     despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, prn_q);
 
@@ -173,37 +211,51 @@ int despread_bits(const float complex *samples, int num_chips,
             cs_q + DESPREAD_CHIPS_PER_BIT > num_chips)
             break;
 
-        const int8_t *ci = chip_i + cs_i;
-        const int8_t *cq = chip_q + cs_q;
-        const int8_t *pi = prn_i + k * DESPREAD_CHIPS_PER_BIT;
-        const int8_t *pq = prn_q + k * DESPREAD_CHIPS_PER_BIT;
+        /* Soft correlation: sum(re * (2*prn-1)) over 256 chips.
+         * The I/Q swap and inversion logic matches the original hard-slicer
+         * (see git history), using raw PRN_i / PRN_q directly. */
+        float corr_i = 0.0f, corr_q = 0.0f;
+        for (int c = 0; c < DESPREAD_CHIPS_PER_BIT; c++) {
+            float exp_i = 2.0f * (float)prn_i[k * DESPREAD_CHIPS_PER_BIT + c] - 1.0f;
+            float exp_q = 2.0f * (float)prn_q[k * DESPREAD_CHIPS_PER_BIT + c] - 1.0f;
 
-        int m_i, m_q;
+            switch (phase) {
+            case 0:
+                corr_i += __real__ samples[cs_i + c] * exp_i;
+                corr_q += __imag__ samples[cs_q + c] * exp_q;
+                break;
+            case 1: /* 90°: I↔Q swap */
+                corr_i += __imag__ samples[cs_q + c] * exp_i;
+                corr_q += __real__ samples[cs_i + c] * exp_q;
+                break;
+            case 2: /* 180°: no swap */
+                corr_i += __real__ samples[cs_i + c] * exp_i;
+                corr_q += __imag__ samples[cs_q + c] * exp_q;
+                break;
+            default: /* 270°: I↔Q swap */
+                corr_i += __imag__ samples[cs_q + c] * exp_i;
+                corr_q += __real__ samples[cs_i + c] * exp_q;
+                break;
+            }
+        }
+
         uint8_t d_i, d_q;
         switch (phase) {
         case 0:
-            m_i = count_matches(ci, pi, DESPREAD_CHIPS_PER_BIT);
-            m_q = count_matches(cq, pq, DESPREAD_CHIPS_PER_BIT);
-            d_i = (m_i > 128) ? 1 : 0;
-            d_q = (m_q > 128) ? 1 : 0;
+            d_i = (corr_i > 0.0f) ? 1 : 0;
+            d_q = (corr_q > 0.0f) ? 1 : 0;
             break;
         case 1:
-            m_i = count_matches(cq, pi, DESPREAD_CHIPS_PER_BIT);
-            m_q = count_matches(ci, pq, DESPREAD_CHIPS_PER_BIT);
-            d_i = (m_i > 128) ? 1 : 0;
-            d_q = (m_q > 128) ? 0 : 1;
+            d_i = (corr_i > 0.0f) ? 1 : 0;
+            d_q = (corr_q > 0.0f) ? 0 : 1;
             break;
         case 2:
-            m_i = count_matches(ci, pi, DESPREAD_CHIPS_PER_BIT);
-            m_q = count_matches(cq, pq, DESPREAD_CHIPS_PER_BIT);
-            d_i = (m_i > 128) ? 0 : 1;
-            d_q = (m_q > 128) ? 0 : 1;
+            d_i = (corr_i > 0.0f) ? 0 : 1;
+            d_q = (corr_q > 0.0f) ? 0 : 1;
             break;
-        default: /* 3 (270°) */
-            m_i = count_matches(cq, pi, DESPREAD_CHIPS_PER_BIT);
-            m_q = count_matches(ci, pq, DESPREAD_CHIPS_PER_BIT);
-            d_i = (m_i > 128) ? 0 : 1;
-            d_q = (m_q > 128) ? 1 : 0;
+        default: /* 3 */
+            d_i = (corr_i > 0.0f) ? 0 : 1;
+            d_q = (corr_q > 0.0f) ? 1 : 0;
             break;
         }
 
@@ -214,7 +266,7 @@ int despread_bits(const float complex *samples, int num_chips,
         }
     }
 
-    free(chip_i); free(chip_q); free(prn_i); free(prn_q);
+    free(prn_i); free(prn_q);
     return (out_idx == DESPREAD_OUTPUT_BITS) ? 0 : -1;
 }
 

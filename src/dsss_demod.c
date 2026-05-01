@@ -236,20 +236,25 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     if (ota_buffer == NULL || output_bits == NULL)
         return -1;
-    if (sps != DSSS_SPS) {
-        fprintf(stderr, "[dsss_demod] sps=%d not supported (need %d)\n",
-                sps, DSSS_SPS);
+    if (sps < 4 || fs <= 0.0f) {
+        fprintf(stderr, "[dsss_demod] invalid sps=%d or fs=%.0f\n",
+                sps, (double)fs);
         return -1;
     }
-    if (fs != (float)DSSS_SAMP_RATE_HZ) {
-        fprintf(stderr, "[dsss_demod] fs=%.0f Hz not supported (need %d)\n",
-                (double)fs, DSSS_SAMP_RATE_HZ);
-        return -1;
+    {
+        float chip_rate = fs / (float)sps;
+        if (fabsf(chip_rate - 38400.0f) > 100.0f) {
+            fprintf(stderr,
+                    "[dsss_demod] chip rate %.0f Hz out of range "
+                    "(need ~38400 Hz). fs=%.0f sps=%d\n",
+                    (double)chip_rate, (double)fs, sps);
+            return -1;
+        }
     }
-    /* Need at least one full burst for a sensible decode. */
-    if (buffer_length < (size_t)DSSS_SAMP_RATE_HZ) {
-        fprintf(stderr, "[dsss_demod] buffer too short (%zu < %d samples)\n",
-                buffer_length, DSSS_SAMP_RATE_HZ);
+    /* Need at least one full burst for a sensible decode (~1 s). */
+    if (buffer_length < (size_t)fs) {
+        fprintf(stderr, "[dsss_demod] buffer too short (%zu < %.0f samples)\n",
+                buffer_length, (double)fs);
         return -1;
     }
 
@@ -266,7 +271,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     size_t N = buffer_length;
     size_t chip_buf = N / (size_t)sps + 2;
 
-    taps        = (float *)malloc(1024 * sizeof(float));
+    taps        = (float *)malloc((size_t)(11 * sps + 2) * sizeof(float));
     delayed     = (float complex *)malloc(N * sizeof(float complex));
     post_rrc    = (float complex *)malloc(N * sizeof(float complex));
     post_dec    = (float complex *)malloc(chip_buf * sizeof(float complex));
@@ -279,13 +284,14 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 2. Delay Q channel by SPS/2 samples (OQPSK alignment).
      * --------------------------------------------------------------- */
+    int oqpsk_delay = sps / 2;
     for (size_t t = 0; t < N; t++) {
         float ir = __real__ ota_buffer[t];
         float qi;
-        if (t < (size_t)SGB_OQPSK_DELAY)
+        if (t < (size_t)oqpsk_delay)
             qi = 0.0f;
         else
-            qi = __imag__ ota_buffer[t - SGB_OQPSK_DELAY];
+            qi = __imag__ ota_buffer[t - (size_t)oqpsk_delay];
         delayed[t] = ir + I * qi;
     }
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
@@ -296,7 +302,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
     int   coarse_phi = -1;
     float coarse_hz  = 0.0f;
     {
-        coarse_hz = coarse_freq_fft(NULL, 0, (float)DSSS_CHIP_RATE,
+        float chip_rate = fs / (float)sps;
+        coarse_hz = coarse_freq_fft(NULL, 0, chip_rate,
                                      delayed, N, sps, &coarse_phi);
         if (fabsf(coarse_hz) > 1.0f) {
             fprintf(stderr,
@@ -310,18 +317,21 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 4. RRC matched filter (on frequency-corrected signal).
      * --------------------------------------------------------------- */
-    int ntaps = rrc_compute_taps(SGB_RRC_GAIN,
-                                 (float)DSSS_SAMP_RATE_HZ,
-                                 (float)DSSS_CHIP_RATE,
-                                 SGB_RRC_ALPHA,
-                                 SGB_RRC_NTAPS_REQ,
-                                 taps);
+    {
+        float chip_rate = fs / (float)sps;
+        int ntaps = rrc_compute_taps(SGB_RRC_GAIN,
+                                     fs,
+                                     chip_rate,
+                                     SGB_RRC_ALPHA,
+                                     11 * sps,
+                                     taps);
     if (ntaps <= 0) {
         fprintf(stderr, "[dsss_demod] rrc_compute_taps failed\n");
         goto cleanup;
     }
     rrc_filter_complex(delayed, N, taps, ntaps, post_rrc);
     dump_complex("/tmp/c_post_rrc.bin", post_rrc, N);
+    }
 
     /* ---------------------------------------------------------------
      * 5. Decimate at the best phase, Costas, despread.

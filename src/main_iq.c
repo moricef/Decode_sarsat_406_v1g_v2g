@@ -157,9 +157,22 @@ int main(int argc, char *argv[]) {
     printf("\n");
     printf("=== LOADING IQ FILE ===\n");
 
-    /* Load IQ samples. 2.4576 MHz × 1 s = 2,457,600; the modulator emits
-     * 32 extra samples (Q-tail), so allow a small margin. */
-    size_t required_samples = 2457700;
+    /* Default to 2.4576 MHz if no -s given; override with manual_sample_rate. */
+    float fs = (manual_sample_rate > 0.0f) ? manual_sample_rate : 2457600.0f;
+    int sps = (int)(fs / 38400.0f + 0.5f);
+    if (fabsf(fs / (float)sps - 38400.0f) > 5.0f) {
+        fprintf(stderr,
+                "ERROR: sample rate %.0f Hz does not yield integer SPS "
+                "(fs/38400 = %.3f). Resample first.\n",
+                (double)fs, (double)(fs / 38400.0f));
+        return 1;
+    }
+    printf("Sample rate: %.0f Hz, SPS=%d, chip rate=38400 Hz\n", (double)fs, sps);
+
+    /* Allocate ~1.1 s of data (enough for the 1.0 s burst + margin). */
+    size_t required_samples = (size_t)(fs * 1.1f);
+    /* Align to a multiple of sps to avoid partial stride at buffer end. */
+    required_samples += (size_t)sps - (required_samples % (size_t)sps);
     float complex *iq_buffer = calloc(required_samples, sizeof(float complex));
     if (!iq_buffer) {
         fprintf(stderr, "ERROR: Cannot allocate IQ buffer\n");
@@ -176,9 +189,9 @@ int main(int argc, char *argv[]) {
     size_t samples_read = fread(iq_buffer, sizeof(float complex), required_samples, fp);
     fclose(fp);
 
-    if (samples_read < 2400000) {
-        fprintf(stderr, "ERROR: File has only %zu samples (need >= 2.4 M)\n",
-                samples_read);
+    if (samples_read < (size_t)fs) {
+        fprintf(stderr, "ERROR: File has only %zu samples (need >= %.0f)\n",
+                samples_read, (double)fs);
         free(iq_buffer);
         return 1;
     }
@@ -192,7 +205,7 @@ int main(int argc, char *argv[]) {
 
     /* Pass the full allocated buffer (zero-padded tail past samples_read) so
      * symbol_sync can produce the extra chip sample needed when off_Q != 0. */
-    int ret = dsss_receive_burst(iq_buffer, required_samples, 64, 2457600.0, 0, output_bits);
+    int ret = dsss_receive_burst(iq_buffer, required_samples, sps, fs, 0, output_bits);
     free(iq_buffer);
 
     if (ret == -2) {
@@ -200,7 +213,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "\nPossible causes:\n");
         fprintf(stderr, "  - Signal too weak (low SNR)\n");
         fprintf(stderr, "  - Large frequency offset (>12 kHz)\n");
-        fprintf(stderr, "  - Wrong sample rate (expected: 2.5 MHz)\n");
+        fprintf(stderr, "  - Wrong sample rate (use -s to specify)\n");
         fprintf(stderr, "  - Insufficient samples (need ~2.5M for 1.0 sec)\n");
         return 2;
     }

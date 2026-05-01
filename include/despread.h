@@ -7,16 +7,16 @@
  *                                 chip_Q = (Im >= 0) ? 1 : 0.)
  * Output: 250 message bits interleaved I[0],Q[0],I[1],Q[1],...,I[124],Q[124]
  *
- * Algorithm (from validated GR Python despreader):
+ * Algorithm (soft-correlation, validated against GR Python despreader):
  *   1. Generate PRN_I (seed 0x000001) and PRN_Q (seed 0x1AC1FC), each 38400 chips.
- *   2. Sync — 2 passes:
+ *   2. Sync — 2 passes with soft complex correlation:
  *        Pass A: search offset_I in [0,200) and Costas phase in {0,90,180,270}
- *                maximizing match count vs. preamble prediction on the I channel.
+ *                maximizing dot(chip_I, expected_I) over 6400 preamble chips.
  *        Pass B: with phase fixed, search offset_Q in [offset_I-5, offset_I+5]
- *                maximizing match count vs. preamble prediction on the Q channel.
- *      Threshold: 85% of the 6400-chip preamble per channel.
- *   3. Despread bits 25..149: per-bit majority over 256 chips (using the 4-phase
- *      formulas with possible I<->Q swap and inversions).
+ *                maximizing dot(chip_Q, expected_Q) over 6400 preamble chips.
+ *      Threshold: peak-to-mean correlation ratio >= 2.5.
+ *   3. Despread bits 25..149: per-bit soft correlation over 256 chips,
+ *      decision by sign of the accumulated dot product.
  */
 
 #ifndef DESPREAD_H
@@ -36,7 +36,7 @@
 #define DESPREAD_TOTAL_BITS       150      /* per channel */
 #define DESPREAD_PREAMBLE_CHIPS   (DESPREAD_PREAMBLE_BITS * DESPREAD_CHIPS_PER_BIT)
 #define DESPREAD_SYNC_RANGE       200
-#define DESPREAD_SYNC_THRESHOLD   0.75f
+#define DESPREAD_SYNC_THRESHOLD   2.8f   /* combined z-score sqrt(z_i²+z_q²) */
 #define DESPREAD_OUTPUT_BITS      250      /* 125 I + 125 Q interleaved */
 
 /**
@@ -53,13 +53,18 @@ void despread_gen_prn(uint32_t seed, int length, int8_t *out);
 
 /**
  * @brief Preamble sync result.
+ *
+ * off_i/off_q  : chip offset for I/Q channels.
+ * phase        : Costas ambiguity 0..3.
+ * score_i/q    : soft-correlation peak-to-mean ratio × 100
+ *                (e.g. 350 = 3.5× above mean).
  */
 typedef struct {
     int off_i;   /* chip offset for I channel */
     int off_q;   /* chip offset for Q channel */
     int phase;   /* Costas ambiguity 0..3 */
-    int score_i; /* preamble I match count (6400 max) */
-    int score_q; /* preamble Q match count (6400 max) */
+    int score_i; /* peak-to-mean ratio × 100 */
+    int score_q; /* peak-to-mean ratio × 100 */
 } despread_sync_t;
 
 /**
