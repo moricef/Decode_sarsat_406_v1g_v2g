@@ -37,12 +37,10 @@
 #define SGB_COSTAS_BW        0.0628f
 #define SGB_OQPSK_DELAY      (DSSS_SPS / 2)    /* 32 samples */
 
-/* Coarse frequency sweep. */
-#define COARSE_PREAMBLE_CHIPS 6400
-#define COARSE_SWEEP_MIN_HZ  -25000.0f
-#define COARSE_SWEEP_MAX_HZ   25000.0f
-#define COARSE_SWEEP_STEP_HZ  400.0f
-#define COARSE_MIN_CORR_PCT   0.65f  /* require ≥65% preamble match to trust */
+/* Coarse frequency estimator (FFT on modulation-stripped preamble). */
+#define COARSE_FFT_N           8192   /* radix-2, ~4.7 Hz bin at 38.4 kHz chip rate */
+#define COARSE_PREAMBLE_CHIPS  6400   /* 25 bits × 256 chips */
+#define COARSE_PEAK_THRESH     15.0f  /* peak-to-mean ratio for valid detection */
 
 #ifdef DSSS_DEBUG_DUMP
 static void dump_complex(const char *path, const float complex *p, size_t n)
@@ -54,80 +52,158 @@ static void dump_complex(const char *path, const float complex *p, size_t n)
 #define dump_complex(p, x, n) ((void)0)
 #endif
 
-/* -------- frequency sweep on preamble -----------------------------------
+/* -------- radix-2 FFT (in-place, float complex) --------------------------- */
+static void fft_radix2(float complex *x, int n, int invert)
+{
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { float complex t = x[i]; x[i] = x[j]; x[j] = t; }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        float a = (float)(M_TWOPI / (double)len) * (invert ? -1.0f : 1.0f);
+        float complex wlen = cosf(a) - sinf(a) * I;
+        for (int i = 0; i < n; i += len) {
+            float complex w = 1.0f;
+            for (int j = 0; j < len / 2; j++) {
+                float complex u = x[i + j];
+                float complex v = x[i + j + len / 2] * w;
+                x[i + j]           = u + v;
+                x[i + j + len / 2] = u - v;
+                w *= wlen;
+            }
+        }
+    }
+    if (invert) {
+        float inv = 1.0f / (float)n;
+        for (int i = 0; i < n; i++) x[i] *= inv;
+    }
+}
+
+/* -------- coarse frequency estimator (FFT on stripped preamble) ---------
  *
- * Tests candidate frequency offsets by applying the correction to the
- * chip-rate samples, hard-slicing to {0,1}, then correlating the I-channel
- * preamble against NOT(PRN_I) — the same logic the despreader uses.
- * Returns the offset that maximises the chip match count.
+ * For each decimation phase and each Costas phase, multiplies the received
+ * preamble chips by the conjugate of the expected (±1 ± j) pattern, which
+ * strips the DSSS modulation.  An FFT on the residue reveals a tone at the
+ * carrier offset with ~4.7 Hz resolution.
  * ----------------------------------------------------------------------- */
 
-static float coarse_freq_sweep(const float complex *chips, int n_chips,
-                                float chip_rate)
+static float coarse_freq_fft(const float complex *chips, int n_chips,
+                              float chip_rate,
+                              const float complex *raw,
+                              size_t raw_len, int sps,
+                              int *out_phi)
 {
-    if (n_chips < COARSE_PREAMBLE_CHIPS || chips == NULL)
+    if (raw == NULL || raw_len < (size_t)(COARSE_PREAMBLE_CHIPS * sps))
         return 0.0f;
+    (void)chips; (void)n_chips;
 
-    /* Generate NOT(PRN_I) for preamble correlation (phase 0°, data=0). */
-    int8_t *npi = (int8_t *)malloc((size_t)COARSE_PREAMBLE_CHIPS);
-    if (!npi) return 0.0f;
-    despread_gen_prn(DESPREAD_PRN_SEED_I, COARSE_PREAMBLE_CHIPS, npi);
-    for (int i = 0; i < COARSE_PREAMBLE_CHIPS; i++)
-        npi[i] = (int8_t)(1 - npi[i]);  /* NOT(PRN_I) */
+    int8_t *prn_i = (int8_t *)malloc((size_t)COARSE_PREAMBLE_CHIPS);
+    int8_t *prn_q = (int8_t *)malloc((size_t)COARSE_PREAMBLE_CHIPS);
+    if (!prn_i || !prn_q) { free(prn_i); free(prn_q); return 0.0f; }
+    despread_gen_prn(DESPREAD_PRN_SEED_I, COARSE_PREAMBLE_CHIPS, prn_i);
+    despread_gen_prn(DESPREAD_PRN_SEED_Q, COARSE_PREAMBLE_CHIPS, prn_q);
 
-    float  *corrected_re = (float *)malloc((size_t)COARSE_PREAMBLE_CHIPS * sizeof(float));
-    float  *corrected_im = (float *)malloc((size_t)COARSE_PREAMBLE_CHIPS * sizeof(float));
-    if (!corrected_re || !corrected_im) {
-        free(npi); free(corrected_re); free(corrected_im);
+    float complex *fft_buf = (float complex *)malloc(
+        (size_t)COARSE_FFT_N * sizeof(float complex));
+    float complex *phase_chips = (float complex *)malloc(
+        (size_t)COARSE_PREAMBLE_CHIPS * sizeof(float complex));
+    if (!fft_buf || !phase_chips) {
+        free(prn_i); free(prn_q); free(fft_buf); free(phase_chips);
         return 0.0f;
     }
 
-    int    best_score = 0;
-    float  best_hz    = 0.0f;
-    int    n_steps    = (int)((COARSE_SWEEP_MAX_HZ - COARSE_SWEEP_MIN_HZ)
-                              / COARSE_SWEEP_STEP_HZ) + 1;
+    float best_hz    = 0.0f;
+    float best_ratio = 0.0f;
+    int   best_phi   = 0;
 
-    for (int s = 0; s < n_steps; s++) {
-        float f_hz = COARSE_SWEEP_MIN_HZ + (float)s * COARSE_SWEEP_STEP_HZ;
+    for (int pi = 0; pi < sps; pi++) {
+        size_t n_avail = 0;
+        for (size_t i = (size_t)pi;
+             i < raw_len && n_avail < (size_t)COARSE_PREAMBLE_CHIPS;
+             i += (size_t)sps)
+            phase_chips[n_avail++] = raw[i];
 
-        /* Apply frequency correction: multiply by exp(-j*2π*f*k/chip_rate) */
-        for (int k = 0; k < COARSE_PREAMBLE_CHIPS; k++) {
-            float phase = -(M_TWOPI * f_hz * (float)k / chip_rate);
-            float c = cosf(phase);
-            float si = sinf(phase);
-            float re = __real__ chips[k];
-            float im = __imag__ chips[k];
-            corrected_re[k] = re * c - im * si;
-            corrected_im[k] = re * si + im * c;
-        }
+        if (n_avail < (size_t)COARSE_PREAMBLE_CHIPS)
+            continue;
 
-        /* Hard-slice I channel and correlate against NOT(PRN_I). */
-        int score = 0;
-        for (int k = 0; k < COARSE_PREAMBLE_CHIPS; k++) {
-            int chip = (corrected_re[k] >= 0.0f) ? 1 : 0;
-            if (chip == npi[k]) score++;
-        }
+        for (int p = 0; p < 4; p++) {
+            float complex dc_sum = 0.0f;
+            for (int k = 0; k < COARSE_FFT_N; k++) {
+                if (k < COARSE_PREAMBLE_CHIPS) {
+                    float ie, qe;
+                    switch (p) {
+                    case 0: ie = 1.0f-2.0f*prn_i[k]; qe = 1.0f-2.0f*prn_q[k]; break;
+                    case 1: ie = 1.0f-2.0f*prn_q[k]; qe = -(1.0f-2.0f*prn_i[k]); break;
+                    case 2: ie = -(1.0f-2.0f*prn_i[k]); qe = -(1.0f-2.0f*prn_q[k]); break;
+                    default:ie = -(1.0f-2.0f*prn_q[k]); qe = 1.0f-2.0f*prn_i[k]; break;
+                    }
+                    fft_buf[k] = phase_chips[k] * (ie - qe * I);
+                    dc_sum += fft_buf[k];
+                } else {
+                    fft_buf[k] = 0.0f;
+                }
+            }
 
-        if (score > best_score) {
-            best_score = score;
-            best_hz    = f_hz;
+            float complex dc_mean = dc_sum / (float)COARSE_PREAMBLE_CHIPS;
+            for (int k = 0; k < COARSE_PREAMBLE_CHIPS; k++)
+                fft_buf[k] -= dc_mean;
+
+            fft_radix2(fft_buf, COARSE_FFT_N, 0);
+            for (int i = 0; i < COARSE_FFT_N; i++) {
+                float re = __real__ fft_buf[i], im = __imag__ fft_buf[i];
+                __real__ fft_buf[i] = re * re + im * im;
+            }
+
+            float peak_mag = 0.0f;
+            int   peak_bin = 0;
+            float noise_sum = 0.0f;
+            int   noise_cnt = 0;
+            int   dc_guard = 30;
+
+            for (int i = 0; i < COARSE_FFT_N / 2; i++) {
+                float mag = __real__ fft_buf[i];
+                if (i >= dc_guard) {
+                    if (mag > peak_mag) { peak_mag = mag; peak_bin = i; }
+                    noise_sum += mag; noise_cnt++;
+                }
+            }
+            float noise_mean = noise_cnt > 0 ? noise_sum / (float)noise_cnt : 1e-10f;
+            float ratio = peak_mag / noise_mean;
+
+            /* Quadratic interpolation for sub-bin accuracy. */
+            float bin_f = (float)peak_bin;
+            if (peak_bin > dc_guard && peak_bin < COARSE_FFT_N / 2 - 1) {
+                float L = __real__ fft_buf[peak_bin - 1];
+                float C = peak_mag;
+                float R = __real__ fft_buf[peak_bin + 1];
+                float denom = 2.0f * C - L - R;
+                if (denom > 1e-10f)
+                    bin_f += 0.5f * (R - L) / denom;
+            }
+            float est_hz = bin_f * chip_rate / (float)COARSE_FFT_N;
+
+            if (ratio > best_ratio) {
+                best_ratio = ratio;
+                best_hz = est_hz;
+                best_phi = pi;
+            }
         }
     }
 
-    free(npi);
-    free(corrected_re);
-    free(corrected_im);
+    free(prn_i); free(prn_q); free(fft_buf); free(phase_chips);
 
-    float pct = (float)best_score / (float)COARSE_PREAMBLE_CHIPS;
     fprintf(stderr,
-            "[dsss_demod] coarse sweep: best offset %.0f Hz, "
-            "preamble corr %.1f%% (threshold %.0f%%)\n",
-            (double)best_hz, (double)(100.0f * pct),
-            (double)(100.0f * COARSE_MIN_CORR_PCT));
+            "[dsss_demod] coarse fft: phi=%d, offset %.0f Hz, "
+            "peak/noise %.1f (thresh %.1f)\n",
+            best_phi, (double)best_hz, (double)best_ratio,
+            (double)COARSE_PEAK_THRESH);
 
-    if (pct < COARSE_MIN_CORR_PCT)
-        return 0.0f;  /* sweep didn't find a credible tone → likely same clock */
+    if (best_ratio < COARSE_PEAK_THRESH)
+        return 0.0f;
 
+    *out_phi = best_phi;
     return best_hz;
 }
 
@@ -182,11 +258,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
     float complex *delayed = NULL;
     float complex *post_rrc = NULL;
     float complex *post_dec = NULL;
-    float complex *post_coarse = NULL;
     float complex *post_costas = NULL;
 
     /* ---------------------------------------------------------------
-     * 1. Allocate per-stage buffers (offline, single big burst).
+     * 1. Allocate per-stage buffers.
      * --------------------------------------------------------------- */
     size_t N = buffer_length;
     size_t chip_buf = N / (size_t)sps + 2;
@@ -195,16 +270,14 @@ int dsss_receive_burst(const float complex *ota_buffer,
     delayed     = (float complex *)malloc(N * sizeof(float complex));
     post_rrc    = (float complex *)malloc(N * sizeof(float complex));
     post_dec    = (float complex *)malloc(chip_buf * sizeof(float complex));
-    post_coarse = (float complex *)malloc(chip_buf * sizeof(float complex));
     post_costas = (float complex *)malloc(chip_buf * sizeof(float complex));
-    if (!taps || !delayed || !post_rrc || !post_dec || !post_coarse || !post_costas) {
+    if (!taps || !delayed || !post_rrc || !post_dec || !post_costas) {
         fprintf(stderr, "[dsss_demod] allocation failure\n");
         goto cleanup;
     }
 
     /* ---------------------------------------------------------------
      * 2. Delay Q channel by SPS/2 samples (OQPSK alignment).
-     *    delayed[t] = real(input[t]) + j * imag(input[t - 32])
      * --------------------------------------------------------------- */
     for (size_t t = 0; t < N; t++) {
         float ir = __real__ ota_buffer[t];
@@ -218,7 +291,24 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
-     * 3. RRC matched filter (taps identical to GR firdes).
+     * 3. Coarse frequency/phase estimation (FFT on raw delayed signal).
+     * --------------------------------------------------------------- */
+    int   coarse_phi = -1;
+    float coarse_hz  = 0.0f;
+    {
+        coarse_hz = coarse_freq_fft(NULL, 0, (float)DSSS_CHIP_RATE,
+                                     delayed, N, sps, &coarse_phi);
+        if (fabsf(coarse_hz) > 1.0f) {
+            fprintf(stderr,
+                    "[dsss_demod] coarse offset = %.0f Hz, "
+                    "raw phi=%d, correcting before RRC\n",
+                    (double)coarse_hz, coarse_phi);
+            apply_freq_correction(delayed, (int)N, coarse_hz, (float)fs);
+        }
+    }
+
+    /* ---------------------------------------------------------------
+     * 4. RRC matched filter (on frequency-corrected signal).
      * --------------------------------------------------------------- */
     int ntaps = rrc_compute_taps(SGB_RRC_GAIN,
                                  (float)DSSS_SAMP_RATE_HZ,
@@ -234,45 +324,38 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_rrc.bin", post_rrc, N);
 
     /* ---------------------------------------------------------------
-     * 4. Stage A symbol sync — find phase φ ∈ [0, sps) maximizing energy
-     *    on the preamble, decimate by sps starting at φ.
+     * 5. Decimate at the best phase, Costas, despread.
      * --------------------------------------------------------------- */
     size_t n_chips = 0;
-    int phi = symbol_sync_decimate(post_rrc, N, sps,
-                                   25 * 256,   /* preamble chips per channel */
+    int phi;
+    if (coarse_phi >= 0) {
+        /* Coarse FFT found the best decimation phase on the raw signal.
+         * The RRC filter is centred (zero group delay), so the same
+         * phase works on the post-RRC signal. */
+        phi = coarse_phi;
+        n_chips = 0;
+        for (size_t i = (size_t)phi; i < N; i += (size_t)sps)
+            post_dec[n_chips++] = post_rrc[i];
+    } else {
+        phi = symbol_sync_decimate(post_rrc, N, sps,
+                                   25 * 256,
                                    post_dec, &n_chips);
+    }
     if (phi < 0 || n_chips < 38000) {
         fprintf(stderr,
-                "[dsss_demod] symbol_sync failed (phi=%d, n_chips=%zu)\n",
+                "[dsss_demod] decimation failed (phi=%d, n_chips=%zu)\n",
                 phi, n_chips);
         goto cleanup;
     }
-    fprintf(stderr, "[dsss_demod] sync phi=%d, %zu chip samples\n", phi, n_chips);
+    fprintf(stderr, "[dsss_demod] decim phi=%d, %zu chip samples\n", phi, n_chips);
     dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
-     * 5. Coarse frequency offset (sweep preamble correlation vs freq).
-     * --------------------------------------------------------------- */
-    {
-        float coarse_hz = coarse_freq_sweep(post_dec, (int)n_chips,
-                                             (float)DSSS_CHIP_RATE);
-        if (fabsf(coarse_hz) > 1.0f) {
-            fprintf(stderr, "[dsss_demod] coarse offset = %.0f Hz, correcting\n",
-                    (double)coarse_hz);
-        }
-        /* Always copy (either corrected or pass-through) into post_coarse. */
-        memcpy(post_coarse, post_dec, n_chips * sizeof(float complex));
-        apply_freq_correction(post_coarse, (int)n_chips,
-                               coarse_hz, (float)DSSS_CHIP_RATE);
-        dump_complex("/tmp/c_post_coarse.bin", post_coarse, n_chips);
-    }
-
-    /* ---------------------------------------------------------------
-     * 6. Costas loop (QPSK).
+     * 5. Costas loop (QPSK) — tracks residual after coarse correction.
      * --------------------------------------------------------------- */
     costas4_t costas;
     costas4_init(&costas, SGB_COSTAS_BW);
-    costas4_run(&costas, post_coarse, post_costas, n_chips);
+    costas4_run(&costas, post_dec, post_costas, n_chips);
     dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
 
     /* ---------------------------------------------------------------
@@ -288,7 +371,6 @@ cleanup:
     free(delayed);
     free(post_rrc);
     free(post_dec);
-    free(post_coarse);
     free(post_costas);
     return rc;
 }
