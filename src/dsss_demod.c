@@ -351,15 +351,27 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
-     * 5. Costas loop (QPSK) — tracks residual after coarse correction.
+     * 6. Costas / pass-through decision.
+     *
+     *    When coarse FFT found an offset we corrected before the RRC,
+     *    the residual is ~5 Hz — too small for the Costas acquisition
+     *    transient to be worth it on a 166 ms preamble.  We feed the
+     *    decimated chips straight to the despreader.
+     *
+     *    When no coarse correction was applied (same-clock / synth)
+     *    the Costas runs as usual.
      * --------------------------------------------------------------- */
-    costas4_t costas;
-    costas4_init(&costas, SGB_COSTAS_BW);
-    costas4_run(&costas, post_dec, post_costas, n_chips);
+    if (fabsf(coarse_hz) > 1.0f) {
+        memcpy(post_costas, post_dec, n_chips * sizeof(float complex));
+    } else {
+        costas4_t costas;
+        costas4_init(&costas, SGB_COSTAS_BW);
+        costas4_run(&costas, post_dec, post_costas, n_chips);
+    }
     dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
 
     /* ---------------------------------------------------------------
-     * 7. Despread (slicer + sync + per-bit majority).
+     * 7. Despread.
      * --------------------------------------------------------------- */
     if (despread_burst(post_costas, (int)n_chips, output_bits) != 0)
         goto cleanup;
