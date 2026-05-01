@@ -227,7 +227,7 @@ static void apply_freq_correction(float complex *samples, int n,
 
 int dsss_receive_burst(const float complex *ota_buffer,
                        size_t buffer_length,
-                       int sps,
+                       float sps,
                        float fs,
                        int max_doppler,
                        uint8_t *output_bits)
@@ -236,18 +236,18 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     if (ota_buffer == NULL || output_bits == NULL)
         return -1;
-    if (sps < 4 || fs <= 0.0f) {
-        fprintf(stderr, "[dsss_demod] invalid sps=%d or fs=%.0f\n",
-                sps, (double)fs);
+    if (sps < 4.0f || fs <= 0.0f) {
+        fprintf(stderr, "[dsss_demod] invalid sps=%.3f or fs=%.0f\n",
+                (double)sps, (double)fs);
         return -1;
     }
     {
-        float chip_rate = fs / (float)sps;
+        float chip_rate = fs / sps;
         if (fabsf(chip_rate - 38400.0f) > 100.0f) {
             fprintf(stderr,
                     "[dsss_demod] chip rate %.0f Hz out of range "
-                    "(need ~38400 Hz). fs=%.0f sps=%d\n",
-                    (double)chip_rate, (double)fs, sps);
+                    "(need ~38400 Hz). fs=%.0f sps=%.3f\n",
+                    (double)chip_rate, (double)fs, (double)sps);
             return -1;
         }
     }
@@ -265,13 +265,16 @@ int dsss_receive_burst(const float complex *ota_buffer,
     float complex *post_dec = NULL;
     float complex *post_costas = NULL;
 
+    int isps = (int)(sps + 0.5f);
+    int exact_sps = (fabsf(sps - (float)isps) < 0.001f);
+
     /* ---------------------------------------------------------------
      * 1. Allocate per-stage buffers.
      * --------------------------------------------------------------- */
     size_t N = buffer_length;
-    size_t chip_buf = N / (size_t)sps + 2;
+    size_t chip_buf = (size_t)((float)N / sps) + 2;
 
-    taps        = (float *)malloc((size_t)(11 * sps + 2) * sizeof(float));
+    taps        = (float *)malloc((size_t)(11.0f * sps + 4.0f) * sizeof(float));
     delayed     = (float complex *)malloc(N * sizeof(float complex));
     post_rrc    = (float complex *)malloc(N * sizeof(float complex));
     post_dec    = (float complex *)malloc(chip_buf * sizeof(float complex));
@@ -284,7 +287,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 2. Delay Q channel by SPS/2 samples (OQPSK alignment).
      * --------------------------------------------------------------- */
-    int oqpsk_delay = sps / 2;
+    int oqpsk_delay = (int)(sps / 2.0f + 0.5f);
     for (size_t t = 0; t < N; t++) {
         float ir = __real__ ota_buffer[t];
         float qi;
@@ -302,35 +305,44 @@ int dsss_receive_burst(const float complex *ota_buffer,
     int   coarse_phi = -1;
     float coarse_hz  = 0.0f;
     {
-        float chip_rate = fs / (float)sps;
+        float chip_rate = fs / sps;
+        int   isps = (int)(sps + 0.5f);  /* rounded for coarse FFT */
         coarse_hz = coarse_freq_fft(NULL, 0, chip_rate,
-                                     delayed, N, sps, &coarse_phi);
+                                     delayed, N, isps, &coarse_phi);
         if (fabsf(coarse_hz) > 1.0f) {
             fprintf(stderr,
                     "[dsss_demod] coarse offset = %.0f Hz, "
                     "raw phi=%d, correcting before RRC\n",
                     (double)coarse_hz, coarse_phi);
-            apply_freq_correction(delayed, (int)N, coarse_hz, (float)fs);
+            apply_freq_correction(delayed, (int)N, coarse_hz, fs);
         }
     }
 
     /* ---------------------------------------------------------------
-     * 4. RRC matched filter (on frequency-corrected signal).
+     * 4. Matched filter (RRC for integer SPS, bypass for fractional).
      * --------------------------------------------------------------- */
-    {
-        float chip_rate = fs / (float)sps;
+    if (exact_sps) {
+        float chip_rate = fs / sps;
+        int ntaps_req = (int)(11.0f * sps + 0.5f);
         int ntaps = rrc_compute_taps(SGB_RRC_GAIN,
                                      fs,
                                      chip_rate,
                                      SGB_RRC_ALPHA,
-                                     11 * sps,
+                                     ntaps_req,
                                      taps);
-    if (ntaps <= 0) {
-        fprintf(stderr, "[dsss_demod] rrc_compute_taps failed\n");
-        goto cleanup;
-    }
-    rrc_filter_complex(delayed, N, taps, ntaps, post_rrc);
-    dump_complex("/tmp/c_post_rrc.bin", post_rrc, N);
+        if (ntaps <= 0) {
+            fprintf(stderr, "[dsss_demod] rrc_compute_taps failed\n");
+            goto cleanup;
+        }
+        rrc_filter_complex(delayed, N, taps, ntaps, post_rrc);
+        dump_complex("/tmp/c_post_rrc.bin", post_rrc, N);
+    } else {
+        /* Fractional SPS: skip RRC matched filter — the pulse shape
+         * is unknown (likely half-sine per T.018) and the RRC would
+         * be mismatched.  Direct decimation preserves more energy. */
+        memcpy(post_rrc, delayed, N * sizeof(float complex));
+        fprintf(stderr, "[dsss_demod] fractional sps=%.3f, bypassing RRC\n",
+                (double)sps);
     }
 
     /* ---------------------------------------------------------------
@@ -338,18 +350,63 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * --------------------------------------------------------------- */
     size_t n_chips = 0;
     int phi;
-    if (coarse_phi >= 0) {
-        /* Coarse FFT found the best decimation phase on the raw signal.
-         * The RRC filter is centred (zero group delay), so the same
-         * phase works on the post-RRC signal. */
+
+    if (coarse_phi >= 0 && exact_sps) {
         phi = coarse_phi;
         n_chips = 0;
-        for (size_t i = (size_t)phi; i < N; i += (size_t)sps)
-            post_dec[n_chips++] = post_rrc[i];
+        if (exact_sps) {
+            for (size_t i = (size_t)phi; i < N && n_chips < chip_buf;
+                 i += (size_t)isps)
+                post_dec[n_chips++] = post_rrc[i];
+        } else {
+            float pos = (float)phi;
+            while (pos < (float)N - sps && n_chips < chip_buf) {
+                size_t idx = (size_t)pos;
+                float frac = pos - (float)idx;
+                post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
+                                    + post_rrc[idx + 1] * frac;
+                pos += sps;
+            }
+        }
     } else {
-        phi = symbol_sync_decimate(post_rrc, N, sps,
-                                   25 * 256,
-                                   post_dec, &n_chips);
+        if (exact_sps) {
+            phi = symbol_sync_decimate(post_rrc, N, isps,
+                                       25 * 256,
+                                       post_dec, &n_chips);
+        } else {
+            /* Fractional SPS: search fractional phases with 0.5 step. */
+            float best_phi_f = 0.0f;
+            float best_energy = -1e30f;
+            for (float pi = 0.0f; pi < sps; pi += 0.5f) {
+                float pos = pi;
+                size_t cnt = 0;
+                float energy = 0.0f;
+                while (pos < (float)N - sps && cnt < (size_t)(25 * 256)) {
+                    size_t idx = (size_t)pos;
+                    float frac = pos - (float)idx;
+                    float complex v = post_rrc[idx] * (1.0f - frac)
+                                    + post_rrc[idx + 1] * frac;
+                    float re = __real__ v, im = __imag__ v;
+                    energy += re * re + im * im;
+                    pos += sps;
+                    cnt++;
+                }
+                if (cnt < (size_t)(25 * 256)) continue;
+                if (energy > best_energy) {
+                    best_energy = energy;
+                    best_phi_f = pi;
+                }
+            }
+            phi = (int)(best_phi_f + 0.5f);  /* for reporting */
+            float pos = best_phi_f;
+            while (pos < (float)N - sps && n_chips < chip_buf) {
+                size_t idx = (size_t)pos;
+                float frac = pos - (float)idx;
+                post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
+                                    + post_rrc[idx + 1] * frac;
+                pos += sps;
+            }
+        }
     }
     if (phi < 0 || n_chips < 38000) {
         fprintf(stderr,

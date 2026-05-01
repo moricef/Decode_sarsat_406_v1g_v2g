@@ -36,10 +36,10 @@
 /**
  * @brief Receive and demodulate one DSSS OQPSK burst from an IQ buffer.
  *
- * @param ota_buffer    Complex baseband samples (cf32, fs=2.4576 MHz).
- * @param buffer_length Sample count (≥ ~2,457,600 for one full burst).
- * @param sps           Samples per chip; must be 64 in v1.
- * @param fs            Sampling frequency in Hz; must be 2457600.0f in v1.
+ * @param ota_buffer    Complex baseband samples (cf32).
+ * @param buffer_length Sample count (≥ fs samples for one full burst).
+ * @param sps           Samples per chip; may be fractional (e.g. 46.875).
+ * @param fs            Sampling frequency in Hz.
  * @param max_doppler   Reserved (Doppler compensation deferred to Stage B).
  * @param output_bits   Output buffer of 250 bytes (each is a bit, 0 or 1)
  *                      ready to feed decode_2g().
@@ -48,7 +48,7 @@
  */
 int dsss_receive_burst(const float complex *ota_buffer,
                        size_t buffer_length,
-                       int sps,
+                       float sps,
                        float fs,
                        int max_doppler,
                        uint8_t *output_bits);

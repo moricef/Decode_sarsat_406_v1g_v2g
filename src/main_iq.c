@@ -95,7 +95,8 @@ static void print_bits_hex(const uint8_t *bits, int length) {
 int main(int argc, char *argv[]) {
     // Parse arguments
     const char *filename = NULL;
-    float manual_sample_rate = 0.0f;  // 0 = auto-detect
+    float manual_sample_rate = 0.0f;   // 0 = auto-detect
+    float manual_freq_offset = 0.0f;   // 0 = no manual correction
 
     if (argc < 2 || argc > 6) {
         print_usage(argv[0]);
@@ -117,9 +118,8 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
         } else if (strcmp(argv[i], "-f") == 0) {
-            /* -f <freq>: ignored in v1 (Stage A has no Doppler comp). */
             if (i + 1 < argc) {
-                (void)atof(argv[++i]);
+                manual_freq_offset = atof(argv[++i]);
             } else {
                 fprintf(stderr, "Error: -f requires frequency offset argument\n");
                 print_usage(argv[0]);
@@ -159,20 +159,22 @@ int main(int argc, char *argv[]) {
 
     /* Default to 2.4576 MHz if no -s given; override with manual_sample_rate. */
     float fs = (manual_sample_rate > 0.0f) ? manual_sample_rate : 2457600.0f;
-    int sps = (int)(fs / 38400.0f + 0.5f);
-    if (fabsf(fs / (float)sps - 38400.0f) > 5.0f) {
-        fprintf(stderr,
-                "ERROR: sample rate %.0f Hz does not yield integer SPS "
-                "(fs/38400 = %.3f). Resample first.\n",
-                (double)fs, (double)(fs / 38400.0f));
-        return 1;
+    float sps = fs / 38400.0f;
+    {
+        float chip_rate = fs / sps;
+        if (fabsf(chip_rate - 38400.0f) > 100.0f) {
+            fprintf(stderr,
+                    "ERROR: sample rate %.0f Hz gives chip rate %.0f Hz "
+                    "(need ~38400 Hz). Resample first.\n",
+                    (double)fs, (double)chip_rate);
+            return 1;
+        }
     }
-    printf("Sample rate: %.0f Hz, SPS=%d, chip rate=38400 Hz\n", (double)fs, sps);
+    printf("Sample rate: %.0f Hz, SPS=%.3f, chip rate=%.0f Hz\n",
+           (double)fs, (double)sps, (double)(fs / sps));
 
     /* Allocate ~1.1 s of data (enough for the 1.0 s burst + margin). */
     size_t required_samples = (size_t)(fs * 1.1f);
-    /* Align to a multiple of sps to avoid partial stride at buffer end. */
-    required_samples += (size_t)sps - (required_samples % (size_t)sps);
     float complex *iq_buffer = calloc(required_samples, sizeof(float complex));
     if (!iq_buffer) {
         fprintf(stderr, "ERROR: Cannot allocate IQ buffer\n");
@@ -198,8 +200,23 @@ int main(int argc, char *argv[]) {
 
     printf("Loaded %zu samples\n", samples_read);
 
+    /* Apply manual frequency correction if requested. */
+    if (fabsf(manual_freq_offset) > 0.5f) {
+        printf("Applying frequency correction: %.0f Hz\n",
+               (double)manual_freq_offset);
+        for (size_t k = 0; k < samples_read; k++) {
+            float phase = -2.0f * (float)M_PI * manual_freq_offset
+                          * (float)k / fs;
+            float c = cosf(phase);
+            float s = sinf(phase);
+            float re = __real__ iq_buffer[k];
+            float im = __imag__ iq_buffer[k];
+            iq_buffer[k] = (re * c - im * s) + (re * s + im * c) * I;
+        }
+    }
+
     // =========================================================================
-    // STEP 2: DEMODULATE WITH MATLAB CODER
+    // STEP 2: DEMODULATE
     // =========================================================================
     printf("\n=== DEMODULATION PROCESS ===\n");
 
