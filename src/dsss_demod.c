@@ -351,29 +351,63 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
-     * 6. Costas / pass-through.
-     *
-     *    When coarse FFT corrected an offset the residual is ~5 Hz —
-     *    the Costas acquisition transient (several ms) smears the
-     *    166 ms preamble more than the residual drift does.  We feed
-     *    the decimated chips directly to the despreader.
-     *
-     *    When no coarse correction was applied the Costas runs as usual.
+     * 6. Despread: sync on pre-Costas chips, then optionally run
+     *    Costas for the message portion.
      * --------------------------------------------------------------- */
-    if (fabsf(coarse_hz) > 1.0f) {
-        memcpy(post_costas, post_dec, n_chips * sizeof(float complex));
-    } else {
-        costas4_t costas;
-        costas4_init(&costas, SGB_COSTAS_BW);
-        costas4_run(&costas, post_dec, post_costas, n_chips);
-    }
-    dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
+    {
+        despread_sync_t sync;
+        int synced = despread_sync(post_dec, (int)n_chips, &sync);
 
-    /* ---------------------------------------------------------------
-     * 7. Despread.
-     * --------------------------------------------------------------- */
-    if (despread_burst(post_costas, (int)n_chips, output_bits) != 0)
-        goto cleanup;
+        if (fabsf(coarse_hz) > 1.0f && synced == 0) {
+            /* Coarse correction ran and preamble sync succeeded.
+             * Estimate initial Costas phase from preamble chips at
+             * the sync position, then engage Costas for the message
+             * portion to track the residual phase drift. */
+            int8_t *prn_i = (int8_t *)malloc(6400);
+            int8_t *prn_q = (int8_t *)malloc(6400);
+            if (prn_i && prn_q) {
+                despread_gen_prn(DESPREAD_PRN_SEED_I, 6400, prn_i);
+                despread_gen_prn(DESPREAD_PRN_SEED_Q, 6400, prn_q);
+                float complex sum = 0.0f;
+                int navg = (int)n_chips < 6400 ? (int)n_chips : 6400;
+                for (int k = 0; k < navg; k++) {
+                    float ie = 1.0f-2.0f*(float)prn_i[k];
+                    float qe = 1.0f-2.0f*(float)prn_q[k];
+                    sum += post_dec[k] * (ie - qe * I);
+                }
+                float init_phase = atan2f(__imag__ sum, __real__ sum);
+                free(prn_i); free(prn_q);
+
+                costas4_t costas;
+                costas4_init(&costas, SGB_COSTAS_BW);
+                costas.phase = init_phase;
+                costas.freq  = 0.0f;
+                costas4_run(&costas, post_dec, post_costas, n_chips);
+                dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
+
+                if (despread_bits(post_costas, (int)n_chips, &sync,
+                                  output_bits) != 0)
+                    goto cleanup;
+            } else {
+                free(prn_i); free(prn_q);
+                /* Fallback: despread directly. */
+                if (despread_bits(post_dec, (int)n_chips, &sync,
+                                  output_bits) != 0)
+                    goto cleanup;
+            }
+        } else if (synced == 0) {
+            /* No coarse correction — run Costas then full despread. */
+            costas4_t costas;
+            costas4_init(&costas, SGB_COSTAS_BW);
+            costas4_run(&costas, post_dec, post_costas, n_chips);
+            dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
+            if (despread_burst(post_costas, (int)n_chips, output_bits) != 0)
+                goto cleanup;
+        } else {
+            /* Sync failed. */
+            goto cleanup;
+        }
+    }
 
     rc = 0;
 

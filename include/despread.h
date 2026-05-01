@@ -52,16 +52,43 @@
 void despread_gen_prn(uint32_t seed, int length, int8_t *out);
 
 /**
+ * @brief Preamble sync result.
+ */
+typedef struct {
+    int off_i;   /* chip offset for I channel */
+    int off_q;   /* chip offset for Q channel */
+    int phase;   /* Costas ambiguity 0..3 */
+    int score_i; /* preamble I match count (6400 max) */
+    int score_q; /* preamble Q match count (6400 max) */
+} despread_sync_t;
+
+/**
+ * @brief Preamble sync: find off_i, off_q, phase from preamble chips.
+ *
+ * @return 0 on success, -1 if no sync above threshold.
+ */
+int despread_sync(const float complex *samples, int num_chips,
+                  despread_sync_t *sync);
+
+/**
+ * @brief Despread message bits using pre-computed sync parameters.
+ *
+ * @param sync   Sync result from despread_sync().
+ * @return 0 on success (250 bits written), -1 on error.
+ */
+int despread_bits(const float complex *samples, int num_chips,
+                  const despread_sync_t *sync,
+                  uint8_t *output_bits);
+
+/**
  * @brief Despread a chip-rate complex stream into 250 message bits.
  *
- * The input is the output of the Costas loop, sliced internally:
- *   chip_I[k] = (Re(samples[k]) >= 0) ? 1 : 0
- *   chip_Q[k] = (Im(samples[k]) >= 0) ? 1 : 0
+ * Convenience wrapper: calls despread_sync() then despread_bits().
  *
  * @param samples       Chip-rate complex samples (Costas output).
  * @param num_chips     Number of chip samples available.
  * @param output_bits   250 bits, one per uint8_t (value 0 or 1).
- * @return 0 on success, -1 if sync failed (preamble correlation < threshold).
+ * @return 0 on success, -1 if sync failed.
  */
 int despread_burst(const float complex *samples, int num_chips,
                    uint8_t *output_bits);

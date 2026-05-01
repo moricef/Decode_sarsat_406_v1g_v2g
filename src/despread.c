@@ -42,16 +42,110 @@ static void chip_not(const int8_t *src, int n, int8_t *dst)
     for (int i = 0; i < n; i++) dst[i] = (int8_t)(1 - src[i]);
 }
 
-int despread_burst(const float complex *samples, int num_chips,
-                   uint8_t *output_bits)
+int despread_sync(const float complex *samples, int num_chips,
+                  despread_sync_t *sync)
 {
-    if (samples == NULL || output_bits == NULL ||
+    if (samples == NULL || sync == NULL ||
         num_chips < DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE)
         return -1;
 
-    /* ------------------------------------------------------------
-     * 1. Slice into chip_I and chip_Q streams ({0, 1}).
-     * ------------------------------------------------------------ */
+    memset(sync, 0, sizeof(*sync));
+
+    /* Slice preamble region. */
+    int slice_len = num_chips;
+    if (slice_len > DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE)
+        slice_len = DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE;
+
+    int8_t *chip_i = (int8_t *)malloc((size_t)slice_len);
+    int8_t *chip_q = (int8_t *)malloc((size_t)slice_len);
+    if (!chip_i || !chip_q) { free(chip_i); free(chip_q); return -1; }
+
+    for (int k = 0; k < slice_len; k++) {
+        chip_i[k] = (__real__ samples[k] >= 0.0f) ? 1 : 0;
+        chip_q[k] = (__imag__ samples[k] >= 0.0f) ? 1 : 0;
+    }
+
+    /* PRN + predictions (preamble length only). */
+    int8_t *prn_i = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
+    int8_t *prn_q = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
+    int8_t *npi   = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
+    int8_t *npq   = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
+    if (!prn_i || !prn_q || !npi || !npq) {
+        free(chip_i); free(chip_q);
+        free(prn_i); free(prn_q); free(npi); free(npq);
+        return -1;
+    }
+    despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PREAMBLE_CHIPS, prn_i);
+    despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PREAMBLE_CHIPS, prn_q);
+    chip_not(prn_i, DESPREAD_PREAMBLE_CHIPS, npi);
+    chip_not(prn_q, DESPREAD_PREAMBLE_CHIPS, npq);
+
+    const int8_t *pred_i_tab[4] = { npi, prn_q, prn_i, npq };
+    const int8_t *pred_q_tab[4] = { npq, npi,   prn_q, prn_i };
+
+    /* Pass A — I channel. */
+    int search_hi = DESPREAD_SYNC_RANGE;
+    if (DESPREAD_PREAMBLE_CHIPS + search_hi > slice_len)
+        search_hi = slice_len - DESPREAD_PREAMBLE_CHIPS;
+
+    int best_i = -1, best_off_i = 0, best_phase = 0;
+    for (int off = 0; off < search_hi; off++) {
+        for (int p = 0; p < 4; p++) {
+            int s = count_matches(chip_i + off, pred_i_tab[p],
+                                  DESPREAD_PREAMBLE_CHIPS);
+            if (s > best_i) { best_i = s; best_off_i = off; best_phase = p; }
+        }
+    }
+
+    /* Pass B — Q channel. */
+    int best_q = -1, best_off_q = best_off_i;
+    int qlo = best_off_i - 5; if (qlo < 0) qlo = 0;
+    int qhi = best_off_i + 6; if (qhi > search_hi) qhi = search_hi;
+    for (int off = qlo; off < qhi; off++) {
+        int s = count_matches(chip_q + off, pred_q_tab[best_phase],
+                              DESPREAD_PREAMBLE_CHIPS);
+        if (s > best_q) { best_q = s; best_off_q = off; }
+    }
+
+    int thr = (int)(DESPREAD_SYNC_THRESHOLD * (float)DESPREAD_PREAMBLE_CHIPS);
+    if (best_i < thr || best_q < thr) {
+        fprintf(stderr,
+                "[despread] SYNC FAILED: I=%.1f%% Q=%.1f%% (need %.0f%% each)\n",
+                100.0f * best_i / DESPREAD_PREAMBLE_CHIPS,
+                100.0f * best_q / DESPREAD_PREAMBLE_CHIPS,
+                100.0f * DESPREAD_SYNC_THRESHOLD);
+        free(chip_i); free(chip_q); free(prn_i); free(prn_q); free(npi); free(npq);
+        return -1;
+    }
+
+    sync->off_i   = best_off_i;
+    sync->off_q   = best_off_q;
+    sync->phase   = best_phase;
+    sync->score_i = best_i;
+    sync->score_q = best_q;
+
+    fprintf(stderr,
+            "[despread] Synced: off_I=%d (%.1f%%), off_Q=%d (%.1f%%), phase=%d°\n",
+            best_off_i, 100.0f * best_i / DESPREAD_PREAMBLE_CHIPS,
+            best_off_q, 100.0f * best_q / DESPREAD_PREAMBLE_CHIPS,
+            best_phase * 90);
+
+    free(chip_i); free(chip_q); free(prn_i); free(prn_q); free(npi); free(npq);
+    return 0;
+}
+
+int despread_bits(const float complex *samples, int num_chips,
+                  const despread_sync_t *sync,
+                  uint8_t *output_bits)
+{
+    if (samples == NULL || sync == NULL || output_bits == NULL)
+        return -1;
+
+    int off_i = sync->off_i;
+    int off_q = sync->off_q;
+    int phase = sync->phase;
+
+    /* Slice the whole chip buffer. */
     int8_t *chip_i = (int8_t *)malloc((size_t)num_chips);
     int8_t *chip_q = (int8_t *)malloc((size_t)num_chips);
     if (!chip_i || !chip_q) { free(chip_i); free(chip_q); return -1; }
@@ -61,95 +155,16 @@ int despread_burst(const float complex *samples, int num_chips,
         chip_q[k] = (__imag__ samples[k] >= 0.0f) ? 1 : 0;
     }
 
-    /* ------------------------------------------------------------
-     * 2. Generate PRN_I and PRN_Q + their NOT versions.
-     * ------------------------------------------------------------ */
-    int8_t *prn_i  = (int8_t *)malloc(DESPREAD_PRN_LEN);
-    int8_t *prn_q  = (int8_t *)malloc(DESPREAD_PRN_LEN);
-    int8_t *npi    = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
-    int8_t *npq    = (int8_t *)malloc(DESPREAD_PREAMBLE_CHIPS);
-    if (!prn_i || !prn_q || !npi || !npq) {
-        free(chip_i); free(chip_q);
-        free(prn_i); free(prn_q); free(npi); free(npq);
+    /* Full-length PRN for message despreading. */
+    int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
+    int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
+    if (!prn_i || !prn_q) {
+        free(chip_i); free(chip_q); free(prn_i); free(prn_q);
         return -1;
     }
-
     despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_i);
     despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, prn_q);
-    chip_not(prn_i, DESPREAD_PREAMBLE_CHIPS, npi);
-    chip_not(prn_q, DESPREAD_PREAMBLE_CHIPS, npq);
 
-    /* Per-phase preamble predictions (data=0):
-     *   0°   : pred_I = NOT(PRN_I), pred_Q = NOT(PRN_Q)
-     *   90°  : pred_I = PRN_Q,      pred_Q = NOT(PRN_I)
-     *   180° : pred_I = PRN_I,      pred_Q = PRN_Q
-     *   270° : pred_I = NOT(PRN_Q), pred_Q = PRN_I
-     * Pointers reuse prn_i / prn_q / npi / npq. */
-    const int8_t *pred_i_tab[4] = { npi, prn_q, prn_i, npq };
-    const int8_t *pred_q_tab[4] = { npq, npi,   prn_q, prn_i };
-
-    /* ------------------------------------------------------------
-     * 3. Sync Pass A: find best (offset_i, phase) on I channel.
-     * ------------------------------------------------------------ */
-    int score_i = -1, off_i = 0, phase = 0;
-    int search_hi = DESPREAD_SYNC_RANGE;
-    if (DESPREAD_PREAMBLE_CHIPS + search_hi > num_chips)
-        search_hi = num_chips - DESPREAD_PREAMBLE_CHIPS;
-
-    for (int off = 0; off < search_hi; off++) {
-        for (int p = 0; p < 4; p++) {
-            int s = count_matches(chip_i + off, pred_i_tab[p],
-                                  DESPREAD_PREAMBLE_CHIPS);
-            if (s > score_i) { score_i = s; off_i = off; phase = p; }
-        }
-    }
-
-    /* Sync Pass B: with phase fixed, refine offset_q in [off_i-5, off_i+5]. */
-    int score_q = -1, off_q = off_i;
-    int qlo = off_i - 5; if (qlo < 0) qlo = 0;
-    int qhi = off_i + 6; if (qhi > search_hi) qhi = search_hi;
-    for (int off = qlo; off < qhi; off++) {
-        int s = count_matches(chip_q + off, pred_q_tab[phase],
-                              DESPREAD_PREAMBLE_CHIPS);
-        if (s > score_q) { score_q = s; off_q = off; }
-    }
-
-    int thr = (int)(DESPREAD_SYNC_THRESHOLD * (float)DESPREAD_PREAMBLE_CHIPS);
-    if (score_i < thr || score_q < thr) {
-        fprintf(stderr,
-                "[despread] SYNC FAILED: I=%.1f%% Q=%.1f%% (need %.0f%% each)\n",
-                100.0f * score_i / DESPREAD_PREAMBLE_CHIPS,
-                100.0f * score_q / DESPREAD_PREAMBLE_CHIPS,
-                100.0f * DESPREAD_SYNC_THRESHOLD);
-        free(chip_i); free(chip_q); free(prn_i); free(prn_q); free(npi); free(npq);
-        return -1;
-    }
-
-    fprintf(stderr,
-            "[despread] Synced: off_I=%d (%.1f%%), off_Q=%d (%.1f%%), phase=%d°\n",
-            off_i, 100.0f * score_i / DESPREAD_PREAMBLE_CHIPS,
-            off_q, 100.0f * score_q / DESPREAD_PREAMBLE_CHIPS,
-            phase * 90);
-
-    /* ------------------------------------------------------------
-     * 4. Despread bits 25..149 with the 4-phase formulas.
-     *    Per-bit majority match count over 256 chips:
-     *      m_i, m_q in {0..256}; threshold 128.
-     *
-     *    Per-phase mapping (from validated Python lines 144-156):
-     *      0°   : m_i=count(c_i==pi), m_q=count(c_q==pq)
-     *             d_i = 1 if m_i>128 else 0
-     *             d_q = 1 if m_q>128 else 0
-     *      90°  : m_i=count(c_q==pi), m_q=count(c_i==pq)
-     *             d_i = 1 if m_i>128 else 0
-     *             d_q = 0 if m_q>128 else 1
-     *      180° : m_i=count(c_i==pi), m_q=count(c_q==pq)
-     *             d_i = 0 if m_i>128 else 1
-     *             d_q = 0 if m_q>128 else 1
-     *      270° : m_i=count(c_q==pi), m_q=count(c_i==pq)
-     *             d_i = 0 if m_i>128 else 1
-     *             d_q = 1 if m_q>128 else 0
-     * ------------------------------------------------------------ */
     int out_idx = 0;
     for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
         int cs_i = off_i + k * DESPREAD_CHIPS_PER_BIT;
@@ -199,7 +214,15 @@ int despread_burst(const float complex *samples, int num_chips,
         }
     }
 
-    free(chip_i); free(chip_q); free(prn_i); free(prn_q); free(npi); free(npq);
-
+    free(chip_i); free(chip_q); free(prn_i); free(prn_q);
     return (out_idx == DESPREAD_OUTPUT_BITS) ? 0 : -1;
+}
+
+int despread_burst(const float complex *samples, int num_chips,
+                   uint8_t *output_bits)
+{
+    despread_sync_t sync;
+    if (despread_sync(samples, num_chips, &sync) != 0)
+        return -1;
+    return despread_bits(samples, num_chips, &sync, output_bits);
 }
