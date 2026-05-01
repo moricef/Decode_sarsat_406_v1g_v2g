@@ -1,39 +1,14 @@
 /**
  * @file main_iq.c
- * @brief Entry point for COSPAS-SARSAT 2G IQ file demodulation
+ * @brief COSPAS-SARSAT 2G IQ file demodulator entry point.
  *
- * ⚠️  WARNING: THIS DEMODULATOR IS NOT FUNCTIONAL ⚠️
+ * Reads float complex IQ, runs the DSSS OQPSK demodulator chain
+ * (dsss_demod.c), and passes the 250-bit output to the 2G decoder.
  *
- * Current Status: PAUSED - 55.3% bit accuracy (need >95%)
- * Date: 2025-10-19
+ * Usage:  ./dec406_iq <file> [-s sample_rate]
  *
- * This program will compile and run, but produces incorrect results.
- * See ETAT_PAUSE_DEMODULATEUR.md for complete bug analysis.
- *
- * Complete receiver chain:
- * 1. Load IQ file (.iq, .cfile format)
- * 2. DSSS/OQPSK demodulation → 300 bits (BUGGY - see dsss_demod.c)
- * 3. Extract payload (skip 50-bit preamble)
- * 4. Pass 250 bits to existing decoder
- * 5. Display results and statistics
- *
- * Usage:
- *   ./dec406_iq <filename.iq>
- *   ./dec406_iq <filename.cfile>
- *
- * Known Issues:
- * - Timing recovery incorrect (33k vs 38.4k symbols)
- * - Phase ambiguity tested on wrong data (spread vs despread)
- * - DSSS despreading low correlation (0.053 vs >0.7)
- * - Costas loop disabled due to divergence
- *
- * For operational workflow, see README_PAUSE.md:
- * - TX Generator (SARSAT_SGB): ✅ WORKS
- * - RX Decoder (dec406_v2g.c): ✅ WORKS
- * - IQ Demodulator (this file): ❌ DOES NOT WORK
- *
- * @author Collaborative development (2025)
- * @license Creative Commons CC BY-NC-SA
+ * Note: only the first ~1 s of the file is processed.  A sliding-
+ * window scan is needed for files with unknown burst timing.
  */
 
 #include <stdio.h>
