@@ -97,8 +97,10 @@ int main(int argc, char *argv[]) {
     const char *filename = NULL;
     float manual_sample_rate = 0.0f;   // 0 = auto-detect
     float manual_freq_offset = 0.0f;   // 0 = no manual correction
+    int input_uint8 = 0;               // flag for RTL-SDR uint8 format
+    int input_int16 = 0;               // flag for int16 interleaved format
 
-    if (argc < 2 || argc > 6) {
+    if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
@@ -125,6 +127,10 @@ int main(int argc, char *argv[]) {
                 print_usage(argv[0]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-u") == 0) {
+            input_uint8 = 1;
+        } else if (strcmp(argv[i], "-i") == 0) {
+            input_int16 = 1;
         } else {
             filename = argv[i];
         }
@@ -136,8 +142,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Accept any extension: .iq, .cfile, .sigmf-data, .raw — the loader
-     * just reads cf32_le interleaved samples. */
+    /* Input format: cf32 by default; -u for RTL-SDR uint8; -i for int16. */
 
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════════╗\n");
@@ -188,8 +193,37 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    size_t samples_read = fread(iq_buffer, sizeof(float complex), required_samples, fp);
-    fclose(fp);
+    size_t samples_read;
+    if (input_uint8) {
+        /* RTL-SDR uint8 interleaved I/Q, range 0-255, center 127.5 */
+        unsigned char *raw = (unsigned char *)malloc(required_samples * 2);
+        if (!raw) { fclose(fp); free(iq_buffer); return 1; }
+        size_t n = fread(raw, 2, required_samples, fp);
+        fclose(fp);
+        for (size_t k = 0; k < n; k++) {
+            float i_val = ((float)raw[2*k]     - 127.5f) / 127.5f;
+            float q_val = ((float)raw[2*k + 1] - 127.5f) / 127.5f;
+            iq_buffer[k] = i_val + I * q_val;
+        }
+        free(raw);
+        samples_read = n;
+    } else if (input_int16) {
+        /* int16 interleaved I/Q (e.g. CNES .raw files) */
+        short *raw = (short *)malloc(required_samples * 2 * sizeof(short));
+        if (!raw) { fclose(fp); free(iq_buffer); return 1; }
+        size_t n = fread(raw, sizeof(short) * 2, required_samples, fp);
+        fclose(fp);
+        for (size_t k = 0; k < n; k++) {
+            iq_buffer[k] = ((float)raw[2*k] / 32768.0f)
+                         + ((float)raw[2*k + 1] / 32768.0f) * I;
+        }
+        free(raw);
+        samples_read = n;
+    } else {
+        /* Default: float32 complex interleaved */
+        samples_read = fread(iq_buffer, sizeof(float complex), required_samples, fp);
+        fclose(fp);
+    }
 
     if (samples_read < (size_t)fs) {
         fprintf(stderr, "ERROR: File has only %zu samples (need >= %.0f)\n",
@@ -198,7 +232,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Loaded %zu samples\n", samples_read);
+    printf("Loaded %zu samples", samples_read);
+    if (input_uint8) printf(" (uint8→cf32)");
+    if (input_int16) printf(" (int16→cf32)");
+    printf("\n");
 
     /* Apply manual frequency correction if requested. */
     if (fabsf(manual_freq_offset) > 0.5f) {
