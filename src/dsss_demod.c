@@ -351,15 +351,14 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
-     * 6. Costas / pass-through decision.
+     * 6. Costas / pass-through.
      *
-     *    When coarse FFT found an offset we corrected before the RRC,
-     *    the residual is ~5 Hz — too small for the Costas acquisition
-     *    transient to be worth it on a 166 ms preamble.  We feed the
-     *    decimated chips straight to the despreader.
+     *    When coarse FFT corrected an offset the residual is ~5 Hz —
+     *    the Costas acquisition transient (several ms) smears the
+     *    166 ms preamble more than the residual drift does.  We feed
+     *    the decimated chips directly to the despreader.
      *
-     *    When no coarse correction was applied (same-clock / synth)
-     *    the Costas runs as usual.
+     *    When no coarse correction was applied the Costas runs as usual.
      * --------------------------------------------------------------- */
     if (fabsf(coarse_hz) > 1.0f) {
         memcpy(post_costas, post_dec, n_chips * sizeof(float complex));
