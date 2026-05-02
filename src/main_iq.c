@@ -19,6 +19,57 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#define BURST_BLK 1024
+
+static int cmp_float(const void *a, const void *b) {
+    float fa = *(const float *)a, fb = *(const float *)b;
+    return (fa > fb) - (fa < fb);
+}
+
+static size_t find_burst_start(const float complex *buf, size_t n) {
+    size_t nblk = n / BURST_BLK;
+    if (nblk < 8) return 0;
+
+    float *pwr = malloc(nblk * sizeof(float));
+    float *sorted = malloc(nblk * sizeof(float));
+    if (!pwr || !sorted) { free(pwr); free(sorted); return 0; }
+
+    for (size_t b = 0; b < nblk; b++) {
+        float s = 0.0f;
+        for (size_t j = 0; j < BURST_BLK; j++) {
+            float re = __real__ buf[b * BURST_BLK + j];
+            float im = __imag__ buf[b * BURST_BLK + j];
+            s += re * re + im * im;
+        }
+        pwr[b] = s / (float)BURST_BLK;
+    }
+
+    memcpy(sorted, pwr, nblk * sizeof(float));
+    qsort(sorted, nblk, sizeof(float), cmp_float);
+
+    float noise = sorted[nblk / 10];
+    float sig   = sorted[nblk * 9 / 10];
+    size_t result = 0;
+
+    if (noise > 0 && sig / noise > 3.0f) {
+        float thr = sqrtf(noise * sig);
+        for (size_t b = 0; b < nblk; b++) {
+            if (pwr[b] > thr) {
+                result = (b > 1 ? b - 1 : 0) * BURST_BLK;
+                fprintf(stderr,
+                        "[main_iq] burst at blk %zu (%.3f ms), "
+                        "trimming %zu samples  P10=%.1e P90=%.1e\n",
+                        b, (double)(result) / 2457600.0 * 1000.0,
+                        result, (double)noise, (double)sig);
+                break;
+            }
+        }
+    }
+
+    free(pwr); free(sorted);
+    return result;
+}
+
 static void print_usage(const char *p) {
     printf("Usage: %s <file> [-s rate] [-f freq] [-u] [-i]\n", p);
     printf("  -s  Sample rate (default 2457600)\n");
@@ -121,8 +172,9 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        if (dsss_receive_burst(buf, win, sps, fs, 0, out) == 0) {
-            printf("\r  Sync at t=%.2fs\n", off/fs);
+        size_t trim = find_burst_start(buf, n);
+        if (dsss_receive_burst(buf + trim, n - trim, sps, fs, 0, out) == 0) {
+            printf("\r  Sync at t=%.2fs\n", (double)(off + trim) / (double)fs);
             found++;
         }
     }
