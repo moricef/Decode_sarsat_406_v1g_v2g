@@ -26,8 +26,12 @@ static int cmp_float(const void *a, const void *b) {
     return (fa > fb) - (fa < fb);
 }
 
-static size_t find_burst_start(const float complex *buf, size_t n) {
-    size_t nblk = n / BURST_BLK;
+static size_t find_burst_start(const float complex *buf, size_t n, float fs) {
+    int dec = (int)(fs / 100000.0f + 0.5f);
+    if (dec < 2) dec = 2;
+    size_t nd = n / (size_t)dec;
+
+    size_t nblk = nd / BURST_BLK;
     if (nblk < 8) return 0;
 
     float *pwr = malloc(nblk * sizeof(float));
@@ -37,8 +41,13 @@ static size_t find_burst_start(const float complex *buf, size_t n) {
     for (size_t b = 0; b < nblk; b++) {
         float s = 0.0f;
         for (size_t j = 0; j < BURST_BLK; j++) {
-            float re = __real__ buf[b * BURST_BLK + j];
-            float im = __imag__ buf[b * BURST_BLK + j];
+            size_t dec_off = (b * BURST_BLK + j) * (size_t)dec;
+            float re = 0.0f, im = 0.0f;
+            for (int d = 0; d < dec; d++) {
+                re += __real__ buf[dec_off + (size_t)d];
+                im += __imag__ buf[dec_off + (size_t)d];
+            }
+            re /= (float)dec; im /= (float)dec;
             s += re * re + im * im;
         }
         pwr[b] = s / (float)BURST_BLK;
@@ -59,7 +68,7 @@ static size_t find_burst_start(const float complex *buf, size_t n) {
                 fprintf(stderr,
                         "[main_iq] burst at blk %zu (%.3f ms), "
                         "trimming %zu samples  P10=%.1e P90=%.1e\n",
-                        b, (double)(result) / 2457600.0 * 1000.0,
+                        b, (double)(result) / (double)fs * 1000.0,
                         result, (double)noise, (double)sig);
                 break;
             }
@@ -172,7 +181,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        size_t trim = find_burst_start(buf, n);
+        size_t trim = find_burst_start(buf, n, fs);
         if (dsss_receive_burst(buf + trim, n - trim, sps, fs, 0, out) == 0) {
             printf("\r  Sync at t=%.2fs\n", (double)(off + trim) / (double)fs);
             found++;
