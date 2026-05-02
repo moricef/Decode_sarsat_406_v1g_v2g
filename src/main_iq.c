@@ -28,7 +28,7 @@ static void print_usage(const char *p) {
 }
 
 static void print_hex(const uint8_t *bits, int len) {
-    printf("\n[DEBUG] Demodulated bits (hex, 63 chars):\n");
+    printf("\n=== Demodulated bits (hex, 63 chars) ===\n");
     if (len == 250) {
         for (int i = 0; i < 252; i += 4) {
             uint8_t n = 0;
@@ -131,7 +131,6 @@ int main(int argc, char *argv[]) {
     if (!found) { printf("\rNo SGB frame found.\n"); free(buf); return 2; }
 
     printf("\n%d windows synced — decoding last\n", found);
-    printf("✅ DEMODULATION SUCCESS\n");
     print_hex(out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     printf("\n=== FRAME DECODING ===\n");
     decode_beacon(out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
