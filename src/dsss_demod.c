@@ -272,13 +272,13 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * 1. Allocate per-stage buffers.
      * --------------------------------------------------------------- */
     size_t N = buffer_length;
-    size_t chip_buf = (size_t)((float)N / sps) + 2;
+    size_t chip_buf = (size_t)((float)N / sps) + DESPREAD_SYNC_RANGE + DESPREAD_CHIPS_PER_BIT;
 
     taps        = (float *)malloc((size_t)(11.0f * sps + 4.0f) * sizeof(float));
     delayed     = (float complex *)malloc(N * sizeof(float complex));
     post_rrc    = (float complex *)malloc(N * sizeof(float complex));
-    post_dec    = (float complex *)malloc(chip_buf * sizeof(float complex));
-    post_costas = (float complex *)malloc(chip_buf * sizeof(float complex));
+    post_dec    = (float complex *)calloc(chip_buf, sizeof(float complex));
+    post_costas = (float complex *)calloc(chip_buf, sizeof(float complex));
     if (!taps || !delayed || !post_rrc || !post_dec || !post_costas) {
         fprintf(stderr, "[dsss_demod] allocation failure\n");
         goto cleanup;
@@ -439,7 +439,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 7. Despread.
      * --------------------------------------------------------------- */
-    if (despread_burst(post_costas, (int)n_chips, output_bits) != 0)
+    if (despread_burst(post_costas, (int)chip_buf, output_bits) != 0)
         goto cleanup;
 
     rc = 0;
