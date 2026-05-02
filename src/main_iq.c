@@ -122,16 +122,16 @@ int main(int argc, char *argv[]) {
         }
 
         if (dsss_receive_burst(buf, win, sps, fs, 0, out) == 0) {
-            printf("\rFound at t=%.2fs (offset %zu)          \n", off/fs, off);
-            found = 1;
-            break;
+            printf("\r  Sync at t=%.2fs\n", off/fs);
+            found++;
         }
     }
     fclose(fp);
 
     if (!found) { printf("\rNo SGB frame found.\n"); free(buf); return 2; }
 
-    printf("\n✅ DEMODULATION SUCCESS\n");
+    printf("\n%d windows synced — decoding last\n", found);
+    printf("✅ DEMODULATION SUCCESS\n");
     print_hex(out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     printf("\n=== FRAME DECODING ===\n");
     decode_beacon(out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
