@@ -188,6 +188,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
      *    noise-only buffers).  The Costas loop handles small residuals.
      * --------------------------------------------------------------- */
     #define FREQ_ACQ_MIN_CONF  3.0f
+    #define FREQ_ACQ_MIN_HZ    20.0f   /* below this, Costas handles it */
     #define FREQ_ACQ_SWEEP_HZ  19000.0f
     int freq_was_corrected = 0;
     {
@@ -198,7 +199,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                 "phase=%d n_chips=%zu\n",
                 sweep_ok, (double)acq.freq_hz, (double)acq.confidence,
                 acq.costas_phase, n_chips);
-        if (sweep_ok && acq.confidence >= FREQ_ACQ_MIN_CONF) {
+        if (sweep_ok && acq.confidence >= FREQ_ACQ_MIN_CONF
+            && fabsf(acq.freq_hz) >= FREQ_ACQ_MIN_HZ) {
             freq_was_corrected = 1;
 
             /* NCO correction at sample rate on raw ota_buffer copy. */
