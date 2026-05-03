@@ -4,18 +4,16 @@
  *
  * Orchestrates:
  *   1. Q-channel delay by SPS/2 (undo OQPSK Tc/2 offset).
- *   2. RRC matched filter (firdes.root_raised_cosine, α=0.5, 11×SPS taps).
- *   3. Stage A symbol sync — decimation phase by max energy on preamble.
- *   4. Coarse frequency sweep — preamble correlation vs freq offset
+ *   2. Stage A symbol sync — decimation phase by max energy on preamble.
+ *   3. Coarse frequency sweep — preamble correlation vs freq offset
  *      to pull the residual within Costas lock range (~±300 Hz).
- *   5. Costas loop (QPSK, BW=0.0628) for fine phase correction.
- *   6. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
+ *   4. Costas loop (QPSK, BW=0.0628) for fine phase correction.
+ *   5. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
  *
  * On success, writes 250 bits to output_bits[] suitable for decode_2g().
  */
 
 #include "dsss_demod.h"
-#include "rrc_filter.h"
 #include "symbol_sync.h"
 #include "costas4.h"
 #include "despread.h"
@@ -31,9 +29,6 @@
 #define M_TWOPI (2.0 * M_PI)
 
 /* Receive-chain parameters. */
-#define SGB_RRC_NTAPS_REQ    (11 * DSSS_SPS)   /* 704; rrc forces odd → 705 */
-#define SGB_RRC_ALPHA        0.5f
-#define SGB_RRC_GAIN         1.0f
 #define SGB_COSTAS_BW        0.0628f
 #define SGB_OQPSK_DELAY      (DSSS_SPS / 2)    /* 32 samples */
 
@@ -118,16 +113,36 @@ static float coarse_freq_fft(const float complex *chips, int n_chips,
     float best_ratio = 0.0f;
     int   best_phi   = 0;
 
-    for (int pi = 0; pi < sps; pi++) {
+    /* Find optimal decimation phase by energy (half-sine peaks at center). */
+    int energy_phi = sps / 2;
+    {
+        float peak_energy = -1.0f;
+        for (int pi = 0; pi < sps; pi++) {
+            float energy = 0.0f;
+            size_t cnt = 0;
+            for (size_t i = (size_t)pi;
+                 i < raw_len && cnt < (size_t)COARSE_PREAMBLE_CHIPS;
+                 i += (size_t)sps) {
+                float re = __real__ raw[i], im = __imag__ raw[i];
+                energy += re * re + im * im;
+                cnt++;
+            }
+            if (energy > peak_energy) {
+                peak_energy = energy;
+                energy_phi = pi;
+            }
+        }
+    }
+
+    {
+        int pi = energy_phi;
         size_t n_avail = 0;
         for (size_t i = (size_t)pi;
              i < raw_len && n_avail < (size_t)COARSE_PREAMBLE_CHIPS;
              i += (size_t)sps)
             phase_chips[n_avail++] = raw[i];
 
-        if (n_avail < (size_t)COARSE_PREAMBLE_CHIPS)
-            continue;
-
+        if (n_avail >= (size_t)COARSE_PREAMBLE_CHIPS)
         for (int p = 0; p < 4; p++) {
             float complex dc_sum = 0.0f;
             for (int k = 0; k < COARSE_FFT_N; k++) {
@@ -172,6 +187,9 @@ static float coarse_freq_fft(const float complex *chips, int n_chips,
             float noise_mean = noise_cnt > 0 ? noise_sum / (float)noise_cnt : 1e-10f;
             float ratio = peak_mag / noise_mean;
 
+            if (peak_bin <= dc_guard + 5)
+                continue;
+
             /* Quadratic interpolation for sub-bin accuracy. */
             float bin_f = (float)peak_bin;
             if (peak_bin > dc_guard && peak_bin < COARSE_FFT_N / 2 - 1) {
@@ -187,7 +205,7 @@ static float coarse_freq_fft(const float complex *chips, int n_chips,
             if (ratio > best_ratio) {
                 best_ratio = ratio;
                 best_hz = est_hz;
-                best_phi = pi;
+                best_phi = energy_phi;
             }
         }
     }
@@ -259,7 +277,6 @@ int dsss_receive_burst(const float complex *ota_buffer,
     }
 
     int rc = -1;
-    float *taps = NULL;
     float complex *delayed = NULL;
     float complex *post_rrc = NULL;
     float complex *post_dec = NULL;
@@ -274,12 +291,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
     size_t N = buffer_length;
     size_t chip_buf = (size_t)((float)N / sps) + DESPREAD_SYNC_RANGE + DESPREAD_CHIPS_PER_BIT;
 
-    taps        = (float *)malloc((size_t)(11.0f * sps + 4.0f) * sizeof(float));
     delayed     = (float complex *)malloc(N * sizeof(float complex));
     post_rrc    = (float complex *)malloc(N * sizeof(float complex));
     post_dec    = (float complex *)calloc(chip_buf, sizeof(float complex));
     post_costas = (float complex *)calloc(chip_buf, sizeof(float complex));
-    if (!taps || !delayed || !post_rrc || !post_dec || !post_costas) {
+    if (!delayed || !post_rrc || !post_dec || !post_costas) {
         fprintf(stderr, "[dsss_demod] allocation failure\n");
         goto cleanup;
     }
@@ -303,31 +319,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
-     * 3. Matched filter (RRC for integer SPS, bypass for fractional).
+     * 3. No matched filter — half-sine pulse shaping is handled by
+     *    direct chip-rate decimation (integrate-and-dump implicit in
+     *    the despreader's 256-chip correlation).
      * --------------------------------------------------------------- */
-    if (exact_sps) {
-        float chip_rate = fs / sps;
-        int ntaps_req = (int)(11.0f * sps + 0.5f);
-        int ntaps = rrc_compute_taps(SGB_RRC_GAIN,
-                                     fs,
-                                     chip_rate,
-                                     SGB_RRC_ALPHA,
-                                     ntaps_req,
-                                     taps);
-        if (ntaps <= 0) {
-            fprintf(stderr, "[dsss_demod] rrc_compute_taps failed\n");
-            goto cleanup;
-        }
-        rrc_filter_complex(delayed, N, taps, ntaps, post_rrc);
-        dump_complex("/tmp/c_post_rrc.bin", post_rrc, N);
-    } else {
-        /* Fractional SPS: skip RRC matched filter — the pulse shape
-         * is unknown (likely half-sine per T.018) and the RRC would
-         * be mismatched.  Direct decimation preserves more energy. */
-        memcpy(post_rrc, delayed, N * sizeof(float complex));
-        fprintf(stderr, "[dsss_demod] fractional sps=%.3f, bypassing RRC\n",
-                (double)sps);
-    }
+    memcpy(post_rrc, delayed, N * sizeof(float complex));
 
     /* ---------------------------------------------------------------
      * 4. Coarse frequency/phase estimation (FFT on post-RRC signal).
@@ -448,7 +444,6 @@ int dsss_receive_burst(const float complex *ota_buffer,
     rc = 0;
 
 cleanup:
-    free(taps);
     free(delayed);
     free(post_rrc);
     free(post_dec);
