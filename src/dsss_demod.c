@@ -177,11 +177,13 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * --------------------------------------------------------------- */
     #define FREQ_ACQ_MIN_CONF  2.5f
     #define FREQ_ACQ_SWEEP_HZ  19000.0f  /* chip-rate Nyquist */
+    int freq_was_corrected = 0;
     {
         freq_acq_result_t acq;
         if (freq_acq_sweep(post_dec, (int)n_chips, chip_rate,
                            -FREQ_ACQ_SWEEP_HZ, FREQ_ACQ_SWEEP_HZ, &acq) == 0
             && acq.confidence >= FREQ_ACQ_MIN_CONF) {
+            freq_was_corrected = 1;
 
             /* NCO correction at sample rate on raw ota_buffer copy. */
             {
@@ -272,10 +274,83 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
 
     /* ---------------------------------------------------------------
-     * 7. Despread.
+     * 7. Despread, optionally with alignment-guided freq refinement.
+     *
+     *    If freq_acq_sweep already corrected the offset, despread
+     *    directly.  Otherwise, use despread_sync to find alignment,
+     *    then freq_acq_from_alignment() to check for residual offset
+     *    via FFT on the aligned preamble; if found, apply NCO at
+     *    sample rate and re-do the chain.  Otherwise despread with
+     *    the found sync alignment.
      * --------------------------------------------------------------- */
-    if (despread_burst(post_costas, (int)chip_buf, output_bits) != 0)
-        goto cleanup;
+    if (freq_was_corrected) {
+        if (despread_burst(post_costas, (int)chip_buf, output_bits) != 0)
+            goto cleanup;
+    } else {
+        despread_sync_t sync;
+        if (despread_sync(post_costas, (int)n_chips, &sync) != 0)
+            goto cleanup;
+        freq_acq_result_t acq2;
+        if (freq_acq_from_alignment(post_dec, (int)n_chips, &sync,
+                                    chip_rate, &acq2) == 0
+            && fabsf(acq2.freq_hz) > 1.0f
+            && acq2.confidence >= 3.0f) {
+            /* Offset found via alignment FFT — apply NCO at sample rate. */
+            {
+                float dphi = 2.0f * (float)M_PI * acq2.freq_hz / fs;
+                float step_r = cosf(dphi), step_i = -sinf(dphi);
+                float ph_r = 1.0f, ph_i = 0.0f;
+                for (size_t k = 0; k < N; k++) {
+                    float re = __real__ ota_buffer[k];
+                    float im = __imag__ ota_buffer[k];
+                    post_rrc[k] = (re * ph_r - im * ph_i)
+                                + (re * ph_i + im * ph_r) * I;
+                    float nr = ph_r * step_r - ph_i * step_i;
+                    float ni = ph_r * step_i + ph_i * step_r;
+                    if ((k & 1023u) == 0u) {
+                        float inv = 1.0f / sqrtf(nr * nr + ni * ni);
+                        nr *= inv; ni *= inv;
+                    }
+                    ph_r = nr; ph_i = ni;
+                }
+            }
+            for (size_t t = 0; t < N; t++) {
+                float ir = __real__ post_rrc[t];
+                float qi = (t + (size_t)oqpsk_delay < N)
+                           ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
+                           : 0.0f;
+                delayed[t] = ir + I * qi;
+            }
+            memcpy(post_rrc, delayed, N * sizeof(float complex));
+            n_chips = 0;
+            if (exact_sps) {
+                phi = symbol_sync_decimate(post_rrc, N, isps,
+                                           25 * 256,
+                                           post_dec, &n_chips);
+            } else {
+                float pos = (float)phi;
+                while (pos < (float)N - sps && n_chips < chip_buf) {
+                    size_t idx = (size_t)pos;
+                    float frac = pos - (float)idx;
+                    post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
+                                        + post_rrc[idx + 1] * frac;
+                    pos += sps;
+                }
+            }
+            if (n_chips < 38000) goto cleanup;
+            {
+                costas4_t costas;
+                costas4_init(&costas, SGB_COSTAS_BW);
+                costas4_run(&costas, post_dec, post_costas, n_chips);
+            }
+            if (despread_burst(post_costas, (int)chip_buf, output_bits) != 0)
+                goto cleanup;
+        } else {
+            if (despread_bits(post_costas, (int)n_chips,
+                              &sync, output_bits) != 0)
+                goto cleanup;
+        }
+    }
 
     rc = 0;
 

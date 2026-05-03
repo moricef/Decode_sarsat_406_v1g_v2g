@@ -298,3 +298,142 @@ int freq_acq_sweep(const float complex *chips, int n_chips,
 
     return 0;
 }
+
+/* ================================================================== */
+/*  Alignment-guided frequency estimator                              */
+/* ================================================================== */
+
+#define ALIGN_FFT_N            8192
+#define ALIGN_PREAMBLE_CHIPS   6400
+
+static void fft_radix2(float complex *x, int n)
+{
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { float complex t = x[i]; x[i] = x[j]; x[j] = t; }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        float a = -2.0f * (float)M_PI / (float)len;
+        float complex wlen = cosf(a) + sinf(a) * I;
+        for (int i = 0; i < n; i += len) {
+            float complex w = 1.0f;
+            for (int j = 0; j < len / 2; j++) {
+                float complex u = x[i + j];
+                float complex v = x[i + j + len / 2] * w;
+                x[i + j]           = u + v;
+                x[i + j + len / 2] = u - v;
+                w *= wlen;
+            }
+        }
+    }
+}
+
+int freq_acq_from_alignment(const float complex *chips, int n_chips,
+                            const despread_sync_t *sync,
+                            float chip_rate,
+                            freq_acq_result_t *result)
+{
+    if (!chips || !sync || !result) return -1;
+    if (sync->off_i < 0 || sync->off_q < 0) return -1;
+
+    memset(result, 0, sizeof(*result));
+
+    int8_t *prn_i = (int8_t *)malloc((size_t)ALIGN_PREAMBLE_CHIPS);
+    int8_t *prn_q = (int8_t *)malloc((size_t)ALIGN_PREAMBLE_CHIPS);
+    float complex *fft_buf = (float complex *)calloc((size_t)ALIGN_FFT_N,
+                                                      sizeof(float complex));
+    if (!prn_i || !prn_q || !fft_buf) {
+        free(prn_i); free(prn_q); free(fft_buf);
+        return -1;
+    }
+
+    despread_gen_prn(DESPREAD_PRN_SEED_I, ALIGN_PREAMBLE_CHIPS, prn_i);
+    despread_gen_prn(DESPREAD_PRN_SEED_Q, ALIGN_PREAMBLE_CHIPS, prn_q);
+
+    /* Build expected ±1 pattern for the detected Costas phase. */
+    int p = sync->phase & 3;
+    float complex dc_sum = 0.0f;
+    for (int k = 0; k < ALIGN_PREAMBLE_CHIPS; k++) {
+        if (k < ALIGN_PREAMBLE_CHIPS) {
+            float ie = 1.0f - 2.0f * (float)prn_i[k];
+            float qe = 1.0f - 2.0f * (float)prn_q[k];
+            float complex exp;
+            switch (p) {
+            case 0: exp = ie + qe * I; break;
+            case 1: exp = qe - ie * I; break;
+            case 2: exp = -ie - qe * I; break;
+            default:exp = -qe + ie * I; break;
+            }
+            /* Extract chip at I/Q offsets, build I+jQ, strip PRN. */
+            int ci = sync->off_i + k;
+            int cq = sync->off_q + k;
+            float ir = (ci >= 0 && ci < n_chips) ? __real__ chips[ci] : 0.0f;
+            float qv = (cq >= 0 && cq < n_chips) ? __imag__ chips[cq] : 0.0f;
+            float complex sample = ir + qv * I;
+            fft_buf[k] = sample * conjf(exp);
+            dc_sum += fft_buf[k];
+        } else {
+            fft_buf[k] = 0.0f;
+        }
+    }
+
+    /* DC removal. */
+    float complex dc_mean = dc_sum / (float)ALIGN_PREAMBLE_CHIPS;
+    for (int k = 0; k < ALIGN_PREAMBLE_CHIPS; k++)
+        fft_buf[k] -= dc_mean;
+
+    fft_radix2(fft_buf, ALIGN_FFT_N);
+
+    /* Magnitude spectrum. */
+    for (int i = 0; i < ALIGN_FFT_N; i++) {
+        float re = __real__ fft_buf[i], im = __imag__ fft_buf[i];
+        __real__ fft_buf[i] = re * re + im * im;
+    }
+
+    /* Find peak beyond DC guard. */
+    float peak_mag = 0.0f;
+    int   peak_bin = 0;
+    float noise_sum = 0.0f;
+    int   noise_cnt = 0;
+    int   dc_guard  = 30;
+
+    for (int i = 0; i < ALIGN_FFT_N / 2; i++) {
+        float mag = __real__ fft_buf[i];
+        if (i >= dc_guard) {
+            if (mag > peak_mag) { peak_mag = mag; peak_bin = i; }
+            noise_sum += mag; noise_cnt++;
+        }
+    }
+    float noise_mean = noise_cnt > 0 ? noise_sum / (float)noise_cnt : 1e-10f;
+    float ratio = peak_mag / noise_mean;
+
+    /* Quadratic interpolation. */
+    float bin_f = (float)peak_bin;
+    if (peak_bin > dc_guard && peak_bin < ALIGN_FFT_N / 2 - 1) {
+        float L = __real__ fft_buf[peak_bin - 1];
+        float C = peak_mag;
+        float R = __real__ fft_buf[peak_bin + 1];
+        float denom = 2.0f * C - L - R;
+        if (denom > 1e-10f)
+            bin_f += 0.5f * (R - L) / denom;
+    }
+    float est_hz = bin_f * chip_rate / (float)ALIGN_FFT_N;
+
+    free(prn_i); free(prn_q); free(fft_buf);
+
+    if (peak_bin <= dc_guard + 5 || ratio < 3.0f)
+        return 0;  /* no usable peak, result stays at 0 Hz */
+
+    result->freq_hz     = est_hz;
+    result->confidence  = ratio;
+    result->costas_phase = p;
+
+    fprintf(stderr,
+            "[freq_acq] align fft: offset %.0f Hz  conf %.1f  "
+            "peak_bin=%d phase=%d\n",
+            (double)est_hz, (double)ratio, peak_bin, p);
+
+    return 0;
+}
