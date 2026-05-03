@@ -40,7 +40,7 @@
 /* Coarse frequency estimator (FFT on modulation-stripped preamble). */
 #define COARSE_FFT_N           8192   /* radix-2, ~4.7 Hz bin at 38.4 kHz chip rate */
 #define COARSE_PREAMBLE_CHIPS  6400   /* 25 bits × 256 chips */
-#define COARSE_PEAK_THRESH     15.0f  /* peak-to-mean ratio for valid detection */
+#define COARSE_PEAK_THRESH     10.0f  /* peak-to-mean ratio for valid detection */
 
 #ifdef DSSS_DEBUG_DUMP
 static void dump_complex(const char *path, const float complex *p, size_t n)
@@ -285,41 +285,25 @@ int dsss_receive_burst(const float complex *ota_buffer,
     }
 
     /* ---------------------------------------------------------------
-     * 2. Delay Q channel by SPS/2 samples (OQPSK alignment).
+     * 2. Advance Q channel by SPS/2 samples to undo TX OQPSK Tc/2 delay.
+     *
+     *    TX delays Q by half a chip (SPS/2 samples) relative to I.
+     *    To re-align, we take Q from t + oqpsk_delay.
      * --------------------------------------------------------------- */
     int oqpsk_delay = (int)(sps / 2.0f + 0.5f);
     for (size_t t = 0; t < N; t++) {
         float ir = __real__ ota_buffer[t];
         float qi;
-        if (t < (size_t)oqpsk_delay)
-            qi = 0.0f;
+        if (t + (size_t)oqpsk_delay < N)
+            qi = __imag__ ota_buffer[t + (size_t)oqpsk_delay];
         else
-            qi = __imag__ ota_buffer[t - (size_t)oqpsk_delay];
+            qi = 0.0f;
         delayed[t] = ir + I * qi;
     }
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
-     * 3. Coarse frequency/phase estimation (FFT on raw delayed signal).
-     * --------------------------------------------------------------- */
-    int   coarse_phi = -1;
-    float coarse_hz  = 0.0f;
-    {
-        float chip_rate = fs / sps;
-        int   isps = (int)(sps + 0.5f);  /* rounded for coarse FFT */
-        coarse_hz = coarse_freq_fft(NULL, 0, chip_rate,
-                                     delayed, N, isps, &coarse_phi);
-        if (fabsf(coarse_hz) > 1.0f) {
-            fprintf(stderr,
-                    "[dsss_demod] coarse offset = %.0f Hz, "
-                    "raw phi=%d, correcting before RRC\n",
-                    (double)coarse_hz, coarse_phi);
-            apply_freq_correction(delayed, (int)N, coarse_hz, fs);
-        }
-    }
-
-    /* ---------------------------------------------------------------
-     * 4. Matched filter (RRC for integer SPS, bypass for fractional).
+     * 3. Matched filter (RRC for integer SPS, bypass for fractional).
      * --------------------------------------------------------------- */
     if (exact_sps) {
         float chip_rate = fs / sps;
@@ -343,6 +327,25 @@ int dsss_receive_burst(const float complex *ota_buffer,
         memcpy(post_rrc, delayed, N * sizeof(float complex));
         fprintf(stderr, "[dsss_demod] fractional sps=%.3f, bypassing RRC\n",
                 (double)sps);
+    }
+
+    /* ---------------------------------------------------------------
+     * 4. Coarse frequency/phase estimation (FFT on post-RRC signal).
+     * --------------------------------------------------------------- */
+    int   coarse_phi = -1;
+    float coarse_hz  = 0.0f;
+    {
+        float chip_rate = fs / sps;
+        int   isps = (int)(sps + 0.5f);  /* rounded for coarse FFT */
+        coarse_hz = coarse_freq_fft(NULL, 0, chip_rate,
+                                     post_rrc, N, isps, &coarse_phi);
+        if (fabsf(coarse_hz) > 1.0f) {
+            fprintf(stderr,
+                    "[dsss_demod] coarse offset = %.0f Hz, "
+                    "raw phi=%d, correcting before decimation\n",
+                    (double)coarse_hz, coarse_phi);
+            apply_freq_correction(post_rrc, (int)N, coarse_hz, fs);
+        }
     }
 
     /* ---------------------------------------------------------------
