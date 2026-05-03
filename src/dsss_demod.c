@@ -109,6 +109,18 @@ int dsss_receive_burst(const float complex *ota_buffer,
                    : 0.0f;
         delayed[t] = ir + I * qi;
     }
+    /* DC blocker — essential for RTL-SDR (strong carrier leak). */
+    {
+        float dc_i = 0.0f, dc_q = 0.0f;
+        const float alpha = 0.001f;
+        for (size_t t = 0; t < N; t++) {
+            float ir = __real__ delayed[t];
+            float qi = __imag__ delayed[t];
+            dc_i += alpha * (ir - dc_i);
+            dc_q += alpha * (qi - dc_q);
+            delayed[t] = (ir - dc_i) + (qi - dc_q) * I;
+        }
+    }
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
@@ -175,14 +187,18 @@ int dsss_receive_burst(const float complex *ota_buffer,
      *    Only triggers if confidence >= 3.0 (avoids false positives on
      *    noise-only buffers).  The Costas loop handles small residuals.
      * --------------------------------------------------------------- */
-    #define FREQ_ACQ_MIN_CONF  2.5f
-    #define FREQ_ACQ_SWEEP_HZ  19000.0f  /* chip-rate Nyquist */
+    #define FREQ_ACQ_MIN_CONF  3.0f
+    #define FREQ_ACQ_SWEEP_HZ  19000.0f
     int freq_was_corrected = 0;
     {
         freq_acq_result_t acq;
-        if (freq_acq_sweep(post_dec, (int)n_chips, chip_rate,
-                           -FREQ_ACQ_SWEEP_HZ, FREQ_ACQ_SWEEP_HZ, &acq) == 0
-            && acq.confidence >= FREQ_ACQ_MIN_CONF) {
+        int sweep_ok = freq_acq_sweep(post_dec, (int)n_chips, chip_rate,
+                           -FREQ_ACQ_SWEEP_HZ, FREQ_ACQ_SWEEP_HZ, &acq) == 0;
+        fprintf(stderr, "[dsss_demod] sweep: ok=%d freq=%.0f conf=%.1f "
+                "phase=%d n_chips=%zu\n",
+                sweep_ok, (double)acq.freq_hz, (double)acq.confidence,
+                acq.costas_phase, n_chips);
+        if (sweep_ok && acq.confidence >= FREQ_ACQ_MIN_CONF) {
             freq_was_corrected = 1;
 
             /* NCO correction at sample rate on raw ota_buffer copy. */
@@ -291,9 +307,15 @@ int dsss_receive_burst(const float complex *ota_buffer,
         if (despread_sync(post_costas, (int)n_chips, &sync) != 0)
             goto cleanup;
         freq_acq_result_t acq2;
-        if (freq_acq_from_alignment(post_dec, (int)n_chips, &sync,
-                                    chip_rate, &acq2) == 0
-            && fabsf(acq2.freq_hz) > 1.0f
+        int align_ok = freq_acq_from_alignment(post_dec, (int)n_chips, &sync,
+                                    chip_rate, &acq2) == 0;
+        fprintf(stderr, "[dsss_demod] align: ok=%d freq=%.0f conf=%.1f "
+                "phase=%d sync_off=(%d,%d) sync_z=%.1f\n",
+                align_ok, (double)acq2.freq_hz, (double)acq2.confidence,
+                acq2.costas_phase, sync.off_i, sync.off_q,
+                (double)hypotf((float)sync.score_i/100.0f,
+                               (float)sync.score_q/100.0f));
+        if (align_ok && fabsf(acq2.freq_hz) > 1.0f
             && acq2.confidence >= 3.0f) {
             /* Offset found via alignment FFT — apply NCO at sample rate. */
             {

@@ -32,9 +32,9 @@
 
 #define PASS2_CORR_CHIPS  2048     /* 8 bits, 33 dB processing gain */
 #define PASS2_STEP_HZ     10.0f    /* bin spacing                   */
-#define PASS2_SWEEP_HZ    150.0f   /* sweep width around coarse     */
+#define PASS2_SWEEP_HZ    250.0f   /* sweep width around coarse     */
 
-#define PELL_THRESH       1.8f     /* confidence floor              */
+#define PELL_THRESH       1.6f     /* confidence floor              */
 
 /* ------------------------------------------------------------------ */
 /* Helper: complex multiply (inlined for speed).                       */
