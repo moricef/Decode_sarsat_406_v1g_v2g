@@ -4,9 +4,8 @@
  *
  * Orchestrates:
  *   1. Q-channel delay by SPS/2 (undo OQPSK Tc/2 offset).
- *   2. Stage A symbol sync — decimation phase by max energy on preamble.
- *   3. Coarse frequency sweep — preamble correlation vs freq offset
- *      to pull the residual within Costas lock range (~±300 Hz).
+ *   2. Decimation to chip rate at energy-max phase.
+ *   3. freq_acq_sweep() — PRN-correlation frequency sweep.
  *   4. Costas loop (QPSK, BW=0.0628) for fine phase correction.
  *   5. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
  *
@@ -17,6 +16,7 @@
 #include "symbol_sync.h"
 #include "costas4.h"
 #include "despread.h"
+#include "freq_acq.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -26,16 +26,10 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-#define M_TWOPI (2.0 * M_PI)
 
 /* Receive-chain parameters. */
 #define SGB_COSTAS_BW        0.0628f
 #define SGB_OQPSK_DELAY      (DSSS_SPS / 2)    /* 32 samples */
-
-/* Coarse frequency estimator (FFT on modulation-stripped preamble). */
-#define COARSE_FFT_N           8192   /* radix-2, ~4.7 Hz bin at 38.4 kHz chip rate */
-#define COARSE_PREAMBLE_CHIPS  6400   /* 25 bits × 256 chips */
-#define COARSE_PEAK_THRESH     10.0f  /* peak-to-mean ratio for valid detection */
 
 #ifdef DSSS_DEBUG_DUMP
 static void dump_complex(const char *path, const float complex *p, size_t n)
@@ -46,202 +40,6 @@ static void dump_complex(const char *path, const float complex *p, size_t n)
 #else
 #define dump_complex(p, x, n) ((void)0)
 #endif
-
-/* -------- radix-2 FFT (in-place, float complex) --------------------------- */
-static void fft_radix2(float complex *x, int n, int invert)
-{
-    for (int i = 1, j = 0; i < n; i++) {
-        int bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) { float complex t = x[i]; x[i] = x[j]; x[j] = t; }
-    }
-    for (int len = 2; len <= n; len <<= 1) {
-        float a = (float)(M_TWOPI / (double)len) * (invert ? -1.0f : 1.0f);
-        float complex wlen = cosf(a) - sinf(a) * I;
-        for (int i = 0; i < n; i += len) {
-            float complex w = 1.0f;
-            for (int j = 0; j < len / 2; j++) {
-                float complex u = x[i + j];
-                float complex v = x[i + j + len / 2] * w;
-                x[i + j]           = u + v;
-                x[i + j + len / 2] = u - v;
-                w *= wlen;
-            }
-        }
-    }
-    if (invert) {
-        float inv = 1.0f / (float)n;
-        for (int i = 0; i < n; i++) x[i] *= inv;
-    }
-}
-
-/* -------- coarse frequency estimator (FFT on stripped preamble) ---------
- *
- * For each decimation phase and each Costas phase, multiplies the received
- * preamble chips by the conjugate of the expected (±1 ± j) pattern, which
- * strips the DSSS modulation.  An FFT on the residue reveals a tone at the
- * carrier offset with ~4.7 Hz resolution.
- * ----------------------------------------------------------------------- */
-
-static float coarse_freq_fft(const float complex *chips, int n_chips,
-                              float chip_rate,
-                              const float complex *raw,
-                              size_t raw_len, int sps,
-                              int *out_phi)
-{
-    if (raw == NULL || raw_len < (size_t)(COARSE_PREAMBLE_CHIPS * sps))
-        return 0.0f;
-    (void)chips; (void)n_chips;
-
-    int8_t *prn_i = (int8_t *)malloc((size_t)COARSE_PREAMBLE_CHIPS);
-    int8_t *prn_q = (int8_t *)malloc((size_t)COARSE_PREAMBLE_CHIPS);
-    if (!prn_i || !prn_q) { free(prn_i); free(prn_q); return 0.0f; }
-    despread_gen_prn(DESPREAD_PRN_SEED_I, COARSE_PREAMBLE_CHIPS, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, COARSE_PREAMBLE_CHIPS, prn_q);
-
-    float complex *fft_buf = (float complex *)malloc(
-        (size_t)COARSE_FFT_N * sizeof(float complex));
-    float complex *phase_chips = (float complex *)malloc(
-        (size_t)COARSE_PREAMBLE_CHIPS * sizeof(float complex));
-    if (!fft_buf || !phase_chips) {
-        free(prn_i); free(prn_q); free(fft_buf); free(phase_chips);
-        return 0.0f;
-    }
-
-    float best_hz    = 0.0f;
-    float best_ratio = 0.0f;
-    int   best_phi   = 0;
-
-    /* Find optimal decimation phase by energy (half-sine peaks at center). */
-    int energy_phi = sps / 2;
-    {
-        float peak_energy = -1.0f;
-        for (int pi = 0; pi < sps; pi++) {
-            float energy = 0.0f;
-            size_t cnt = 0;
-            for (size_t i = (size_t)pi;
-                 i < raw_len && cnt < (size_t)COARSE_PREAMBLE_CHIPS;
-                 i += (size_t)sps) {
-                float re = __real__ raw[i], im = __imag__ raw[i];
-                energy += re * re + im * im;
-                cnt++;
-            }
-            if (energy > peak_energy) {
-                peak_energy = energy;
-                energy_phi = pi;
-            }
-        }
-    }
-
-    {
-        int pi = energy_phi;
-        size_t n_avail = 0;
-        for (size_t i = (size_t)pi;
-             i < raw_len && n_avail < (size_t)COARSE_PREAMBLE_CHIPS;
-             i += (size_t)sps)
-            phase_chips[n_avail++] = raw[i];
-
-        if (n_avail >= (size_t)COARSE_PREAMBLE_CHIPS)
-        for (int p = 0; p < 4; p++) {
-            float complex dc_sum = 0.0f;
-            for (int k = 0; k < COARSE_FFT_N; k++) {
-                if (k < COARSE_PREAMBLE_CHIPS) {
-                    float ie, qe;
-                    switch (p) {
-                    case 0: ie = 1.0f-2.0f*prn_i[k]; qe = 1.0f-2.0f*prn_q[k]; break;
-                    case 1: ie = 1.0f-2.0f*prn_q[k]; qe = -(1.0f-2.0f*prn_i[k]); break;
-                    case 2: ie = -(1.0f-2.0f*prn_i[k]); qe = -(1.0f-2.0f*prn_q[k]); break;
-                    default:ie = -(1.0f-2.0f*prn_q[k]); qe = 1.0f-2.0f*prn_i[k]; break;
-                    }
-                    fft_buf[k] = phase_chips[k] * (ie - qe * I);
-                    dc_sum += fft_buf[k];
-                } else {
-                    fft_buf[k] = 0.0f;
-                }
-            }
-
-            float complex dc_mean = dc_sum / (float)COARSE_PREAMBLE_CHIPS;
-            for (int k = 0; k < COARSE_PREAMBLE_CHIPS; k++)
-                fft_buf[k] -= dc_mean;
-
-            fft_radix2(fft_buf, COARSE_FFT_N, 0);
-            for (int i = 0; i < COARSE_FFT_N; i++) {
-                float re = __real__ fft_buf[i], im = __imag__ fft_buf[i];
-                __real__ fft_buf[i] = re * re + im * im;
-            }
-
-            float peak_mag = 0.0f;
-            int   peak_bin = 0;
-            float noise_sum = 0.0f;
-            int   noise_cnt = 0;
-            int   dc_guard = 30;
-
-            for (int i = 0; i < COARSE_FFT_N / 2; i++) {
-                float mag = __real__ fft_buf[i];
-                if (i >= dc_guard) {
-                    if (mag > peak_mag) { peak_mag = mag; peak_bin = i; }
-                    noise_sum += mag; noise_cnt++;
-                }
-            }
-            float noise_mean = noise_cnt > 0 ? noise_sum / (float)noise_cnt : 1e-10f;
-            float ratio = peak_mag / noise_mean;
-
-            if (peak_bin <= dc_guard + 5)
-                continue;
-
-            /* Quadratic interpolation for sub-bin accuracy. */
-            float bin_f = (float)peak_bin;
-            if (peak_bin > dc_guard && peak_bin < COARSE_FFT_N / 2 - 1) {
-                float L = __real__ fft_buf[peak_bin - 1];
-                float C = peak_mag;
-                float R = __real__ fft_buf[peak_bin + 1];
-                float denom = 2.0f * C - L - R;
-                if (denom > 1e-10f)
-                    bin_f += 0.5f * (R - L) / denom;
-            }
-            float est_hz = bin_f * chip_rate / (float)COARSE_FFT_N;
-
-            if (ratio > best_ratio) {
-                best_ratio = ratio;
-                best_hz = est_hz;
-                best_phi = energy_phi;
-            }
-        }
-    }
-
-    free(prn_i); free(prn_q); free(fft_buf); free(phase_chips);
-
-    fprintf(stderr,
-            "[dsss_demod] coarse fft: phi=%d, offset %.0f Hz, "
-            "peak/noise %.1f (thresh %.1f)\n",
-            best_phi, (double)best_hz, (double)best_ratio,
-            (double)COARSE_PEAK_THRESH);
-
-    if (best_ratio < COARSE_PEAK_THRESH)
-        return 0.0f;
-
-    *out_phi = best_phi;
-    return best_hz;
-}
-
-/* -------- apply frequency correction to chip-rate buffer --------------- */
-
-static void apply_freq_correction(float complex *samples, int n,
-                                   float offset_hz, float chip_rate)
-{
-    if (fabsf(offset_hz) < 1.0f || samples == NULL || n < 1)
-        return;
-
-    for (int k = 0; k < n; k++) {
-        float phase = -(M_TWOPI * offset_hz * (float)k / chip_rate);
-        float c = cosf(phase);
-        float s = sinf(phase);
-        float re = __real__ samples[k];
-        float im = __imag__ samples[k];
-        samples[k] = (re * c - im * s) + (re * s + im * c) * I;
-    }
-}
 
 int dsss_receive_burst(const float complex *ota_buffer,
                        size_t buffer_length,
@@ -269,7 +67,6 @@ int dsss_receive_burst(const float complex *ota_buffer,
             return -1;
         }
     }
-    /* Need at least one full burst for a sensible decode (~1 s). */
     if (buffer_length < (size_t)fs) {
         fprintf(stderr, "[dsss_demod] buffer too short (%zu < %.0f samples)\n",
                 buffer_length, (double)fs);
@@ -284,6 +81,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     int isps = (int)(sps + 0.5f);
     int exact_sps = (fabsf(sps - (float)isps) < 0.001f);
+    float chip_rate = fs / sps;
 
     /* ---------------------------------------------------------------
      * 1. Allocate per-stage buffers.
@@ -302,109 +100,63 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     /* ---------------------------------------------------------------
      * 2. Advance Q channel by SPS/2 samples to undo TX OQPSK Tc/2 delay.
-     *
-     *    TX delays Q by half a chip (SPS/2 samples) relative to I.
-     *    To re-align, we take Q from t + oqpsk_delay.
      * --------------------------------------------------------------- */
     int oqpsk_delay = (int)(sps / 2.0f + 0.5f);
     for (size_t t = 0; t < N; t++) {
         float ir = __real__ ota_buffer[t];
-        float qi;
-        if (t + (size_t)oqpsk_delay < N)
-            qi = __imag__ ota_buffer[t + (size_t)oqpsk_delay];
-        else
-            qi = 0.0f;
+        float qi = (t + (size_t)oqpsk_delay < N)
+                   ? __imag__ ota_buffer[t + (size_t)oqpsk_delay]
+                   : 0.0f;
         delayed[t] = ir + I * qi;
     }
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
-     * 3. No matched filter — half-sine pulse shaping is handled by
-     *    direct chip-rate decimation (integrate-and-dump implicit in
-     *    the despreader's 256-chip correlation).
+     * 3. Pass-through (no matched filter for half-sine pulse shaping).
      * --------------------------------------------------------------- */
     memcpy(post_rrc, delayed, N * sizeof(float complex));
 
     /* ---------------------------------------------------------------
-     * 4. Coarse frequency/phase estimation (FFT on post-RRC signal).
-     * --------------------------------------------------------------- */
-    int   coarse_phi = -1;
-    float coarse_hz  = 0.0f;
-    {
-        float chip_rate = fs / sps;
-        int   isps = (int)(sps + 0.5f);  /* rounded for coarse FFT */
-        coarse_hz = coarse_freq_fft(NULL, 0, chip_rate,
-                                     post_rrc, N, isps, &coarse_phi);
-        if (fabsf(coarse_hz) > 1.0f) {
-            fprintf(stderr,
-                    "[dsss_demod] coarse offset = %.0f Hz, "
-                    "raw phi=%d, correcting before decimation\n",
-                    (double)coarse_hz, coarse_phi);
-            apply_freq_correction(post_rrc, (int)N, coarse_hz, fs);
-        }
-    }
-
-    /* ---------------------------------------------------------------
-     * 5. Decimate at the best phase, Costas, despread.
+     * 4. Decimate to chip rate at energy-max phase.
      * --------------------------------------------------------------- */
     size_t n_chips = 0;
     int phi;
 
-    if (coarse_phi >= 0 && exact_sps) {
-        phi = coarse_phi;
-        n_chips = 0;
-        if (exact_sps) {
-            for (size_t i = (size_t)phi; i < N && n_chips < chip_buf;
-                 i += (size_t)isps)
-                post_dec[n_chips++] = post_rrc[i];
-        } else {
-            float pos = (float)phi;
-            while (pos < (float)N - sps && n_chips < chip_buf) {
+    if (exact_sps) {
+        phi = symbol_sync_decimate(post_rrc, N, isps,
+                                   25 * 256,
+                                   post_dec, &n_chips);
+    } else {
+        float best_phi_f = 0.0f;
+        float best_energy = -1e30f;
+        for (float pi = 0.0f; pi < sps; pi += 0.5f) {
+            float pos = pi;
+            size_t cnt = 0;
+            float energy = 0.0f;
+            while (pos < (float)N - sps && cnt < (size_t)(25 * 256)) {
                 size_t idx = (size_t)pos;
                 float frac = pos - (float)idx;
-                post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
-                                    + post_rrc[idx + 1] * frac;
+                float complex v = post_rrc[idx] * (1.0f - frac)
+                                + post_rrc[idx + 1] * frac;
+                float re = __real__ v, im = __imag__ v;
+                energy += re * re + im * im;
                 pos += sps;
+                cnt++;
+            }
+            if (cnt < (size_t)(25 * 256)) continue;
+            if (energy > best_energy) {
+                best_energy = energy;
+                best_phi_f = pi;
             }
         }
-    } else {
-        if (exact_sps) {
-            phi = symbol_sync_decimate(post_rrc, N, isps,
-                                       25 * 256,
-                                       post_dec, &n_chips);
-        } else {
-            /* Fractional SPS: search fractional phases with 0.5 step. */
-            float best_phi_f = 0.0f;
-            float best_energy = -1e30f;
-            for (float pi = 0.0f; pi < sps; pi += 0.5f) {
-                float pos = pi;
-                size_t cnt = 0;
-                float energy = 0.0f;
-                while (pos < (float)N - sps && cnt < (size_t)(25 * 256)) {
-                    size_t idx = (size_t)pos;
-                    float frac = pos - (float)idx;
-                    float complex v = post_rrc[idx] * (1.0f - frac)
-                                    + post_rrc[idx + 1] * frac;
-                    float re = __real__ v, im = __imag__ v;
-                    energy += re * re + im * im;
-                    pos += sps;
-                    cnt++;
-                }
-                if (cnt < (size_t)(25 * 256)) continue;
-                if (energy > best_energy) {
-                    best_energy = energy;
-                    best_phi_f = pi;
-                }
-            }
-            phi = (int)(best_phi_f + 0.5f);  /* for reporting */
-            float pos = best_phi_f;
-            while (pos < (float)N - sps && n_chips < chip_buf) {
-                size_t idx = (size_t)pos;
-                float frac = pos - (float)idx;
-                post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
-                                    + post_rrc[idx + 1] * frac;
-                pos += sps;
-            }
+        phi = (int)(best_phi_f + 0.5f);
+        float pos = best_phi_f;
+        while (pos < (float)N - sps && n_chips < chip_buf) {
+            size_t idx = (size_t)pos;
+            float frac = pos - (float)idx;
+            post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
+                                + post_rrc[idx + 1] * frac;
+            pos += sps;
         }
     }
     if (phi < 0 || n_chips < 38000) {
@@ -417,18 +169,102 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
-     * 6. Costas / pass-through.
+     * 5. Frequency acquisition via PRN-correlation sweep at chip rate,
+     *    then NCO correction at sample rate, re-OQPSK delay, re-decimate.
      *
-     *    When coarse FFT corrected an offset the residual is ~5 Hz —
-     *    the Costas acquisition transient (several ms) smears the
-     *    166 ms preamble more than the residual drift does.  We feed
-     *    the decimated chips directly to the despreader.
-     *
-     *    When no coarse correction was applied the Costas runs as usual.
+     *    Only triggers if confidence >= 3.0 (avoids false positives on
+     *    noise-only buffers).  The Costas loop handles small residuals.
      * --------------------------------------------------------------- */
-    if (fabsf(coarse_hz) > 1.0f) {
-        memcpy(post_costas, post_dec, n_chips * sizeof(float complex));
-    } else {
+    #define FREQ_ACQ_MIN_CONF  2.5f
+    #define FREQ_ACQ_SWEEP_HZ  19000.0f  /* chip-rate Nyquist */
+    {
+        freq_acq_result_t acq;
+        if (freq_acq_sweep(post_dec, (int)n_chips, chip_rate,
+                           -FREQ_ACQ_SWEEP_HZ, FREQ_ACQ_SWEEP_HZ, &acq) == 0
+            && acq.confidence >= FREQ_ACQ_MIN_CONF) {
+
+            /* NCO correction at sample rate on raw ota_buffer copy. */
+            {
+                float dphi = 2.0f * (float)M_PI * acq.freq_hz / fs;
+                float step_r = cosf(dphi), step_i = -sinf(dphi);
+                float ph_r = 1.0f, ph_i = 0.0f;
+                for (size_t k = 0; k < N; k++) {
+                    float re = __real__ ota_buffer[k];
+                    float im = __imag__ ota_buffer[k];
+                    post_rrc[k] = (re * ph_r - im * ph_i)
+                                + (re * ph_i + im * ph_r) * I;
+                    float nr = ph_r * step_r - ph_i * step_i;
+                    float ni = ph_r * step_i + ph_i * step_r;
+                    if ((k & 1023u) == 0u) {
+                        float inv = 1.0f / sqrtf(nr * nr + ni * ni);
+                        nr *= inv; ni *= inv;
+                    }
+                    ph_r = nr; ph_i = ni;
+                }
+            }
+            /* Re-do OQPSK delay from corrected ota. */
+            for (size_t t = 0; t < N; t++) {
+                float ir = __real__ post_rrc[t];
+                float qi = (t + (size_t)oqpsk_delay < N)
+                           ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
+                           : 0.0f;
+                delayed[t] = ir + I * qi;
+            }
+            memcpy(post_rrc, delayed, N * sizeof(float complex));
+            /* Re-decimate at energy-max phase. */
+            n_chips = 0;
+            if (exact_sps) {
+                phi = symbol_sync_decimate(post_rrc, N, isps,
+                                           25 * 256,
+                                           post_dec, &n_chips);
+            } else {
+                float best_phi_f = 0.0f;
+                float best_energy = -1e30f;
+                for (float pi = 0.0f; pi < sps; pi += 0.5f) {
+                    float pos = pi;
+                    size_t cnt = 0;
+                    float energy = 0.0f;
+                    while (pos < (float)N - sps && cnt < (size_t)(25 * 256)) {
+                        size_t idx = (size_t)pos;
+                        float frac = pos - (float)idx;
+                        float complex v = post_rrc[idx] * (1.0f - frac)
+                                        + post_rrc[idx + 1] * frac;
+                        float re = __real__ v, im = __imag__ v;
+                        energy += re * re + im * im;
+                        pos += sps;
+                        cnt++;
+                    }
+                    if (cnt < (size_t)(25 * 256)) continue;
+                    if (energy > best_energy) {
+                        best_energy = energy;
+                        best_phi_f = pi;
+                    }
+                }
+                phi = (int)(best_phi_f + 0.5f);
+                float pos = best_phi_f;
+                while (pos < (float)N - sps && n_chips < chip_buf) {
+                    size_t idx = (size_t)pos;
+                    float frac = pos - (float)idx;
+                    post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
+                                        + post_rrc[idx + 1] * frac;
+                    pos += sps;
+                }
+            }
+            if (phi < 0 || n_chips < 38000) {
+                fprintf(stderr,
+                        "[dsss_demod] re-decimation failed (phi=%d, n_chips=%zu)\n",
+                        phi, n_chips);
+                goto cleanup;
+            }
+            fprintf(stderr, "[dsss_demod] re-decim phi=%d, %zu chip samples\n",
+                    phi, n_chips);
+        }
+    }
+
+    /* ---------------------------------------------------------------
+     * 6. Costas loop — always runs for fine phase tracking.
+     * --------------------------------------------------------------- */
+    {
         costas4_t costas;
         costas4_init(&costas, SGB_COSTAS_BW);
         costas4_run(&costas, post_dec, post_costas, n_chips);
