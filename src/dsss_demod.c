@@ -1,13 +1,14 @@
 /**
  * @file dsss_demod.c
- * @brief Pure-C DSSS OQPSK receive chain (façade).
+ * @brief Pure-C DSSS OQPSK receive chain.
  *
- * Orchestrates:
- *   1. Q-channel delay by SPS/2 (undo OQPSK Tc/2 offset).
- *   2. Decimation to chip rate at energy-max phase.
- *   3. freq_acq_sweep() — PRN-correlation frequency sweep.
- *   4. Costas loop (QPSK, BW=0.0628) for fine phase correction.
- *   5. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
+ * Orchestrates (correct DSP order — coarse freq BEFORE timing sync):
+ *   1. freq_acq_coarse_fft() — 4th-power FFT at sample rate (PySDR Ch.14).
+ *   2. NCO correction at sample rate (if offset detected).
+ *   3. Q-channel advance by SPS/2 (undo OQPSK Tc/2 delay).
+ *   4. DC blocker (IIR, alpha=0.001).
+ *   5. Tracking loop (FLL+PLL+DLL+Kalman) — Zhang et al. ICEE 2025.
+ *   6. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
  *
  * On success, writes 250 bits to output_bits[] suitable for decode_2g().
  */
@@ -17,6 +18,7 @@
 #include "costas4.h"
 #include "despread.h"
 #include "freq_acq.h"
+#include "tracking.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -31,6 +33,7 @@
 #define SGB_COSTAS_BW        0.0628f
 #define SGB_OQPSK_DELAY      (DSSS_SPS / 2)    /* 32 samples */
 
+#define DSSS_DEBUG_DUMP 1
 #ifdef DSSS_DEBUG_DUMP
 static void dump_complex(const char *path, const float complex *p, size_t n)
 {
@@ -80,7 +83,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     float complex *post_costas = NULL;
 
     int isps = (int)(sps + 0.5f);
-    int exact_sps = (fabsf(sps - (float)isps) < 0.001f);
+    (void)isps; /* used only in legacy fallback path */
     float chip_rate = fs / sps;
 
     /* ---------------------------------------------------------------
@@ -99,13 +102,53 @@ int dsss_receive_burst(const float complex *ota_buffer,
     }
 
     /* ---------------------------------------------------------------
-     * 2. Advance Q channel by SPS/2 samples to undo TX OQPSK Tc/2 delay.
+     * 2. Coarse frequency acquisition via 4th-power FFT at sample rate.
+     *    MUST precede decimation: at chip rate (Nyquist), any offset
+     *    aliases and becomes unrecoverable.  See PySDR Ch.14.
+     * --------------------------------------------------------------- */
+    #define COARSE_FFT_MIN_CONF  100.0f
+    #define COARSE_FFT_MIN_HZ     1.0f
+    int freq_corrected = 0;
+    (void)freq_corrected; /* will feed tracking loop in Phase 2 */
+    {
+        freq_acq_result_t acq;
+        if (freq_acq_coarse_fft(ota_buffer, (int)N, fs, chip_rate,
+                                &acq) == 0
+            && acq.confidence >= COARSE_FFT_MIN_CONF
+            && fabsf(acq.freq_hz) >= COARSE_FFT_MIN_HZ) {
+
+            freq_corrected = 1;
+            /* NCO correction at sample rate → post_rrc. */
+            float dphi = 2.0f * (float)M_PI * acq.freq_hz / fs;
+            float step_r = cosf(dphi), step_i = -sinf(dphi);
+            float ph_r = 1.0f, ph_i = 0.0f;
+            for (size_t k = 0; k < N; k++) {
+                float re = __real__ ota_buffer[k];
+                float im = __imag__ ota_buffer[k];
+                post_rrc[k] = (re * ph_r - im * ph_i)
+                            + (re * ph_i + im * ph_r) * I;
+                float nr = ph_r * step_r - ph_i * step_i;
+                float ni = ph_r * step_i + ph_i * step_r;
+                if ((k & 1023u) == 0u) {
+                    float inv = 1.0f / sqrtf(nr * nr + ni * ni);
+                    nr *= inv; ni *= inv;
+                }
+                ph_r = nr; ph_i = ni;
+            }
+        } else {
+            /* Offset too small or not confident — pass through. */
+            memcpy(post_rrc, ota_buffer, N * sizeof(float complex));
+        }
+    }
+
+    /* ---------------------------------------------------------------
+     * 3. OQPSK delay: advance Q channel by SPS/2 to undo TX Tc/2 offset.
      * --------------------------------------------------------------- */
     int oqpsk_delay = (int)(sps / 2.0f + 0.5f);
     for (size_t t = 0; t < N; t++) {
-        float ir = __real__ ota_buffer[t];
+        float ir = __real__ post_rrc[t];
         float qi = (t + (size_t)oqpsk_delay < N)
-                   ? __imag__ ota_buffer[t + (size_t)oqpsk_delay]
+                   ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
                    : 0.0f;
         delayed[t] = ir + I * qi;
     }
@@ -124,257 +167,63 @@ int dsss_receive_burst(const float complex *ota_buffer,
     dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
-     * 3. Pass-through (no matched filter for half-sine pulse shaping).
+     * 4. Pass-through (no matched filter for half-sine pulse shaping).
      * --------------------------------------------------------------- */
     memcpy(post_rrc, delayed, N * sizeof(float complex));
 
     /* ---------------------------------------------------------------
-     * 4. Decimate to chip rate at energy-max phase.
+     * 5. Tracking loop (FLL+PLL+DLL+Kalman) — decimation + carrier
+     *    tracking in a single sample-rate pass.
+     *
+     *    Phase 0: pass-through (legacy fixed-phase decimation).
+     *    Phases 1-5: see tracking.c for progressive implementation.
      * --------------------------------------------------------------- */
     size_t n_chips = 0;
-    int phi;
+    {
+        tracking_state_t trk;
+        float residual_freq = 0.0f;
+        float init_code = 0.0f;
 
-    if (exact_sps) {
-        phi = symbol_sync_decimate(post_rrc, N, isps,
-                                   25 * 256,
-                                   post_dec, &n_chips);
-    } else {
-        float best_phi_f = 0.0f;
-        float best_energy = -1e30f;
-        for (float pi = 0.0f; pi < sps; pi += 0.5f) {
-            float pos = pi;
-            size_t cnt = 0;
-            float energy = 0.0f;
-            while (pos < (float)N - sps && cnt < (size_t)(25 * 256)) {
-                size_t idx = (size_t)pos;
-                float frac = pos - (float)idx;
-                float complex v = post_rrc[idx] * (1.0f - frac)
-                                + post_rrc[idx + 1] * frac;
-                float re = __real__ v, im = __imag__ v;
-                energy += re * re + im * im;
-                pos += sps;
-                cnt++;
-            }
-            if (cnt < (size_t)(25 * 256)) continue;
-            if (energy > best_energy) {
-                best_energy = energy;
-                best_phi_f = pi;
-            }
+        if (tracking_init(&trk, fs, sps, residual_freq, init_code) != 0) {
+            fprintf(stderr, "[dsss_demod] tracking_init failed\n");
+            goto cleanup;
         }
-        phi = (int)(best_phi_f + 0.5f);
-        float pos = best_phi_f;
-        while (pos < (float)N - sps && n_chips < chip_buf) {
-            size_t idx = (size_t)pos;
-            float frac = pos - (float)idx;
-            post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
-                                + post_rrc[idx + 1] * frac;
-            pos += sps;
+
+        size_t n_chips_tracked = 0;
+        int trk_rc = tracking_run(&trk, post_rrc, N,
+                                  post_dec, &n_chips_tracked);
+        tracking_free(&trk);
+
+        if (trk_rc != 0 || n_chips_tracked < 38000) {
+            fprintf(stderr,
+                    "[dsss_demod] tracking failed (%zu chips), "
+                    "falling back to legacy\n", n_chips_tracked);
+
+            /* Legacy fallback: fixed-phase decimation + Costas bypass */
+            int phi = isps / 2;
+            n_chips = 0;
+            for (size_t k = 0; k < N / (size_t)isps && n_chips < chip_buf; k++) {
+                size_t idx = (size_t)phi + k * (size_t)isps;
+                if (idx < N) post_dec[n_chips++] = post_rrc[idx];
+            }
+            if (n_chips < 38000) {
+                fprintf(stderr,
+                        "[dsss_demod] legacy decimation also failed "
+                        "(phi=%d, n_chips=%zu)\n", phi, n_chips);
+                goto cleanup;
+            }
+        } else {
+            n_chips = n_chips_tracked;
         }
     }
-    if (phi < 0 || n_chips < 38000) {
-        fprintf(stderr,
-                "[dsss_demod] decimation failed (phi=%d, n_chips=%zu)\n",
-                phi, n_chips);
-        goto cleanup;
-    }
-    fprintf(stderr, "[dsss_demod] decim phi=%d, %zu chip samples\n", phi, n_chips);
+
     dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
-     * 5. Frequency acquisition via PRN-correlation sweep at chip rate,
-     *    then NCO correction at sample rate, re-OQPSK delay, re-decimate.
-     *
-     *    Only triggers if confidence >= 3.0 (avoids false positives on
-     *    noise-only buffers).  The Costas loop handles small residuals.
+     * 6. Despread — unchanged.
      * --------------------------------------------------------------- */
-    #define FREQ_ACQ_MIN_CONF  3.0f
-    #define FREQ_ACQ_MIN_HZ    20.0f   /* below this, Costas handles it */
-    #define FREQ_ACQ_SWEEP_HZ  19000.0f
-    int freq_was_corrected = 0;
-    {
-        freq_acq_result_t acq;
-        int sweep_ok = freq_acq_sweep(post_dec, (int)n_chips, chip_rate,
-                           -FREQ_ACQ_SWEEP_HZ, FREQ_ACQ_SWEEP_HZ, &acq) == 0;
-        fprintf(stderr, "[dsss_demod] sweep: ok=%d freq=%.0f conf=%.1f "
-                "phase=%d n_chips=%zu\n",
-                sweep_ok, (double)acq.freq_hz, (double)acq.confidence,
-                acq.costas_phase, n_chips);
-        if (sweep_ok && acq.confidence >= FREQ_ACQ_MIN_CONF
-            && fabsf(acq.freq_hz) >= FREQ_ACQ_MIN_HZ) {
-            freq_was_corrected = 1;
-
-            /* NCO correction at sample rate on raw ota_buffer copy. */
-            {
-                float dphi = 2.0f * (float)M_PI * acq.freq_hz / fs;
-                float step_r = cosf(dphi), step_i = -sinf(dphi);
-                float ph_r = 1.0f, ph_i = 0.0f;
-                for (size_t k = 0; k < N; k++) {
-                    float re = __real__ ota_buffer[k];
-                    float im = __imag__ ota_buffer[k];
-                    post_rrc[k] = (re * ph_r - im * ph_i)
-                                + (re * ph_i + im * ph_r) * I;
-                    float nr = ph_r * step_r - ph_i * step_i;
-                    float ni = ph_r * step_i + ph_i * step_r;
-                    if ((k & 1023u) == 0u) {
-                        float inv = 1.0f / sqrtf(nr * nr + ni * ni);
-                        nr *= inv; ni *= inv;
-                    }
-                    ph_r = nr; ph_i = ni;
-                }
-            }
-            /* Re-do OQPSK delay from corrected ota. */
-            for (size_t t = 0; t < N; t++) {
-                float ir = __real__ post_rrc[t];
-                float qi = (t + (size_t)oqpsk_delay < N)
-                           ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
-                           : 0.0f;
-                delayed[t] = ir + I * qi;
-            }
-            memcpy(post_rrc, delayed, N * sizeof(float complex));
-            /* Re-decimate at energy-max phase. */
-            n_chips = 0;
-            if (exact_sps) {
-                phi = symbol_sync_decimate(post_rrc, N, isps,
-                                           25 * 256,
-                                           post_dec, &n_chips);
-            } else {
-                float best_phi_f = 0.0f;
-                float best_energy = -1e30f;
-                for (float pi = 0.0f; pi < sps; pi += 0.5f) {
-                    float pos = pi;
-                    size_t cnt = 0;
-                    float energy = 0.0f;
-                    while (pos < (float)N - sps && cnt < (size_t)(25 * 256)) {
-                        size_t idx = (size_t)pos;
-                        float frac = pos - (float)idx;
-                        float complex v = post_rrc[idx] * (1.0f - frac)
-                                        + post_rrc[idx + 1] * frac;
-                        float re = __real__ v, im = __imag__ v;
-                        energy += re * re + im * im;
-                        pos += sps;
-                        cnt++;
-                    }
-                    if (cnt < (size_t)(25 * 256)) continue;
-                    if (energy > best_energy) {
-                        best_energy = energy;
-                        best_phi_f = pi;
-                    }
-                }
-                phi = (int)(best_phi_f + 0.5f);
-                float pos = best_phi_f;
-                while (pos < (float)N - sps && n_chips < chip_buf) {
-                    size_t idx = (size_t)pos;
-                    float frac = pos - (float)idx;
-                    post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
-                                        + post_rrc[idx + 1] * frac;
-                    pos += sps;
-                }
-            }
-            if (phi < 0 || n_chips < 38000) {
-                fprintf(stderr,
-                        "[dsss_demod] re-decimation failed (phi=%d, n_chips=%zu)\n",
-                        phi, n_chips);
-                goto cleanup;
-            }
-            fprintf(stderr, "[dsss_demod] re-decim phi=%d, %zu chip samples\n",
-                    phi, n_chips);
-        }
-    }
-
-    /* ---------------------------------------------------------------
-     * 6. Costas loop — always runs for fine phase tracking.
-     * --------------------------------------------------------------- */
-    {
-        costas4_t costas;
-        costas4_init(&costas, SGB_COSTAS_BW);
-        costas4_run(&costas, post_dec, post_costas, n_chips);
-    }
-    dump_complex("/tmp/c_post_costas.bin", post_costas, n_chips);
-
-    /* ---------------------------------------------------------------
-     * 7. Despread, optionally with alignment-guided freq refinement.
-     *
-     *    If freq_acq_sweep already corrected the offset, despread
-     *    directly.  Otherwise, use despread_sync to find alignment,
-     *    then freq_acq_from_alignment() to check for residual offset
-     *    via FFT on the aligned preamble; if found, apply NCO at
-     *    sample rate and re-do the chain.  Otherwise despread with
-     *    the found sync alignment.
-     * --------------------------------------------------------------- */
-    if (freq_was_corrected) {
-        if (despread_burst(post_costas, (int)chip_buf, output_bits) != 0)
-            goto cleanup;
-    } else {
-        despread_sync_t sync;
-        if (despread_sync(post_costas, (int)n_chips, &sync) != 0)
-            goto cleanup;
-        freq_acq_result_t acq2;
-        int align_ok = freq_acq_from_alignment(post_dec, (int)n_chips, &sync,
-                                    chip_rate, &acq2) == 0;
-        fprintf(stderr, "[dsss_demod] align: ok=%d freq=%.0f conf=%.1f "
-                "phase=%d sync_off=(%d,%d) sync_z=%.1f\n",
-                align_ok, (double)acq2.freq_hz, (double)acq2.confidence,
-                acq2.costas_phase, sync.off_i, sync.off_q,
-                (double)hypotf((float)sync.score_i/100.0f,
-                               (float)sync.score_q/100.0f));
-        if (align_ok && fabsf(acq2.freq_hz) > 1.0f
-            && acq2.confidence >= 3.0f) {
-            /* Offset found via alignment FFT — apply NCO at sample rate. */
-            {
-                float dphi = 2.0f * (float)M_PI * acq2.freq_hz / fs;
-                float step_r = cosf(dphi), step_i = -sinf(dphi);
-                float ph_r = 1.0f, ph_i = 0.0f;
-                for (size_t k = 0; k < N; k++) {
-                    float re = __real__ ota_buffer[k];
-                    float im = __imag__ ota_buffer[k];
-                    post_rrc[k] = (re * ph_r - im * ph_i)
-                                + (re * ph_i + im * ph_r) * I;
-                    float nr = ph_r * step_r - ph_i * step_i;
-                    float ni = ph_r * step_i + ph_i * step_r;
-                    if ((k & 1023u) == 0u) {
-                        float inv = 1.0f / sqrtf(nr * nr + ni * ni);
-                        nr *= inv; ni *= inv;
-                    }
-                    ph_r = nr; ph_i = ni;
-                }
-            }
-            for (size_t t = 0; t < N; t++) {
-                float ir = __real__ post_rrc[t];
-                float qi = (t + (size_t)oqpsk_delay < N)
-                           ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
-                           : 0.0f;
-                delayed[t] = ir + I * qi;
-            }
-            memcpy(post_rrc, delayed, N * sizeof(float complex));
-            n_chips = 0;
-            if (exact_sps) {
-                phi = symbol_sync_decimate(post_rrc, N, isps,
-                                           25 * 256,
-                                           post_dec, &n_chips);
-            } else {
-                float pos = (float)phi;
-                while (pos < (float)N - sps && n_chips < chip_buf) {
-                    size_t idx = (size_t)pos;
-                    float frac = pos - (float)idx;
-                    post_dec[n_chips++] = post_rrc[idx] * (1.0f - frac)
-                                        + post_rrc[idx + 1] * frac;
-                    pos += sps;
-                }
-            }
-            if (n_chips < 38000) goto cleanup;
-            {
-                costas4_t costas;
-                costas4_init(&costas, SGB_COSTAS_BW);
-                costas4_run(&costas, post_dec, post_costas, n_chips);
-            }
-            if (despread_burst(post_costas, (int)chip_buf, output_bits) != 0)
-                goto cleanup;
-        } else {
-            if (despread_bits(post_costas, (int)n_chips,
-                              &sync, output_bits) != 0)
-                goto cleanup;
-        }
-    }
+    if (despread_burst(post_dec, (int)n_chips, output_bits) != 0)
+        goto cleanup;
 
     rc = 0;
 
