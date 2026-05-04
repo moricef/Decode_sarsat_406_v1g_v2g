@@ -2,8 +2,8 @@
  * @file tracking.c
  * @brief FLL + PLL + DLL burst tracking loop for DSSS/OQPSK.
  *
- * Phase 1: EPL correlator + DLL (code tracking loop).
- *          Carrier NCO at fixed frequency (from coarse FFT).
+ * Phase 2: FLL (cross-product discriminator) + DLL.
+ *          Carrier NCO updated at each epoch via 2nd-order loop filter.
  *          Code NCO tracks chip boundaries via E-L normalized discriminator.
  *          EPL accumulates at every sample (not just chip boundaries).
  *
@@ -22,11 +22,12 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* DLL loop bandwidth (Hz) — Phase 1 */
-#define DLL_BW_ACQ   1.0f
+/* Loop bandwidths (Hz) */
+#define DLL_BW_ACQ  1.0f
+#define FLL_BW_ACQ  2.0f
 
 /* ------------------------------------------------------------------ */
-/* Compute 1st-order loop filter gains from bandwidth and interval.   */
+/* Compute 1st-order code loop filter gains.                          */
 /* alpha = 4*BW*T / (1 + 4*BW*T)                                     */
 /* ------------------------------------------------------------------ */
 static void compute_code_gains(tracking_state_t *trk, float bw)
@@ -35,6 +36,20 @@ static void compute_code_gains(tracking_state_t *trk, float bw)
     float x = 4.0f * bw * T;
     trk->code_alpha = x / (1.0f + x);
     trk->code_beta  = 0.0f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Compute 2nd-order carrier loop filter gains.                       */
+/* wn = BW*8*zeta/(4*zeta²+1), zeta = 1/sqrt(2)                      */
+/* alpha = sqrt(2)*wn*T, beta = wn²*T²                               */
+/* ------------------------------------------------------------------ */
+static void compute_carrier_gains(tracking_state_t *trk, float bw)
+{
+    float T = (float)trk->coh_chips / trk->chip_rate;
+    float zeta = 0.70710678f;
+    float wn = bw * 8.0f * zeta / (4.0f * zeta * zeta + 1.0f);
+    trk->carr_alpha = 1.41421356f * wn * T;
+    trk->carr_beta  = wn * wn * T * T;
 }
 
 /* ------------------------------------------------------------------ */
@@ -69,13 +84,27 @@ static float dll_discriminator(const epl_accum_t *acc)
 }
 
 /* ------------------------------------------------------------------ */
+/* FLL discriminator: cross-product, insensitive to data modulation.   */
+/*   cross = Re(P[k-1])*Im(P[k]) - Im(P[k-1])*Re(P[k])                */
+/*   dot   = Re(P[k-1])*Re(P[k]) + Im(P[k-1])*Im(P[k])                */
+/*   d_freq = atan2(cross, dot) / (2*pi*T)   [Hz]                     */
+/* ------------------------------------------------------------------ */
+static float fll_discriminator(float complex prev, float complex cur, float T)
+{
+    float cross = crealf(prev) * cimagf(cur) - cimagf(prev) * crealf(cur);
+    float dot   = crealf(prev) * crealf(cur) + cimagf(prev) * cimagf(cur);
+    return atan2f(cross, dot) / (2.0f * (float)M_PI * T);
+}
+
+/* ------------------------------------------------------------------ */
 /* Process one completed epoch: discriminators + loop filter update.    */
 /* ------------------------------------------------------------------ */
 static void process_epoch(tracking_state_t *trk)
 {
-    float d_tau = dll_discriminator(&trk->accum);
+    float T = (float)trk->coh_chips / trk->chip_rate;
 
-    /* 1st-order code loop filter */
+    /* DLL discriminator + 1st-order code loop filter */
+    float d_tau = dll_discriminator(&trk->accum);
     trk->code_freq += trk->code_alpha * d_tau / trk->sps;
 
     /* Clamp code_freq to ±1% of nominal */
@@ -84,12 +113,22 @@ static void process_epoch(tracking_state_t *trk)
     if (trk->code_freq > nominal + max_dev) trk->code_freq = nominal + max_dev;
     if (trk->code_freq < nominal - max_dev) trk->code_freq = nominal - max_dev;
 
+    /* FLL discriminator + 2nd-order carrier loop filter */
+    float dot_prev = crealf(trk->prev_prompt) * crealf(trk->prev_prompt)
+                   + cimagf(trk->prev_prompt) * cimagf(trk->prev_prompt);
+    if (dot_prev > 1e-12f) {
+        float d_freq = fll_discriminator(trk->prev_prompt, trk->accum.prompt_i, T);
+        trk->carr_integrator += trk->carr_beta * d_freq;
+        float freq_hz = trk->carr_integrator + trk->carr_alpha * d_freq;
+        trk->carrier_freq = 2.0f * (float)M_PI * freq_hz / trk->fs;
+    }
+
     trk->prev_prompt = trk->accum.prompt_i;
 
     /* Debug trace */
     if (trk->dbg_code && trk->dbg_len < trk->dbg_cap) {
         trk->dbg_code[trk->dbg_len]  = d_tau;
-        trk->dbg_freq[trk->dbg_len]  = trk->code_freq * trk->sps;
+        trk->dbg_freq[trk->dbg_len]  = trk->carrier_freq * trk->fs / (2.0f * (float)M_PI);
         trk->dbg_phase[trk->dbg_len] = trk->carrier_phase;
         trk->dbg_len++;
     }
@@ -126,6 +165,7 @@ int tracking_init(tracking_state_t *trk,
     trk->coh_chips = 64;
 
     compute_code_gains(trk, DLL_BW_ACQ);
+    compute_carrier_gains(trk, FLL_BW_ACQ);
 
     trk->prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
     trk->prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
@@ -136,7 +176,7 @@ int tracking_init(tracking_state_t *trk,
     despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, trk->prn_i);
     despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, trk->prn_q);
 
-    int max_epochs = (int)(fs / trk->chip_rate) / trk->coh_chips + 100;
+    int max_epochs = (int)(3.0f * trk->chip_rate / (float)trk->coh_chips) + 100;
     trk->dbg_cap = max_epochs;
     trk->dbg_freq  = (float *)calloc((size_t)max_epochs, sizeof(float));
     trk->dbg_phase = (float *)calloc((size_t)max_epochs, sizeof(float));
@@ -221,10 +261,13 @@ int tracking_run(tracking_state_t *trk,
             chips_out[chip_out_idx++] = bb;
             trk->accum.n_chips++;
 
-            /* 6. Epoch boundary — run discriminator + loop filter */
+            /* 6. Epoch boundary — run discriminators + loop filters */
             if (trk->accum.n_chips >= trk->coh_chips) {
                 process_epoch(trk);
                 code_freq = trk->code_freq;
+                carr_dphi = trk->carrier_freq;
+                step_r = cosf(carr_dphi);
+                step_i = sinf(carr_dphi);
                 memset(&trk->accum, 0, sizeof(trk->accum));
             }
 
@@ -237,16 +280,18 @@ int tracking_run(tracking_state_t *trk,
 
     *n_chips_out = chip_out_idx;
 
+    float final_freq_hz = trk->carrier_freq * trk->fs / (2.0f * (float)M_PI);
     fprintf(stderr,
-            "[tracking] DLL: %zu chips, %d epochs, "
-            "code_freq=%.6f (nominal=%.6f)\n",
+            "[tracking] FLL+DLL: %zu chips, %d epochs, "
+            "freq=%.1f Hz, code_freq=%.6f (nominal=%.6f)\n",
             chip_out_idx, trk->epoch_count,
+            (double)final_freq_hz,
             (double)trk->code_freq, 1.0 / (double)trk->sps);
 
-    if (trk->dbg_code && trk->dbg_len > 0) {
-        FILE *f = fopen("/tmp/c_tracking_dll.bin", "wb");
+    if (trk->dbg_freq && trk->dbg_len > 0) {
+        FILE *f = fopen("/tmp/c_tracking_freq.bin", "wb");
         if (f) {
-            fwrite(trk->dbg_code, sizeof(float), (size_t)trk->dbg_len, f);
+            fwrite(trk->dbg_freq, sizeof(float), (size_t)trk->dbg_len, f);
             fclose(f);
         }
     }
