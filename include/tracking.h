@@ -90,6 +90,9 @@ typedef struct {
     float complex prompt_hist[TRK_PROMPT_HIST_LEN];
     int prompt_hist_idx;
 
+    /* Pending PLL phase correction (rad, applied in tracking_run) */
+    float pending_phase_correction;
+
     /* Kalman filter (NULL until LOCK1) */
     void *kalman;
 
