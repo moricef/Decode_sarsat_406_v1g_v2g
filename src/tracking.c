@@ -13,6 +13,7 @@
  */
 
 #include "tracking.h"
+#include "kalman5.h"
 #include "despread.h"
 
 #include <math.h>
@@ -177,6 +178,13 @@ static void atc_update(tracking_state_t *trk)
                 trk->unlock_counter = 0;
                 compute_carrier_gains(trk, FLL_BW_LOCK1);
                 compute_code_gains(trk, DLL_BW_LOCK);
+                if (!trk->kalman) {
+                    trk->kalman = malloc(sizeof(kalman5_t));
+                    if (trk->kalman) {
+                        float Tk = (float)trk->coh_chips / trk->chip_rate;
+                        kalman5_init((kalman5_t *)trk->kalman, Tk, 406.0e6f, trk->chip_rate);
+                    }
+                }
                 fprintf(stderr, "[tracking] ATC: ACQ → LOCK1 (coh=%d, lock=%.3f)\n",
                         trk->coh_chips, (double)li);
             }
@@ -214,6 +222,8 @@ static void atc_update(tracking_state_t *trk)
                 trk->carr_integrator = 0.0f;
                 compute_carrier_gains(trk, FLL_BW_ACQ);
                 compute_code_gains(trk, DLL_BW_ACQ);
+                free(trk->kalman);
+                trk->kalman = NULL;
                 fprintf(stderr, "[tracking] ATC: LOCK1 → ACQ (lost lock, lock=%.3f)\n",
                         (double)li);
             }
@@ -296,6 +306,46 @@ static void process_epoch(tracking_state_t *trk)
     if (fll_active)
         freq_hz += trk->carr_alpha * d_freq;
     trk->carrier_freq = 2.0f * (float)M_PI * freq_hz / trk->fs;
+
+    /* --- Kalman joint estimation (LOCK1/LOCK2) --- */
+    if (trk->kalman) {
+        kalman5_t *kf = (kalman5_t *)trk->kalman;
+        kf->T = T;
+
+        /* Safeguard: bypass Kalman if d_freq is noise (variance > 400 Hz²
+         * over recent history), indicating no real signal to track.
+         * Prevents Kalman from injecting noise on already-correct data. */
+        static float df_hist[8], df_sq_hist[8];
+        static int df_hist_idx = 0, df_hist_fill = 0;
+        df_hist[df_hist_idx & 7] = d_freq;
+        df_sq_hist[df_hist_idx & 7] = d_freq * d_freq;
+        df_hist_idx++;
+        if (df_hist_fill < 8) df_hist_fill++;
+
+        float df_mean = 0.0f, df_var = 0.0f;
+        for (int i = 0; i < df_hist_fill; i++) {
+            df_mean += df_hist[i];
+            df_var  += df_sq_hist[i];
+        }
+        df_mean /= (float)df_hist_fill;
+        df_var  = df_var / (float)df_hist_fill - df_mean * df_mean;
+
+        if (df_var < 400.0f) {   /* skip Kalman when d_freq is noise */
+            kalman5_predict(kf);
+            float z[KF_M];
+            z[0] = d_phase;
+            z[1] = d_freq;
+            z[2] = d_tau;
+            kalman5_update(kf, z);
+            if ((trk->epoch_count % 20) == 0)
+                kalman5_adapt_noise(kf);
+            trk->pending_phase_correction += kf->x[0];
+            float kf_hz = kf->x[1];
+            trk->carrier_freq += 2.0f * (float)M_PI * kf_hz / trk->fs;
+            trk->pending_code_correction += kf->x[3];
+            trk->code_freq += kf->x[4] / trk->chip_rate;
+        }
+    }
 
     /* --- Lock detector + ATC --- */
     update_lock_detector(trk);
@@ -449,7 +499,7 @@ int tracking_run(tracking_state_t *trk,
                 step_r = cosf(carr_dphi);
                 step_i = sinf(carr_dphi);
 
-                /* Apply PLL phase correction to phasor */
+                /* Apply phase correction to phasor */
                 if (trk->pending_phase_correction != 0.0f) {
                     float dp = trk->pending_phase_correction;
                     float cos_dp = cosf(dp), sin_dp = sinf(dp);
@@ -457,6 +507,11 @@ int tracking_run(tracking_state_t *trk,
                     float pi = ph_i * cos_dp - ph_r * sin_dp;
                     ph_r = pr; ph_i = pi;
                     trk->pending_phase_correction = 0.0f;
+                }
+                /* Apply code phase correction (Kalman) */
+                if (trk->pending_code_correction != 0.0f) {
+                    code_phase += trk->pending_code_correction;
+                    trk->pending_code_correction = 0.0f;
                 }
 
                 memset(&trk->accum, 0, sizeof(trk->accum));
@@ -502,6 +557,8 @@ void tracking_free(tracking_state_t *trk)
     free(trk->dbg_phase);
     free(trk->dbg_code);
     free(trk->dbg_cn0);
+    free(trk->kalman);
     trk->prn_i = trk->prn_q = NULL;
     trk->dbg_freq = trk->dbg_phase = trk->dbg_code = trk->dbg_cn0 = NULL;
+    trk->kalman = NULL;
 }

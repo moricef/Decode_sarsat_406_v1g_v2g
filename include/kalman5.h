@@ -24,9 +24,10 @@ typedef struct {
     float H[KF_M][KF_N];     /* observation matrix */
     float code_carrier_ratio; /* f_chip / f_carrier (~9.46e-5) */
     float T;                  /* integration interval (seconds) */
-    float innov_accum[KF_M];  /* innovation accumulator for R adaptation */
+    float innov_accum[KF_M];    /* sum of innovation for mean */
+    float innov_sq_accum[KF_M]; /* sum of innovation² for variance */
     int   innov_count;
-    int   adapt_interval;     /* recalculate R every N epochs */
+    int   adapt_interval;       /* recalculate R every N epochs */
 } kalman5_t;
 
 /**

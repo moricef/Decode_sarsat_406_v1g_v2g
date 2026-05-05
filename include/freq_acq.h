@@ -1,10 +1,10 @@
 /**
  * @file freq_acq.h
- * @brief DSSS PRN-correlation frequency acquisition
+ * @brief DSSS frequency acquisition — coarse 4th-power FFT + PRN sweep fallback
  *
- * Two-pass hierarchical sweep replacing the coarse FFT. Operates at chip rate
- * (38.4 kHz), correlating partial preamble against expected PRN to find the
- * LO offset with ~5 Hz accuracy.
+ * Primary: 4th-power FFT at sample rate (collapses OQPSK constellation),
+ *          per standard DSP practice: coarse freq sync BEFORE timing sync.
+ * Fallback: PRN-correlation sweep at chip rate (legacy).
  */
 
 #ifndef FREQ_ACQ_H
@@ -32,6 +32,28 @@ int freq_acq_sweep(const float complex *chips, int n_chips,
                    float chip_rate,
                    float freq_min, float freq_max,
                    freq_acq_result_t *result);
+
+/**
+ * @brief Coarse frequency estimation via 4th-power FFT at sample rate.
+ *
+ * Raises baseband signal to 4th power, collapsing the OQPSK constellation
+ * (chips are ±1±j, (±1±j)^4 = constant).  FFT of the result reveals a
+ * tone at 4× the carrier offset.  Operates at sample rate BEFORE decimation
+ * (coarse freq sync precedes timing sync — see PySDR Ch.14).
+ *
+ * The half-sine pulse shaping introduces a chip_rate/2 offset: the tone
+ * appears at 4×(fo + chip_rate/2), not 4×fo.  This function corrects for it.
+ *
+ * @param samples     Raw I/Q samples at sample rate (pre-OQPSK delay).
+ * @param n_samples   Number of samples available.
+ * @param fs          Sample rate in Hz.
+ * @param chip_rate   Chip rate in Hz.
+ * @param result      Output: freq offset, confidence, phase (phase=0 always).
+ * @return 0 on success, -1 on error.
+ */
+int freq_acq_coarse_fft(const float complex *samples, int n_samples,
+                        float fs, float chip_rate,
+                        freq_acq_result_t *result);
 
 /**
  * @brief Estimate residual frequency from despread-aligned preamble via FFT.

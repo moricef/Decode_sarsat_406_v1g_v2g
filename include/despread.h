@@ -35,7 +35,7 @@
 #define DESPREAD_MSG_BITS         125      /* per channel */
 #define DESPREAD_TOTAL_BITS       150      /* per channel */
 #define DESPREAD_PREAMBLE_CHIPS   (DESPREAD_PREAMBLE_BITS * DESPREAD_CHIPS_PER_BIT)
-#define DESPREAD_SYNC_RANGE       200
+#define DESPREAD_SYNC_RANGE       1000
 #define DESPREAD_SYNC_THRESHOLD   2.8f   /* combined z-score sqrt(z_i²+z_q²) */
 #define DESPREAD_OUTPUT_BITS      250      /* 125 I + 125 Q interleaved */
 
@@ -50,6 +50,18 @@
  * @param out     Buffer of `length` int8 chips, each in {0, 1}.
  */
 void despread_gen_prn(uint32_t seed, int length, int8_t *out);
+
+/**
+ * @brief Get expected I-channel preamble chips (all-zero bits → raw PRN).
+ *
+ * Generates the first n chips of the T.018 preamble (despread seed I,
+ * data bits = 0 → no inversion).  Output is ±1 per chip, suitable for
+ * dot-product correlation.
+ *
+ * @param out   Output buffer, length n.
+ * @param n     Number of preamble chips to generate.
+ */
+void despread_get_preamble_chips(int *out, int n);
 
 /**
  * @brief Preamble sync result.

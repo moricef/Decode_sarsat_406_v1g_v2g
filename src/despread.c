@@ -26,6 +26,16 @@ void despread_gen_prn(uint32_t seed, int length, int8_t *out)
     }
 }
 
+void despread_get_preamble_chips(int *out, int n)
+{
+    int8_t *raw = (int8_t *)malloc((size_t)n);
+    if (!raw) return;
+    despread_gen_prn(DESPREAD_PRN_SEED_I, n, raw);
+    for (int i = 0; i < n; i++)
+        out[i] = 1 - 2 * (int)raw[i];  /* 0→+1, 1→-1 */
+    free(raw);
+}
+
 static void chip_not(const int8_t *src, int n, int8_t *dst)
 {
     for (int i = 0; i < n; i++) dst[i] = (int8_t)(1 - src[i]);

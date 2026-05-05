@@ -231,8 +231,105 @@ int freq_acq_sweep(const float complex *chips, int n_chips,
 }
 
 /* ================================================================== */
-/*  Alignment-guided frequency estimator                              */
+/*  Coarse FFT via 4th-power method (sample rate)                     */
 /* ================================================================== */
+
+#define COARSE_FFT_N  65536    /* ~34ms at 1.92MHz, ~27ms at 2.4576MHz */
+
+static void fft_radix2(float complex *x, int n);  /* forward decl */
+
+int freq_acq_coarse_fft(const float complex *samples, int n_samples,
+                        float fs, float chip_rate,
+                        freq_acq_result_t *result)
+{
+    if (!samples || n_samples < COARSE_FFT_N || !result)
+        return -1;
+
+    memset(result, 0, sizeof(*result));
+
+    int n = COARSE_FFT_N;
+    float complex *fft_buf = (float complex *)calloc((size_t)n,
+                                                      sizeof(float complex));
+    if (!fft_buf) return -1;
+
+    /* Normalise and raise to 4th power: (I+jQ)^4 collapses OQPSK ±1±j */
+    float scale = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float re = __real__ samples[i];
+        float im = __imag__ samples[i];
+        float mag = re * re + im * im;
+        if (mag > scale) scale = mag;
+    }
+    scale = scale > 0.0f ? 1.0f / scale : 1.0f;
+
+    for (int i = 0; i < n; i++) {
+        float re = __real__ samples[i] * scale;
+        float im = __imag__ samples[i] * scale;
+        /* s² = (re+j*im)² */
+        float s2_re = re * re - im * im;
+        float s2_im = 2.0f * re * im;
+        /* s⁴ = (s²)² */
+        __real__ fft_buf[i] = s2_re * s2_re - s2_im * s2_im;
+        __imag__ fft_buf[i] = 2.0f * s2_re * s2_im;
+    }
+
+    fft_radix2(fft_buf, n);
+
+    /* Magnitude */
+    for (int i = 0; i < n; i++) {
+        float re = __real__ fft_buf[i], im = __imag__ fft_buf[i];
+        __real__ fft_buf[i] = re * re + im * im;
+    }
+
+    /* Find peak — skip DC (0 Hz ± guard) */
+    int dc_guard = (int)((500.0f * (float)n) / fs);  /* ±500 Hz guard */
+    if (dc_guard < 5) dc_guard = 5;
+    float peak_mag = 0.0f;
+    int   peak_bin = 0;
+    float noise_sum = 0.0f;
+    int   noise_cnt = 0;
+
+    for (int i = dc_guard; i < n / 2; i++) {
+        float mag = __real__ fft_buf[i];
+        noise_sum += mag;
+        noise_cnt++;
+        if (mag > peak_mag) { peak_mag = mag; peak_bin = i; }
+    }
+    float noise_mean = noise_cnt > 0 ? noise_sum / (float)noise_cnt : 1e-10f;
+    float ratio = peak_mag / noise_mean;
+
+    /* Quadratic interpolation for sub-bin accuracy */
+    float bin_f = (float)peak_bin;
+    if (peak_bin > dc_guard && peak_bin < n / 2 - 1) {
+        float L = __real__ fft_buf[peak_bin - 1];
+        float C = peak_mag;
+        float R = __real__ fft_buf[peak_bin + 1];
+        float denom = 2.0f * C - L - R;
+        if (denom > 1e-10f)
+            bin_f += 0.5f * (R - L) / denom;
+    }
+
+    /* Peak is at 4×(fo + chip_rate/2) due to half-sine pulse shaping.
+     * → fo = bin_f * fs / n / 4 - chip_rate / 2                      */
+    float fo_raw  = bin_f * fs / ((float)n * 4.0f);
+    float fo_corr = fo_raw - chip_rate * 0.5f;
+
+    free(fft_buf);
+
+    if (ratio < 5.0f)  /* require strong peak */
+        return 0;      /* result stays at 0 Hz */
+
+    result->freq_hz     = fo_corr;
+    result->confidence  = ratio;
+    result->costas_phase = 0;
+
+    fprintf(stderr,
+            "[freq_acq] coarse fft: raw=%.0f Hz  corr=%.0f Hz  "
+            "conf=%.1f  peak_bin=%d\n",
+            (double)fo_raw, (double)fo_corr, (double)ratio, peak_bin);
+
+    return 0;
+}
 
 #define ALIGN_FFT_N            8192
 #define ALIGN_PREAMBLE_CHIPS   6400
