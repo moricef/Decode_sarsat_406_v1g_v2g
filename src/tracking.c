@@ -363,6 +363,33 @@ static void process_epoch(tracking_state_t *trk)
         trk->dbg_len++;
     }
 
+    /* EPL epoch dump */
+    {
+        static FILE *epl_csv = NULL;
+        if (!epl_csv) {
+            epl_csv = fopen("/tmp/c_tracking_epl.csv", "w");
+            if (epl_csv)
+                fprintf(epl_csv,
+                        "epoch,state,coh_chips,"
+                        "prompt_I_re,prompt_I_im,prompt_Q_re,prompt_Q_im,"
+                        "d_tau,d_freq,d_phase,"
+                        "lock_ind,carrier_freq_hz,code_freq\n");
+        }
+        if (epl_csv) {
+            fprintf(epl_csv,
+                    "%d,%d,%d,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6f,%.3f,%.9f\n",
+                    trk->epoch_count, trk->state, trk->coh_chips,
+                    (double)crealf(trk->accum.prompt_i),
+                    (double)cimagf(trk->accum.prompt_i),
+                    (double)crealf(trk->accum.prompt_q),
+                    (double)cimagf(trk->accum.prompt_q),
+                    (double)d_tau, (double)d_freq, (double)d_phase,
+                    (double)trk->lock_indicator,
+                    (double)freq_hz,
+                    (double)trk->code_freq);
+        }
+    }
+
     trk->epoch_count++;
 }
 
@@ -386,6 +413,7 @@ int tracking_init(tracking_state_t *trk,
 
     trk->carrier_phase = 0.0f;
     trk->carrier_freq  = 2.0f * (float)M_PI * coarse_freq_hz / fs;
+    trk->carr_integrator = coarse_freq_hz;  /* keep across epochs */
 
     trk->code_phase   = init_code_phase;
     trk->code_freq    = 1.0f / sps;

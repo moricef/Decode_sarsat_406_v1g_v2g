@@ -2,13 +2,12 @@
  * @file dsss_demod.c
  * @brief Pure-C DSSS OQPSK receive chain.
  *
- * Orchestrates (correct DSP order — coarse freq BEFORE timing sync):
- *   1. freq_acq_coarse_fft() — 4th-power FFT at sample rate (PySDR Ch.14).
- *   2. NCO correction at sample rate (if offset detected).
- *   3. Q-channel advance by SPS/2 (undo OQPSK Tc/2 delay).
- *   4. DC blocker (IIR, alpha=0.001).
- *   5. Tracking loop (FLL+PLL+DLL+Kalman) — Zhang et al. ICEE 2025.
- *   6. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
+ * Orchestrates (per Zhang et al. ICEE 2025, Fig. 59.1):
+ *   1. freq_acq_coarse_fft() — 4th-power FFT at sample rate.
+ *   2. Q-channel advance by SPS/2 (undo OQPSK Tc/2 delay).
+ *   3. DC blocker (IIR, alpha=0.001).
+ *   4. Tracking loop (FLL+PLL+DLL+Kalman) — coarse freq feeds carrier NCO.
+ *   5. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
  *
  * On success, writes 250 bits to output_bits[] suitable for decode_2g().
  */
@@ -105,40 +104,24 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * 2. Coarse frequency acquisition via 4th-power FFT at sample rate.
      *    MUST precede decimation: at chip rate (Nyquist), any offset
      *    aliases and becomes unrecoverable.  See PySDR Ch.14.
+     *
+     *    The coarse estimate is passed to tracking_init() — the tracking
+     *    loop's own carrier NCO handles the wipe-off (Zhang et al. Fig. 59.1).
+     *    No separate NCO correction stage here (was redundant).
      * --------------------------------------------------------------- */
     #define COARSE_FFT_MIN_CONF  100.0f
     #define COARSE_FFT_MIN_HZ     1.0f
-    int freq_corrected = 0;
-    (void)freq_corrected; /* will feed tracking loop in Phase 2 */
+    float coarse_freq_hz = 0.0f;
     {
         freq_acq_result_t acq;
         if (freq_acq_coarse_fft(ota_buffer, (int)N, fs, chip_rate,
                                 &acq) == 0
             && acq.confidence >= COARSE_FFT_MIN_CONF
             && fabsf(acq.freq_hz) >= COARSE_FFT_MIN_HZ) {
-
-            freq_corrected = 1;
-            /* NCO correction at sample rate → post_rrc. */
-            float dphi = 2.0f * (float)M_PI * acq.freq_hz / fs;
-            float step_r = cosf(dphi), step_i = -sinf(dphi);
-            float ph_r = 1.0f, ph_i = 0.0f;
-            for (size_t k = 0; k < N; k++) {
-                float re = __real__ ota_buffer[k];
-                float im = __imag__ ota_buffer[k];
-                post_rrc[k] = (re * ph_r - im * ph_i)
-                            + (re * ph_i + im * ph_r) * I;
-                float nr = ph_r * step_r - ph_i * step_i;
-                float ni = ph_r * step_i + ph_i * step_r;
-                if ((k & 1023u) == 0u) {
-                    float inv = 1.0f / sqrtf(nr * nr + ni * ni);
-                    nr *= inv; ni *= inv;
-                }
-                ph_r = nr; ph_i = ni;
-            }
-        } else {
-            /* Offset too small or not confident — pass through. */
-            memcpy(post_rrc, ota_buffer, N * sizeof(float complex));
+            coarse_freq_hz = acq.freq_hz;
         }
+        /* Samples pass through — tracking_init NCO handles the wipe-off. */
+        memcpy(post_rrc, ota_buffer, N * sizeof(float complex));
     }
 
     /* ---------------------------------------------------------------
@@ -181,10 +164,9 @@ int dsss_receive_burst(const float complex *ota_buffer,
     size_t n_chips = 0;
     {
         tracking_state_t trk;
-        float residual_freq = 0.0f;
         float init_code = 0.0f;
 
-        if (tracking_init(&trk, fs, sps, residual_freq, init_code) != 0) {
+        if (tracking_init(&trk, fs, sps, coarse_freq_hz, init_code) != 0) {
             fprintf(stderr, "[dsss_demod] tracking_init failed\n");
             goto cleanup;
         }
