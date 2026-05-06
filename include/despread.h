@@ -75,8 +75,9 @@ typedef struct {
     int off_i;   /* chip offset for I channel */
     int off_q;   /* chip offset for Q channel */
     int phase;   /* Costas ambiguity 0..3 */
-    int score_i; /* peak-to-mean ratio × 100 */
-    int score_q; /* peak-to-mean ratio × 100 */
+    int score_i; /* peak-to-mean ratio × 10 */
+    int score_q; /* peak-to-mean ratio × 10 */
+    float z_comb; /* combined z-score (sqrt(z_i² + z_q²)) */
 } despread_sync_t;
 
 /**

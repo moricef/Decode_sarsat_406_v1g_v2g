@@ -157,17 +157,31 @@ int despread_sync(const float complex *samples, int num_chips,
     /* ---------- Quality check: peak z-score ----------
      * For each pass we measure how many standard deviations the best
      * correlation stands above the mean of the other candidates.
-     * Pure noise gives z < 3; a real preamble gives z >> 10. */
-    float mean_i = cnt_i > 1 ? (sum_i - best_i_raw) / (float)(cnt_i - 1) : 0.0f;
-    float mean_q = cnt_q > 1 ? (sum_q - best_q_raw) / (float)(cnt_q - 1) : 0.0f;
-    float var_i  = cnt_i > 1 ? (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
-                               - mean_i * mean_i : 1e-10f;
-    float var_q  = cnt_q > 1 ? (sum2_q - best_q_raw * best_q_raw) / (float)(cnt_q - 1)
-                               - mean_q * mean_q : 1e-10f;
-    if (var_i < 1e-10f) var_i = 1e-10f;
-    if (var_q < 1e-10f) var_q = 1e-10f;
-    float z_i = fabsf(best_i_raw - mean_i) / sqrtf(var_i);
-    float z_q = fabsf(best_q_raw - mean_q) / sqrtf(var_q);
+     * Pure noise gives z < 3; a real preamble gives z >> 10.
+     *
+     * When there are too few candidates for a reliable empirical
+     * variance (cnt < 10), fall back to the theoretical noise floor:
+     * std = sqrt(N_chips) ≈ 80 for 6400-chip preamble. */
+    float noise_std = sqrtf((float)DESPREAD_PREAMBLE_CHIPS);
+    float z_i, z_q;
+    if (cnt_i > 10) {
+        float mean_i = (sum_i - best_i_raw) / (float)(cnt_i - 1);
+        float var_i = (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
+                      - mean_i * mean_i;
+        if (var_i < 1e-10f) var_i = 1e-10f;
+        z_i = fabsf(best_i_raw - mean_i) / sqrtf(var_i);
+    } else {
+        z_i = fabsf(best_i_raw) / noise_std;
+    }
+    if (cnt_q > 10) {
+        float mean_q = (sum_q - best_q_raw) / (float)(cnt_q - 1);
+        float var_q = (sum2_q - best_q_raw * best_q_raw) / (float)(cnt_q - 1)
+                      - mean_q * mean_q;
+        if (var_q < 1e-10f) var_q = 1e-10f;
+        z_q = fabsf(best_q_raw - mean_q) / sqrtf(var_q);
+    } else {
+        z_q = fabsf(best_q_raw) / noise_std;
+    }
 
     float z_comb = sqrtf(z_i * z_i + z_q * z_q);
     float thr = DESPREAD_SYNC_THRESHOLD;
@@ -184,8 +198,9 @@ int despread_sync(const float complex *samples, int num_chips,
     sync->off_i   = best_off_i;
     sync->off_q   = best_off_q;
     sync->phase   = best_phase;
-    sync->score_i = (int)(z_i * 10.0f);
-    sync->score_q = (int)(z_q * 10.0f);
+    sync->z_comb  = z_comb;
+    sync->score_i = (z_i < 10000.0f) ? (int)(z_i * 10.0f) : 0x7FFF;
+    sync->score_q = (z_i < 10000.0f) ? (int)(z_q * 10.0f) : 0x7FFF;
 
     fprintf(stderr,
             "[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
@@ -291,9 +306,7 @@ int despread_burst(const float complex *samples, int num_chips,
     if (despread_sync(samples, num_chips, &sync) != 0)
         return -1;
     if (z_score) {
-        float zi = (float)sync.score_i / 10.0f;
-        float zq = (float)sync.score_q / 10.0f;
-        *z_score = sqrtf(zi * zi + zq * zq);
+        *z_score = sync.z_comb;
     }
     return despread_bits(samples, num_chips, &sync, output_bits);
 }
