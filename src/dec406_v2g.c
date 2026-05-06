@@ -150,10 +150,10 @@ static void bch_decode_250_202(const uint8_t *msg, uint8_t *out)
     uint8_t syn[12];
     compute_syndromes(cw, syn);
 
-    int all_zero = 1;
-    for (int i = 0; i < 12; i++) if (syn[i]) { all_zero = 0; break; }
+    int orig_errors = 0;
+    for (int i = 0; i < 12; i++) if (syn[i]) { orig_errors = 1; break; }
 
-    if (!all_zero) {
+    if (orig_errors) {
         uint8_t lam[13] = {0};
         int L = berlekamp_massey(syn, lam);
         if (L >= 1 && L <= 6) {
@@ -165,19 +165,22 @@ static void bch_decode_250_202(const uint8_t *msg, uint8_t *out)
                 /* re-verify */
                 uint8_t syn2[12];
                 compute_syndromes(cw, syn2);
-                all_zero = 1;
-                for (int i = 0; i < 12; i++) if (syn2[i]) { all_zero = 0; break; }
-                if (!all_zero)
+                int still_errors = 0;
+                for (int i = 0; i < 12; i++) if (syn2[i]) { still_errors = 1; break; }
+                if (still_errors) {
                     memcpy(cw, msg, 250);  /* miscorrect — restore */
+                    fprintf(stderr, "BCH: Errors detected, could not correct\n");
+                } else {
+                    fprintf(stderr, "BCH: %d errors corrected\n", L);
+                }
+            } else {
+                fprintf(stderr, "BCH: Errors detected, could not correct\n");
             }
+        } else {
+            fprintf(stderr, "BCH: Errors detected, could not correct\n");
         }
     }
-
-    if (all_zero) {
-        /* No errors detected or corrected successfully */
-    } else {
-        fprintf(stderr, "BCH: Errors detected, could not correct\n");
-    }
+    /* else: no errors, nothing to print */
 
     memcpy(out, cw, 202);
 }

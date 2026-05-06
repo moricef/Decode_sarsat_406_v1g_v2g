@@ -295,23 +295,24 @@ static void process_epoch(tracking_state_t *trk)
         }
     }
 
-    /* --- PLL (Costas, LOCK1 + LOCK2) --- */
+    /* --- PLL (Costas, all states) ---
+     * QPSK Costas discriminator on prompt_i.
+     * OQPSK cross-talk from Q channel adds noise, so gains are reduced
+     * vs. theoretical — but even a weak PLL prevents phase drift that
+     * would otherwise accumulate over the message portion (834 ms).
+     * PLL is active in all states: ACQ gets reduced gain (prevents
+     * phase drift without destabilizing FLL convergence). */
     float d_phase = 0.0f;
-    int pll_active = (trk->state == TRK_STATE_LOCK1 || trk->state == TRK_STATE_LOCK2);
-    if (pll_active) {
+    {
         d_phase = pll_discriminator(trk->accum.prompt_i);
 
-        if (0 && trk->state == TRK_STATE_LOCK2) {
-            /* PLL-only integrator — disabled pending PLL noise fix */
-            trk->carr_integrator += trk->carr_beta * d_phase;
-        }
+        float pll_gain = (trk->state == TRK_STATE_ACQ) ? 0.25f : 0.5f;
 
-        /* Phase correction for phasor (proportional term)
-         * FIXME: disabled until Q-cross-talk PLL noise is resolved */
-        (void)d_phase;
-        trk->pending_phase_correction = 0.0f;
-    } else {
-        trk->pending_phase_correction = 0.0f;
+        /* FLL integrator also integrates phase error (2nd-order loop) */
+        trk->carr_integrator += trk->carr_beta * d_phase * pll_gain;
+
+        /* Proportional phase correction applied each epoch */
+        trk->pending_phase_correction = trk->carr_alpha * d_phase * pll_gain;
     }
 
     /* --- Carrier NCO update --- */
