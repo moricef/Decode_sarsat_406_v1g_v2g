@@ -34,11 +34,11 @@
 #define PLL_BW_LOCK2  2.0f
 
 /* ATC thresholds */
-#define LOCK1_THRESH   0.5f
-#define LOCK2_THRESH   0.8f
-#define UNLOCK_THRESH  0.3f
-#define LOCK1_COUNT    10
-#define LOCK2_COUNT    20
+#define LOCK1_THRESH   0.35f
+#define LOCK2_THRESH   0.70f
+#define UNLOCK_THRESH  0.25f
+#define LOCK1_COUNT    1
+#define LOCK2_COUNT    10
 #define UNLOCK_COUNT    5
 #define ATC_HOLD_COUNT  5   /* epochs to suspend ATC after state change */
 
@@ -150,7 +150,7 @@ static void update_lock_detector(tracking_state_t *trk)
             sum_pow += p * p + q * q;
             n_valid++;
         }
-        if (n_valid > 1 && sum_pow > 1e-20f) {
+        if (n_valid >= 10 && sum_pow > 1e-20f) {
             float nbp = crealf(sum) * crealf(sum) + cimagf(sum) * cimagf(sum);
             trk->lock_indicator = nbp / (sum_pow * (float)n_valid);
         } else {
@@ -261,12 +261,15 @@ static void process_epoch(tracking_state_t *trk)
 {
     float T = (float)trk->coh_chips / trk->chip_rate;
 
-    /* --- DLL (always active) --- */
+    /* --- DLL (always active, but frozen when lock is decent) --- */
     float d_tau = dll_discriminator(&trk->accum);
-    trk->code_freq += trk->code_alpha * d_tau / trk->sps;
+    /* Dead zone: +-0.15 chip discriminator noise → no correction.
+     * Freeze DLL when lock > 0.25: timing wander < sample-spacing anyway. */
+    if (fabsf(d_tau) > 0.15f && trk->lock_indicator < 0.25f)
+        trk->code_freq += trk->code_alpha * d_tau / trk->sps;
 
     float nominal = 1.0f / trk->sps;
-    float max_dev = nominal * 0.01f;
+    float max_dev = nominal * 0.005f;
     if (trk->code_freq > nominal + max_dev) trk->code_freq = nominal + max_dev;
     if (trk->code_freq < nominal - max_dev) trk->code_freq = nominal - max_dev;
 
@@ -277,7 +280,17 @@ static void process_epoch(tracking_state_t *trk)
         float dot_prev = crealf(trk->prev_prompt) * crealf(trk->prev_prompt)
                        + cimagf(trk->prev_prompt) * cimagf(trk->prev_prompt);
         if (dot_prev > 1e-12f) {
-            d_freq = fll_discriminator(trk->prev_prompt, trk->accum.prompt_i, T);
+            float raw_df = fll_discriminator(trk->prev_prompt, trk->accum.prompt_i, T);
+
+            /* 3-tap moving average to suppress discriminator noise.
+             * Raw cross-product noise is ±300 Hz even when carrier is
+             * locked; the MA brings it to ~±100 Hz. */
+            static float df_ma[3] = {0.0f, 0.0f, 0.0f};
+            static int df_ma_idx = 0;
+            df_ma[df_ma_idx % 3] = raw_df;
+            df_ma_idx++;
+            d_freq = (df_ma[0] + df_ma[1] + df_ma[2]) / 3.0f;
+
             trk->carr_integrator += trk->carr_beta * d_freq;
         }
     }
@@ -330,7 +343,7 @@ static void process_epoch(tracking_state_t *trk)
         df_mean /= (float)df_hist_fill;
         df_var  = df_var / (float)df_hist_fill - df_mean * df_mean;
 
-        if (df_var < 400.0f) {   /* skip Kalman when d_freq is noise */
+        if (df_var < 2500.0f) {  /* skip Kalman when d_freq is pure noise */
             kalman5_predict(kf);
             float z[KF_M];
             z[0] = d_phase;
