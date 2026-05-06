@@ -195,7 +195,7 @@ int main(int argc, char *argv[]) {
 
     // Run DSSS demodulator
     printf("\n=== Starting DSSS Demodulation ===\n");
-    int result = dsss_receive_burst(samples, num_samples, sps, fs, max_doppler, output_bits);
+    int result = dsss_receive_burst(samples, num_samples, sps, fs, max_doppler, output_bits, NULL);
 
     if (result != 0) {
         fprintf(stderr, "\nERROR: Demodulation failed\n");

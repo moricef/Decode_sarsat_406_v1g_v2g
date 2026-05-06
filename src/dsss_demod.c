@@ -48,7 +48,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                        float sps,
                        float fs,
                        int max_doppler,
-                       uint8_t *output_bits)
+                       uint8_t *output_bits,
+                       float *z_score)
 {
     (void)max_doppler;  /* reserved for Stage B (M&M / Doppler search) */
 
@@ -204,7 +205,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 6. Despread — unchanged.
      * --------------------------------------------------------------- */
-    if (despread_burst(post_dec, (int)n_chips, output_bits) != 0)
+    if (despread_burst(post_dec, (int)n_chips, output_bits, z_score) != 0)
         goto cleanup;
 
     rc = 0;

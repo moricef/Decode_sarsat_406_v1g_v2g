@@ -506,7 +506,8 @@ int tracking_run(tracking_state_t *trk,
         int cur_peak = (int)(code_phase + 0.5f);
 
         /* 4. EPL accumulate at EVERY sample. */
-        if (cur_chip >= 0 && cur_chip < DESPREAD_PRN_LEN) {
+        int in_prn = (cur_chip >= 0 && cur_chip < DESPREAD_PRN_LEN);
+        if (in_prn) {
             int chip_e = (int)(code_phase + epl_d);
             int chip_l = (int)(code_phase - epl_d);
 
@@ -525,37 +526,41 @@ int tracking_run(tracking_state_t *trk,
             trk->accum.late_q   += bb * sl_q;
         }
 
-        /* 5. Half-sine peak crossing — emit output */
-        if (cur_peak != prev_peak && cur_chip >= 0 && cur_chip < DESPREAD_PRN_LEN) {
+        /* 5. Half-sine peak crossing — emit output.
+         *    Emit within PRN range (with tracking) AND beyond
+         *    (carrier-wiped only) so despread has slack for sync offset. */
+        if (cur_peak != prev_peak && cur_chip >= 0 && chip_out_idx < DESPREAD_PRN_LEN + DESPREAD_SYNC_RANGE + DESPREAD_CHIPS_PER_BIT) {
             chips_out[chip_out_idx++] = bb;
-            trk->accum.n_chips++;
+            if (in_prn) {
+                trk->accum.n_chips++;
 
-            /* 6. Epoch boundary — run discriminators + loop filters */
-            if (trk->accum.n_chips >= trk->coh_chips) {
-                process_epoch(trk);
-                code_freq = trk->code_freq;
+                /* 6. Epoch boundary — run discriminators + loop filters */
+                if (trk->accum.n_chips >= trk->coh_chips) {
+                    process_epoch(trk);
+                    code_freq = trk->code_freq;
 
-                /* Update carrier NCO */
-                carr_dphi = trk->carrier_freq;
-                step_r = cosf(carr_dphi);
-                step_i = sinf(carr_dphi);
+                    /* Update carrier NCO */
+                    carr_dphi = trk->carrier_freq;
+                    step_r = cosf(carr_dphi);
+                    step_i = sinf(carr_dphi);
 
-                /* Apply phase correction to phasor */
-                if (trk->pending_phase_correction != 0.0f) {
-                    float dp = trk->pending_phase_correction;
-                    float cos_dp = cosf(dp), sin_dp = sinf(dp);
-                    float pr = ph_r * cos_dp + ph_i * sin_dp;
-                    float pi = ph_i * cos_dp - ph_r * sin_dp;
-                    ph_r = pr; ph_i = pi;
-                    trk->pending_phase_correction = 0.0f;
+                    /* Apply phase correction to phasor */
+                    if (trk->pending_phase_correction != 0.0f) {
+                        float dp = trk->pending_phase_correction;
+                        float cos_dp = cosf(dp), sin_dp = sinf(dp);
+                        float pr = ph_r * cos_dp + ph_i * sin_dp;
+                        float pi = ph_i * cos_dp - ph_r * sin_dp;
+                        ph_r = pr; ph_i = pi;
+                        trk->pending_phase_correction = 0.0f;
+                    }
+                    /* Apply code phase correction (Kalman) */
+                    if (trk->pending_code_correction != 0.0f) {
+                        code_phase += trk->pending_code_correction;
+                        trk->pending_code_correction = 0.0f;
+                    }
+
+                    memset(&trk->accum, 0, sizeof(trk->accum));
                 }
-                /* Apply code phase correction (Kalman) */
-                if (trk->pending_code_correction != 0.0f) {
-                    code_phase += trk->pending_code_correction;
-                    trk->pending_code_correction = 0.0f;
-                }
-
-                memset(&trk->accum, 0, sizeof(trk->accum));
             }
 
             prev_peak = cur_peak;

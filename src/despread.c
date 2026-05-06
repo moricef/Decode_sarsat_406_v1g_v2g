@@ -96,6 +96,10 @@ int despread_sync(const float complex *samples, int num_chips,
 
     /* ---------- Pass A: soft-correlate I channel to find offset + phase ---------- */
     int search_hi = DESPREAD_SYNC_RANGE;
+    /* Ensure full message fits after preamble sync position */
+    int msg_limit = num_chips - DESPREAD_TOTAL_BITS * DESPREAD_CHIPS_PER_BIT;
+    if (msg_limit < search_hi) search_hi = msg_limit;
+    if (search_hi < 1) search_hi = 1;
     if (DESPREAD_PREAMBLE_CHIPS + search_hi > num_chips)
         search_hi = num_chips - DESPREAD_PREAMBLE_CHIPS;
 
@@ -281,10 +285,15 @@ int despread_bits(const float complex *samples, int num_chips,
 }
 
 int despread_burst(const float complex *samples, int num_chips,
-                   uint8_t *output_bits)
+                   uint8_t *output_bits, float *z_score)
 {
     despread_sync_t sync;
     if (despread_sync(samples, num_chips, &sync) != 0)
         return -1;
+    if (z_score) {
+        float zi = (float)sync.score_i / 10.0f;
+        float zq = (float)sync.score_q / 10.0f;
+        *z_score = sqrtf(zi * zi + zq * zq);
+    }
     return despread_bits(samples, num_chips, &sync, output_bits);
 }

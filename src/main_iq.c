@@ -80,11 +80,12 @@ static size_t find_burst_start(const float complex *buf, size_t n, float fs) {
 }
 
 static void print_usage(const char *p) {
-    printf("Usage: %s <file> [-s rate] [-f freq] [-u] [-i]\n", p);
+    printf("Usage: %s <file> [-s rate] [-f freq] [-u] [-i] [-I]\n", p);
     printf("  -s  Sample rate (default 2457600)\n");
     printf("  -f  Frequency offset in Hz\n");
     printf("  -u  RTL-SDR uint8 input\n");
     printf("  -i  int16 input\n");
+    printf("  -I  int32 input (SDRangel ci32_le)\n");
 }
 
 static void print_hex(const uint8_t *bits, int len) {
@@ -102,7 +103,7 @@ static void print_hex(const uint8_t *bits, int len) {
     }
 }
 
-static size_t read_win(FILE *fp, int u8, int i16, size_t n, float complex *dst) {
+static size_t read_win(FILE *fp, int u8, int i16, int i32, size_t n, float complex *dst) {
     if (u8) {
         unsigned char *r = malloc(n * 2);
         if (!r) return 0;
@@ -121,19 +122,29 @@ static size_t read_win(FILE *fp, int u8, int i16, size_t n, float complex *dst) 
         free(r);
         return k;
     }
+    if (i32) {
+        int *r = malloc(n * 2 * sizeof(int));
+        if (!r) return 0;
+        size_t k = fread(r, sizeof(int)*2, n, fp);
+        for (size_t i = 0; i < k; i++)
+            dst[i] = (float)r[2*i]/2147483648.0f + (float)r[2*i+1]/2147483648.0f * I;
+        free(r);
+        return k;
+    }
     return fread(dst, sizeof(float complex), n, fp);
 }
 
 int main(int argc, char *argv[]) {
     const char *fn = NULL;
     float fs = 2457600.0f, foff = 0.0f;
-    int u8 = 0, i16 = 0;
+    int u8 = 0, i16 = 0, i32 = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"-s") && i+1<argc) fs = atof(argv[++i]);
         else if (!strcmp(argv[i],"-f") && i+1<argc) foff = atof(argv[++i]);
         else if (!strcmp(argv[i],"-u")) u8 = 1;
         else if (!strcmp(argv[i],"-i")) i16 = 1;
+        else if (!strcmp(argv[i],"-I")) i32 = 1;
         else fn = argv[i];
     }
     if (!fn) { print_usage(argv[0]); return 1; }
@@ -164,10 +175,13 @@ int main(int argc, char *argv[]) {
     if (total < win) win = total;
     size_t step = (size_t)(fs * 0.25);
     int found = 0;
+    float best_z = 0.0f;
+    uint8_t *best_out = calloc(DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, 1);
+    if (!best_out) { fclose(fp); free(buf); return 1; }
 
     for (size_t off = 0; off + win <= total; off += step) {
         fseek(fp, (long)(off * bps), SEEK_SET);
-        size_t n = read_win(fp, u8, i16, win, buf);
+        size_t n = read_win(fp, u8, i16, i32, win, buf);
         if (n < win/2) break;
 
         printf("\rScan t=%.2fs...", off/fs); fflush(stdout);
@@ -182,22 +196,25 @@ int main(int argc, char *argv[]) {
         }
 
         size_t trim = find_burst_start(buf, n, fs);
-        if (dsss_receive_burst(buf + trim, n - trim, sps, fs, 0, out) == 0) {
-            printf("\r  Sync at t=%.2fs\n", (double)(off + trim) / (double)fs);
+        float z = 0.0f;
+        if (dsss_receive_burst(buf + trim, n - trim, sps, fs, 0, out, &z) == 0) {
+            printf("\r  Sync at t=%.2fs (z=%.1f)\n", (double)(off + trim) / (double)fs, (double)z);
+            if (z > best_z) { best_z = z; memcpy(best_out, out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS); }
             found++;
         }
     }
     fclose(fp);
 
-    if (!found) { printf("\rNo SGB frame found.\n"); free(buf); return 2; }
+    if (!found) { printf("\rNo SGB frame found.\n"); free(buf); free(best_out); return 2; }
 
-    printf("\n%d windows synced — decoding last\n", found);
-    print_hex(out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    printf("\n%d windows synced — decoding best (z=%.1f)\n", found, (double)best_z);
+    print_hex(best_out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     printf("\n=== FRAME DECODING ===\n");
-    decode_beacon(out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    decode_beacon(best_out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     printf("\n╔════════════════════════════════════════════════════════════════╗\n");
     printf("║                    DEMODULATION COMPLETE                      ║\n");
     printf("╚════════════════════════════════════════════════════════════════╝\n\n");
     free(buf);
+    free(best_out);
     return 0;
 }

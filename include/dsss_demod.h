@@ -43,6 +43,7 @@
  * @param max_doppler   Reserved (Doppler compensation deferred to Stage B).
  * @param output_bits   Output buffer of 250 bytes (each is a bit, 0 or 1)
  *                      ready to feed decode_2g().
+ * @param z_score       If non-NULL, receives combined z-score from despread sync.
  *
  * @return 0 on success; -1 on parameter error or sync failure.
  */
@@ -51,6 +52,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
                        float sps,
                        float fs,
                        int max_doppler,
-                       uint8_t *output_bits);
+                       uint8_t *output_bits,
+                       float *z_score);
 
 #endif /* DSSS_DEMOD_H */

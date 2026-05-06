@@ -108,6 +108,6 @@ int despread_bits(const float complex *samples, int num_chips,
  * @return 0 on success, -1 if sync failed.
  */
 int despread_burst(const float complex *samples, int num_chips,
-                   uint8_t *output_bits);
+                   uint8_t *output_bits, float *z_score);
 
 #endif /* DESPREAD_H */
