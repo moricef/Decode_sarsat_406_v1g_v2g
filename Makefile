@@ -83,7 +83,7 @@ DSSS_SRCS = \
 	$(SRC_DIR)/despread.c \
 	$(SRC_DIR)/freq_acq.c \
 	$(SRC_DIR)/tracking.c \
-	$(SRC_DIR)/kalman5.c
+	$(SRC_DIR)/kalman5.c \
 
 # dec406_iq - Decode 2G from IQ file (pure-C DSSS chain)
 $(BUILD_DIR)/dec406_iq: $(SRC_DIR)/main_iq.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)

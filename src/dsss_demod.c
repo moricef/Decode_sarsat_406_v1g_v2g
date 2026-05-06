@@ -83,8 +83,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
     float complex *post_costas = NULL;
 
     int isps = (int)(sps + 0.5f);
-    (void)isps; /* used only in legacy fallback path */
     float chip_rate = fs / sps;
+    size_t n_chips = 0;
 
     /* ---------------------------------------------------------------
      * 1. Allocate per-stage buffers.
@@ -158,11 +158,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 5. Tracking loop (FLL+PLL+DLL+Kalman) — decimation + carrier
      *    tracking in a single sample-rate pass.
-     *
-     *    Phase 0: pass-through (legacy fixed-phase decimation).
-     *    Phases 1-5: see tracking.c for progressive implementation.
      * --------------------------------------------------------------- */
-    size_t n_chips = 0;
+    n_chips = 0;
     {
         tracking_state_t trk;
         float init_code = 0.0f;
@@ -182,9 +179,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                     "[dsss_demod] tracking failed (%zu chips), "
                     "falling back to legacy\n", n_chips_tracked);
 
-            /* Legacy fallback: fixed-phase decimation + Costas bypass */
+            /* Legacy fallback: fixed-phase decimation */
             int phi = isps / 2;
-            n_chips = 0;
             for (size_t k = 0; k < N / (size_t)isps && n_chips < chip_buf; k++) {
                 size_t idx = (size_t)phi + k * (size_t)isps;
                 if (idx < N) post_dec[n_chips++] = post_rrc[idx];
@@ -199,8 +195,6 @@ int dsss_receive_burst(const float complex *ota_buffer,
             n_chips = n_chips_tracked;
         }
     }
-
-    dump_complex("/tmp/c_post_decim.bin", post_dec, n_chips);
 
     /* ---------------------------------------------------------------
      * 6. Despread — unchanged.
