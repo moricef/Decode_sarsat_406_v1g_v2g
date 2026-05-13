@@ -34,12 +34,12 @@
 #define PLL_BW_LOCK2  2.0f
 
 /* ATC thresholds */
-#define LOCK1_THRESH   0.28f
+#define LOCK1_THRESH   0.25f
 #define LOCK2_THRESH   0.70f
-#define UNLOCK_THRESH  0.20f
+#define UNLOCK_THRESH  0.18f
 #define LOCK1_COUNT    5
 #define LOCK2_COUNT    10
-#define UNLOCK_COUNT    5
+#define UNLOCK_COUNT    10
 #define ATC_HOLD_COUNT  5   /* epochs to suspend ATC after state change */
 
 /* ------------------------------------------------------------------ */
