@@ -3,7 +3,7 @@
  * @brief FLL + PLL + DLL burst tracking loop for DSSS/OQPSK.
  *
  * Phase 3: PLL (BPSK Costas) + ATC (Adaptive Switching Control).
- *          - ACQ:  PLL only (BW=5 Hz), coh=64, FLL disabled
+ *          - ACQ:  PLL only (BW=5 Hz), coh=128, FLL disabled
  *          - LOCK1: PLL only (BW=5 Hz), coh=128
  *          - LOCK2: PLL only (BW=2 Hz), coh=256
  *          - Lock detector: NBP/WBP over 20-epoch window
@@ -129,8 +129,10 @@ static float pll_discriminator(float complex prompt)
 
 /* ------------------------------------------------------------------ */
 /* Lock detector: NBP/WBP ratio over prompt_hist window.               */
-/*   NBP = |Σ P[k]|²   (coherent),  WBP = Σ |P[k]|²                   */
-/*   lock_indicator = 1.0 when perfectly locked, ~1/N when unlocked.   */
+/*   Uses P² = prompt² to remove 180° data modulation (d² = 1).       */
+/*   NBP = |Σ P²[k]|²   (coherent, data-insensitive)                  */
+/*   WBP = Σ |P²[k]|² = Σ |P[k]|⁴                                    */
+/*   lock_indicator = 1.0 when perfectly locked, ~1/N when unlocked.    */
 /* ------------------------------------------------------------------ */
 static void update_lock_detector(tracking_state_t *trk)
 {
@@ -138,7 +140,8 @@ static void update_lock_detector(tracking_state_t *trk)
     trk->prompt_hist[trk->prompt_hist_idx] = trk->accum.prompt_i;
     trk->prompt_hist_idx = (trk->prompt_hist_idx + 1) % TRK_PROMPT_HIST_LEN;
 
-    /* Compute NBP / WBP every epoch for fast ATC response */
+    /* Compute NBP / WBP every epoch for fast ATC response.
+     * Use P² to remove data modulation: (d·A·e^{jθ})² = A²·e^{2jθ}. */
     if (trk->epoch_count > 0) {
         float complex sum = 0.0f;
         float sum_pow = 0.0f;
@@ -146,9 +149,13 @@ static void update_lock_detector(tracking_state_t *trk)
         for (int i = 0; i < TRK_PROMPT_HIST_LEN; i++) {
             float p = crealf(trk->prompt_hist[i]);
             float q = cimagf(trk->prompt_hist[i]);
-            if (p == 0.0f && q == 0.0f) continue;  /* skip unfilled slots */
-            sum += trk->prompt_hist[i];
-            sum_pow += p * p + q * q;
+            if (p == 0.0f && q == 0.0f) continue;
+            /* P² = (p + jq)² = (p² - q²) + j(2pq) */
+            float p2_re = p * p - q * q;
+            float p2_im = 2.0f * p * q;
+            sum += p2_re + p2_im * I;
+            float mag2 = p * p + q * q;  /* |P|² */
+            sum_pow += mag2 * mag2;      /* |P|⁴ = |P²|² */
             n_valid++;
         }
         if (n_valid >= 10 && sum_pow > 1e-20f) {
@@ -217,10 +224,10 @@ static void atc_update(tracking_state_t *trk)
             trk->unlock_counter++;
             if (trk->unlock_counter >= UNLOCK_COUNT) {
                 trk->state = TRK_STATE_ACQ;
-                trk->coh_chips = 64;
+                trk->coh_chips = 128;
                 trk->lock_counter = -ATC_HOLD_COUNT;
                 trk->unlock_counter = 0;
-                trk->carr_integrator = 0.0f;
+                /* keep carr_integrator — preserves FFT frequency */
                 compute_carrier_gains(trk, PLL_BW_LOCK1);
                 compute_code_gains(trk, DLL_BW_ACQ);
                 free(trk->kalman);
@@ -302,7 +309,7 @@ static void process_epoch(tracking_state_t *trk)
         d_phase = (pll_discriminator(trk->accum.prompt_i)
                 +  pll_discriminator(trk->accum.prompt_q)) * 0.5f;
 
-        float pll_gain = (trk->state == TRK_STATE_ACQ) ? 0.25f : 0.5f;
+        float pll_gain = 0.5f;
 
         /* FLL integrator also integrates phase error (2nd-order loop) */
         trk->carr_integrator += trk->carr_beta * d_phase * pll_gain;
@@ -317,7 +324,10 @@ static void process_epoch(tracking_state_t *trk)
         freq_hz += trk->carr_alpha * d_freq;
     trk->carrier_freq = 2.0f * (float)M_PI * freq_hz / trk->fs;
 
-    /* --- Kalman joint estimation (LOCK1/LOCK2) --- */
+    /* --- Kalman joint estimation (LOCK1/LOCK2) — disabled ---
+     * With FLL off, Kalman receives d_freq=0 every epoch, causing
+     * divergence. PLL alone tracks phase adequately. */
+#if 0
     if (trk->kalman) {
         kalman5_t *kf = (kalman5_t *)trk->kalman;
         kf->T = T;
@@ -356,6 +366,7 @@ static void process_epoch(tracking_state_t *trk)
             trk->code_freq += kf->x[4] / trk->chip_rate;
         }
     }
+#endif
 
     /* --- Lock detector + ATC --- */
     update_lock_detector(trk);
@@ -430,7 +441,7 @@ int tracking_init(tracking_state_t *trk,
     trk->epl_spacing  = 0.5f;
 
     trk->state     = TRK_STATE_ACQ;
-    trk->coh_chips = 64;
+    trk->coh_chips = 128;
 
     compute_code_gains(trk, DLL_BW_ACQ);
     compute_carrier_gains(trk, PLL_BW_LOCK1);  /* PLL-only, FLL disabled */
