@@ -3,9 +3,9 @@
  * @brief FLL + PLL + DLL burst tracking loop for DSSS/OQPSK.
  *
  * Phase 3: PLL (BPSK Costas) + ATC (Adaptive Switching Control).
- *          - ACQ:  PLL only (BW=5 Hz), coh=128, FLL disabled
- *          - LOCK1: PLL only (BW=5 Hz), coh=128
- *          - LOCK2: PLL only (BW=2 Hz), coh=256
+ *          - ACQ:  PLL only (BW=20 Hz), coh=256, FLL disabled
+ *          - LOCK1: PLL only (BW=20 Hz), coh=256
+ *          - LOCK2: PLL only (BW=5 Hz), coh=256
  *          - Lock detector: NBP/WBP over 20-epoch window
  *          - Phase correction applied to carrier phasor each epoch
  *
@@ -30,8 +30,8 @@
 #define DLL_BW_LOCK   0.5f
 #define FLL_BW_ACQ    2.0f
 #define FLL_BW_LOCK1  1.5f
-#define PLL_BW_LOCK1  5.0f
-#define PLL_BW_LOCK2  2.0f
+#define PLL_BW_LOCK1  20.0f
+#define PLL_BW_LOCK2  5.0f
 
 /* ATC thresholds */
 #define LOCK1_THRESH   0.25f
@@ -181,7 +181,7 @@ static void atc_update(tracking_state_t *trk)
             trk->lock_counter++;
             if (trk->lock_counter >= LOCK1_COUNT) {
                 trk->state = TRK_STATE_LOCK1;
-                trk->coh_chips = 128;
+                trk->coh_chips = 256;
                 trk->lock_counter = -ATC_HOLD_COUNT;  /* hold after transition */
                 trk->unlock_counter = 0;
                 compute_carrier_gains(trk, PLL_BW_LOCK1);
@@ -224,7 +224,7 @@ static void atc_update(tracking_state_t *trk)
             trk->unlock_counter++;
             if (trk->unlock_counter >= UNLOCK_COUNT) {
                 trk->state = TRK_STATE_ACQ;
-                trk->coh_chips = 128;
+                trk->coh_chips = 256;
                 trk->lock_counter = -ATC_HOLD_COUNT;
                 trk->unlock_counter = 0;
                 /* keep carr_integrator — preserves FFT frequency */
@@ -246,7 +246,7 @@ static void atc_update(tracking_state_t *trk)
             trk->unlock_counter++;
             if (trk->unlock_counter >= UNLOCK_COUNT) {
                 trk->state = TRK_STATE_LOCK1;
-                trk->coh_chips = 128;
+                trk->coh_chips = 256;
                 trk->lock_counter = -ATC_HOLD_COUNT;
                 trk->unlock_counter = 0;
                 compute_carrier_gains(trk, PLL_BW_LOCK1);
@@ -441,7 +441,7 @@ int tracking_init(tracking_state_t *trk,
     trk->epl_spacing  = 0.5f;
 
     trk->state     = TRK_STATE_ACQ;
-    trk->coh_chips = 128;
+    trk->coh_chips = 256;
 
     compute_code_gains(trk, DLL_BW_ACQ);
     compute_carrier_gains(trk, PLL_BW_LOCK1);  /* PLL-only, FLL disabled */
