@@ -190,6 +190,40 @@ int dsss_receive_burst(const float complex *ota_buffer,
         tracking_state_t trk;
         float init_code = 0.0f;
 
+        /* Scan 8 sub-chip code phases using the same code NCO as tracking.
+         * For each offset, runs a mini tracking_init + short tracking_run
+         * (256 chips), picks offset maximizing mean chip power. */
+        {
+            float best_pow = -1.0f;
+            int best_off = 0;
+            for (int off = 0; off < 8; off++) {
+                float test_phase = (float)off * 0.125f;
+                tracking_state_t test_trk;
+                if (tracking_init(&test_trk, fs, sps, coarse_freq_hz, test_phase) != 0)
+                    continue;
+                size_t n_test = 0;
+                float complex test_chips[256];
+                tracking_run(&test_trk, post_rrc,
+                             (size_t)(256.0f * sps) < N ? (size_t)(256.0f * sps) : N,
+                             test_chips, &n_test);
+                if (n_test >= 64) {
+                    float pow_sum = 0.0f;
+                    for (size_t c = 0; c < n_test; c++) {
+                        float r = crealf(test_chips[c]);
+                        float i = cimagf(test_chips[c]);
+                        pow_sum += r * r + i * i;
+                    }
+                    float mean_pow = pow_sum / (float)n_test;
+                    if (mean_pow > best_pow) { best_pow = mean_pow; best_off = off; }
+                }
+                tracking_free(&test_trk);
+            }
+            init_code = (float)best_off * 0.125f;
+            if (best_pow > 0.1f)
+                fprintf(stderr, "[dsss_demod] phase scan: best=%.3f chip "
+                        "pow=%.3f\n", (double)init_code, (double)best_pow);
+        }
+
         if (tracking_init(&trk, fs, sps, coarse_freq_hz, init_code) != 0) {
             fprintf(stderr, "[dsss_demod] tracking_init failed\n");
             goto cleanup;
