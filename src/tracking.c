@@ -2,10 +2,10 @@
  * @file tracking.c
  * @brief FLL + PLL + DLL burst tracking loop for DSSS/OQPSK.
  *
- * Phase 3: PLL (Costas discriminator) + ATC (Adaptive Switching Control).
- *          - ACQ:  FLL only, coh=64,  BW=10 Hz
- *          - LOCK1: FLL+PLL, coh=128, BW=5 Hz
- *          - LOCK2: PLL only, coh=256, BW=2 Hz
+ * Phase 3: PLL (BPSK Costas) + ATC (Adaptive Switching Control).
+ *          - ACQ:  FLL (BW=2 Hz) + weak PLL, coh=64
+ *          - LOCK1: PLL only (BW=5 Hz), coh=128
+ *          - LOCK2: PLL only (BW=2 Hz), coh=256
  *          - Lock detector: NBP/WBP over 20-epoch window
  *          - Phase correction applied to carrier phasor each epoch
  *
@@ -177,7 +177,7 @@ static void atc_update(tracking_state_t *trk)
                 trk->coh_chips = 128;
                 trk->lock_counter = -ATC_HOLD_COUNT;  /* hold after transition */
                 trk->unlock_counter = 0;
-                compute_carrier_gains(trk, FLL_BW_LOCK1);
+                compute_carrier_gains(trk, PLL_BW_LOCK1);
                 compute_code_gains(trk, DLL_BW_LOCK);
                 if (!trk->kalman) {
                     trk->kalman = malloc(sizeof(kalman5_t));
@@ -242,7 +242,7 @@ static void atc_update(tracking_state_t *trk)
                 trk->coh_chips = 128;
                 trk->lock_counter = -ATC_HOLD_COUNT;
                 trk->unlock_counter = 0;
-                compute_carrier_gains(trk, FLL_BW_LOCK1);
+                compute_carrier_gains(trk, PLL_BW_LOCK1);
                 compute_code_gains(trk, DLL_BW_LOCK);
                 fprintf(stderr, "[tracking] ATC: LOCK2 → LOCK1 (coh=%d, lock=%.3f)\n",
                         trk->coh_chips, (double)li);
@@ -274,18 +274,19 @@ static void process_epoch(tracking_state_t *trk)
     if (trk->code_freq > nominal + max_dev) trk->code_freq = nominal + max_dev;
     if (trk->code_freq < nominal - max_dev) trk->code_freq = nominal - max_dev;
 
-    /* --- FLL (cross-product, ACQ + LOCK1) --- */
+    /* --- FLL (cross-product, ACQ only) ---
+     * After ACQ the frequency is acquired. Bit transitions between
+     * epochs corrupt the cross-product (±150 Hz swings), so FLL is
+     * disabled in LOCK1/LOCK2 — PLL integrator tracks residual drift. */
     float d_freq = 0.0f;
-    int fll_active = (trk->state == TRK_STATE_ACQ || trk->state == TRK_STATE_LOCK1);
+    int fll_active = (trk->state == TRK_STATE_ACQ);
     if (fll_active) {
         float dot_prev = crealf(trk->prev_prompt) * crealf(trk->prev_prompt)
                        + cimagf(trk->prev_prompt) * cimagf(trk->prev_prompt);
         if (dot_prev > 1e-12f) {
             float raw_df = fll_discriminator(trk->prev_prompt, trk->accum.prompt_i, T);
 
-            /* 3-tap moving average to suppress discriminator noise.
-             * Raw cross-product noise is ±300 Hz even when carrier is
-             * locked; the MA brings it to ~±100 Hz. */
+            /* 3-tap moving average to suppress discriminator noise. */
             static float df_ma[3] = {0.0f, 0.0f, 0.0f};
             static int df_ma_idx = 0;
             df_ma[df_ma_idx % 3] = raw_df;
@@ -296,13 +297,10 @@ static void process_epoch(tracking_state_t *trk)
         }
     }
 
-    /* --- PLL (Costas, all states) ---
-     * QPSK Costas discriminator on prompt_i.
-     * OQPSK cross-talk from Q channel adds noise, so gains are reduced
-     * vs. theoretical — but even a weak PLL prevents phase drift that
-     * would otherwise accumulate over the message portion (834 ms).
-     * PLL is active in all states: ACQ gets reduced gain (prevents
-     * phase drift without destabilizing FLL convergence). */
+    /* --- PLL (BPSK Costas, all states) ---
+     * Averaged over prompt_i and prompt_q for +3 dB SNR.
+     * ACQ: reduced gain (0.25) to let FLL pull frequency first.
+     * LOCK1/LOCK2: full gain, FLL disabled, PLL tracks phase + freq. */
     float d_phase = 0.0f;
     {
         /* Average BPSK Costas over I and Q correlators for +3 dB SNR */
