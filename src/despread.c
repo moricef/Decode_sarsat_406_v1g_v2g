@@ -232,6 +232,11 @@ int despread_bits(const float complex *samples, int num_chips,
     despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_i);
     despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, prn_q);
 
+    /* Phase tracking: start from sync Costas phase, update each bit
+     * with BPSK Costas on I (real axis) and Q (imag axis). */
+    float phase_rad = (float)phase * (float)M_PI / 2.0f;
+    const float alpha = 0.04f;
+
     int out_idx = 0;
     for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
         int cs_i = off_i + k * DESPREAD_CHIPS_PER_BIT;
@@ -240,59 +245,39 @@ int despread_bits(const float complex *samples, int num_chips,
             cs_q + DESPREAD_CHIPS_PER_BIT > num_chips)
             break;
 
-        /* Soft correlation: sum(re * (2*prn-1)) over 256 chips.
-         * The I/Q swap and inversion logic matches the original hard-slicer
-         * (see git history), using raw PRN_i / PRN_q directly. */
-        float corr_i = 0.0f, corr_q = 0.0f;
+        float ci_re = 0.0f, ci_im = 0.0f;
+        float cq_re = 0.0f, cq_im = 0.0f;
         for (int c = 0; c < DESPREAD_CHIPS_PER_BIT; c++) {
-            float exp_i = 2.0f * (float)prn_i[k * DESPREAD_CHIPS_PER_BIT + c] - 1.0f;
-            float exp_q = 2.0f * (float)prn_q[k * DESPREAD_CHIPS_PER_BIT + c] - 1.0f;
-
-            switch (phase) {
-            case 0:
-                corr_i += __real__ samples[cs_i + c] * exp_i;
-                corr_q += __imag__ samples[cs_q + c] * exp_q;
-                break;
-            case 1: /* 90°: I↔Q swap */
-                corr_i += __imag__ samples[cs_q + c] * exp_i;
-                corr_q += __real__ samples[cs_i + c] * exp_q;
-                break;
-            case 2: /* 180°: no swap */
-                corr_i += __real__ samples[cs_i + c] * exp_i;
-                corr_q += __imag__ samples[cs_q + c] * exp_q;
-                break;
-            default: /* 270°: I↔Q swap */
-                corr_i += __imag__ samples[cs_q + c] * exp_i;
-                corr_q += __real__ samples[cs_i + c] * exp_q;
-                break;
-            }
+            float ei = 2.0f * (float)prn_i[k * DESPREAD_CHIPS_PER_BIT + c] - 1.0f;
+            float eq = 2.0f * (float)prn_q[k * DESPREAD_CHIPS_PER_BIT + c] - 1.0f;
+            float si_re = __real__ samples[cs_i + c];
+            float si_im = __imag__ samples[cs_i + c];
+            ci_re += si_re * ei;  ci_im += si_im * ei;
+            float sq_re = __real__ samples[cs_q + c];
+            float sq_im = __imag__ samples[cs_q + c];
+            cq_re += sq_re * eq;  cq_im += sq_im * eq;
         }
 
-        uint8_t d_i, d_q;
-        switch (phase) {
-        case 0:  /* 0°: I→I, Q→Q */
-            d_i = (corr_i > 0.0f) ? 1 : 0;
-            d_q = (corr_q > 0.0f) ? 1 : 0;
-            break;
-        case 1:  /* 90°: I→Q, Q→-I */
-            d_i = (corr_i > 0.0f) ? 0 : 1;
-            d_q = (corr_q > 0.0f) ? 1 : 0;
-            break;
-        case 2:  /* 180°: I→-I, Q→-Q */
-            d_i = (corr_i > 0.0f) ? 0 : 1;
-            d_q = (corr_q > 0.0f) ? 0 : 1;
-            break;
-        default: /* 270°: I→-Q, Q→I */
-            d_i = (corr_i > 0.0f) ? 1 : 0;
-            d_q = (corr_q > 0.0f) ? 0 : 1;
-            break;
-        }
+        float cp = cosf(phase_rad), sp = sinf(phase_rad);
+        float ri_re = ci_re * cp + ci_im * sp;
+        float ri_im = ci_im * cp - ci_re * sp;
+        float rq_re = cq_re * cp + cq_im * sp;
+        float rq_im = cq_im * cp - cq_re * sp;
+
+        uint8_t d_i = (ri_re > 0.0f) ? 1 : 0;
+        uint8_t d_q = (rq_im > 0.0f) ? 1 : 0;
 
         if (k >= DESPREAD_PREAMBLE_BITS && out_idx + 2 <= DESPREAD_OUTPUT_BITS) {
             output_bits[out_idx]     = d_i;
             output_bits[out_idx + 1] = d_q;
             out_idx += 2;
         }
+
+        /* Phase update: BPSK Costas, I real→Re*Im, Q imag→-Re*Im */
+        float perr = ri_re * ri_im - rq_re * rq_im;
+        float pow = ri_re*ri_re + ri_im*ri_im + rq_re*rq_re + rq_im*rq_im;
+        if (pow > 1e-10f && fabsf(perr/pow) > 0.01f)
+            phase_rad += alpha * perr / pow;
     }
 
     free(prn_i); free(prn_q);
