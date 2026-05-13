@@ -188,40 +188,58 @@ int dsss_receive_burst(const float complex *ota_buffer,
     n_chips = 0;
     {
         tracking_state_t trk;
+        /* Fast code-phase scan: code NCO + carrier wipeoff + PRN corr.
+         * No tracking_init needed — decimates 6400 chips at each of
+         * 8 sub-chip offsets, picks the one maximizing correlation. */
         float init_code = 0.0f;
-
-        /* Scan 8 sub-chip code phases using the same code NCO as tracking.
-         * For each offset, runs a mini tracking_init + short tracking_run
-         * (256 chips), picks offset maximizing mean chip power. */
         {
-            float best_pow = -1.0f;
+            int8_t prn_buf[DESPREAD_PRN_LEN];
+            despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_buf);
+            float best_peak = 0.0f;
             int best_off = 0;
             for (int off = 0; off < 8; off++) {
-                float test_phase = (float)off * 0.125f;
-                tracking_state_t test_trk;
-                if (tracking_init(&test_trk, fs, sps, coarse_freq_hz, test_phase) != 0)
-                    continue;
-                size_t n_test = 0;
-                float complex test_chips[256];
-                tracking_run(&test_trk, post_rrc,
-                             (size_t)(256.0f * sps) < N ? (size_t)(256.0f * sps) : N,
-                             test_chips, &n_test);
-                if (n_test >= 64) {
-                    float pow_sum = 0.0f;
-                    for (size_t c = 0; c < n_test; c++) {
-                        float r = crealf(test_chips[c]);
-                        float i = cimagf(test_chips[c]);
-                        pow_sum += r * r + i * i;
+                float sub = (float)off * 0.125f;
+                /* Code NCO: code_phase starts at sub, first peak at sub+0.5 */
+                float code_phase = sub;
+                float code_freq = 1.0f / sps;
+                /* Carrier NCO at coarse_freq_hz */
+                float dphi = 2.0f * (float)M_PI * coarse_freq_hz / fs;
+                float ph_r = 1.0f, ph_i = 0.0f;
+                float step_r = cosf(dphi), step_i = sinf(dphi);
+                int prev_peak = (int)(code_phase + 0.5f);
+                int chip_idx = 0;
+                float sum_i = 0.0f, sum_q = 0.0f;
+                for (size_t s = 0; s < N && chip_idx < 6400; s++) {
+                    code_phase += code_freq;
+                    int cur_peak = (int)(code_phase + 0.5f);
+                    if (cur_peak != prev_peak && cur_peak >= 0
+                        && cur_peak < DESPREAD_PRN_LEN) {
+                        /* Carrier wipeoff */
+                        float re = __real__ post_rrc[s];
+                        float im = __imag__ post_rrc[s];
+                        float yr = re * ph_r + im * ph_i;
+                        float yi = im * ph_r - re * ph_i;
+                        float pr = 1.0f - 2.0f * (float)prn_buf[cur_peak];
+                        sum_i += yr * pr;
+                        sum_q += yi * pr;
+                        chip_idx++;
+                        prev_peak = cur_peak;
                     }
-                    float mean_pow = pow_sum / (float)n_test;
-                    if (mean_pow > best_pow) { best_pow = mean_pow; best_off = off; }
+                    /* Advance carrier phasor */
+                    float nr = ph_r * step_r - ph_i * step_i;
+                    float ni = ph_r * step_i + ph_i * step_r;
+                    if ((s & 1023u) == 0u) {
+                        float inv = 1.0f / sqrtf(nr * nr + ni * ni);
+                        nr *= inv; ni *= inv;
+                    }
+                    ph_r = nr; ph_i = ni;
                 }
-                tracking_free(&test_trk);
+                float peak = sum_i * sum_i + sum_q * sum_q;
+                if (peak > best_peak) { best_peak = peak; best_off = off; }
             }
             init_code = (float)best_off * 0.125f;
-            if (best_pow > 0.1f)
-                fprintf(stderr, "[dsss_demod] phase scan: best=%.3f chip "
-                        "pow=%.3f\n", (double)init_code, (double)best_pow);
+            fprintf(stderr, "[dsss_demod] scan: best=%.3f chip peak=%.0f\n",
+                    (double)init_code, (double)best_peak);
         }
 
         if (tracking_init(&trk, fs, sps, coarse_freq_hz, init_code) != 0) {
@@ -259,6 +277,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* ---------------------------------------------------------------
      * 6. Despread — unchanged.
      * --------------------------------------------------------------- */
+    /* DEBUG: dump tracking output chips (first window only) */
+    { static int once = 0;
+      if (!once) { once = 1;
+        FILE *f = fopen("/tmp/chips_tracking.bin", "wb");
+        if (f) { fwrite(post_dec, sizeof(float complex), n_chips, f); fclose(f); } } }
     if (despread_burst(post_dec, (int)n_chips, output_bits, z_score) != 0)
         goto cleanup;
 
