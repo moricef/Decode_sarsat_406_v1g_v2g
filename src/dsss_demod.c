@@ -110,45 +110,71 @@ int dsss_receive_burst(const float complex *ota_buffer,
      *    loop's own carrier NCO handles the wipe-off (Zhang et al. Fig. 59.1).
      *    No separate NCO correction stage here (was redundant).
      * --------------------------------------------------------------- */
-    #define COARSE_FFT_MIN_CONF  100.0f
+    #define COARSE_FFT_MIN_CONF  5.0f
     #define COARSE_FFT_MIN_HZ     1.0f
+    #define COARSE_FFT_MAX_HZ     25000.0f   /* Pluto 40 ppm + RTL-SDR 1 ppm ≈ 16.5 kHz */
     float coarse_freq_hz = 0.0f;
     {
+        /* DC blocker BEFORE FFT — removes USB 150 Hz harmonics
+         * that blind the 4th-power FFT. */
+        memcpy(post_rrc, ota_buffer, N * sizeof(float complex));
+        {
+            float dc_i = 0.0f, dc_q = 0.0f;
+            const float alpha = 0.001f;
+            for (size_t t = 0; t < N; t++) {
+                float ir = __real__ post_rrc[t];
+                float qi = __imag__ post_rrc[t];
+                dc_i += alpha * (ir - dc_i);
+                dc_q += alpha * (qi - dc_q);
+                post_rrc[t] = (ir - dc_i) + (qi - dc_q) * I;
+            }
+        }
+
         freq_acq_result_t acq;
-        if (freq_acq_coarse_fft(ota_buffer, (int)N, fs, chip_rate,
+        int acq_ok = 0;
+        if (freq_acq_coarse_fft(post_rrc, (int)N, fs, chip_rate,
                                 &acq) == 0
             && acq.confidence >= COARSE_FFT_MIN_CONF
-            && fabsf(acq.freq_hz) >= COARSE_FFT_MIN_HZ) {
+            && fabsf(acq.freq_hz) >= COARSE_FFT_MIN_HZ
+            && fabsf(acq.freq_hz) <= COARSE_FFT_MAX_HZ) {
             coarse_freq_hz = acq.freq_hz;
+            acq_ok = 1;
         }
-        /* Samples pass through — tracking_init NCO handles the wipe-off. */
-        memcpy(post_rrc, ota_buffer, N * sizeof(float complex));
-    }
 
-    /* ---------------------------------------------------------------
-     * 3. OQPSK delay: advance Q channel by SPS/2 to undo TX Tc/2 offset.
-     * --------------------------------------------------------------- */
-    int oqpsk_delay = (int)(sps / 2.0f + 0.5f);
-    for (size_t t = 0; t < N; t++) {
-        float ir = __real__ post_rrc[t];
-        float qi = (t + (size_t)oqpsk_delay < N)
-                   ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
-                   : 0.0f;
-        delayed[t] = ir + I * qi;
-    }
-    /* DC blocker — essential for RTL-SDR (strong carrier leak). */
-    {
-        float dc_i = 0.0f, dc_q = 0.0f;
-        const float alpha = 0.001f;
+        /* Sweep fallback: PRN correlation at chip rate, ±300 Hz.
+         * MUST decimate to chip rate first — sweep expects chip-rate data. */
+        if (!acq_ok) {
+            int phi = isps / 2;
+            size_t n_chips_test = N / (size_t)isps;
+            if (n_chips_test > 5000) n_chips_test = 5000;
+            float complex *chip_test = (float complex *)calloc(n_chips_test, sizeof(float complex));
+            if (chip_test) {
+                for (size_t k = 0; k < n_chips_test; k++) {
+                    size_t idx = (size_t)phi + k * (size_t)isps;
+                    chip_test[k] = (idx < N) ? post_rrc[idx] : 0.0f;
+                }
+                freq_acq_result_t acq2;
+                if (freq_acq_sweep(chip_test, (int)n_chips_test, chip_rate,
+                                   -300.0f, 300.0f, &acq2) == 0
+                    && acq2.confidence > 3.0f) {
+                    coarse_freq_hz = acq2.freq_hz;
+                    fprintf(stderr, "[freq_acq] sweep: %.0f Hz conf=%.1f\n",
+                            (double)acq2.freq_hz, (double)acq2.confidence);
+                }
+                free(chip_test);
+            }
+        }
+
+        /* OQPSK delay: advance Q channel by SPS/2 to undo TX Tc/2 offset. */
+        int oqpsk_delay = (int)(sps / 2.0f + 0.5f);
         for (size_t t = 0; t < N; t++) {
-            float ir = __real__ delayed[t];
-            float qi = __imag__ delayed[t];
-            dc_i += alpha * (ir - dc_i);
-            dc_q += alpha * (qi - dc_q);
-            delayed[t] = (ir - dc_i) + (qi - dc_q) * I;
+            float ir = __real__ post_rrc[t];
+            float qi = (t + (size_t)oqpsk_delay < N)
+                       ? __imag__ post_rrc[t + (size_t)oqpsk_delay]
+                       : 0.0f;
+            delayed[t] = ir + I * qi;
         }
     }
-    dump_complex("/tmp/c_post_delay.bin", delayed, N);
 
     /* ---------------------------------------------------------------
      * 4. Pass-through (no matched filter for half-sine pulse shaping).

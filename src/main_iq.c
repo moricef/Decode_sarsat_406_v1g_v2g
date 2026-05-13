@@ -127,7 +127,7 @@ static size_t read_win(FILE *fp, int u8, int i16, int i32, size_t n, float compl
         if (!r) return 0;
         size_t k = fread(r, sizeof(int)*2, n, fp);
         for (size_t i = 0; i < k; i++)
-            dst[i] = (float)r[2*i]/2147483648.0f + (float)r[2*i+1]/2147483648.0f * I;
+            dst[i] = (float)r[2*i]/4194304.0f + (float)r[2*i+1]/4194304.0f * I;
         free(r);
         return k;
     }
