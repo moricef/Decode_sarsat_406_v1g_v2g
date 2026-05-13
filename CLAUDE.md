@@ -17,72 +17,181 @@ Quand un bug visuel ou comportemental est signalé :
 
 Démodulateur/décodeur COSPAS-SARSAT 406 MHz pour balises FGB (1G) et SGB (2G DSSS/OQPSK).
 
-- **Branches actives** :
-  - `feature/fll-pll-tracking` — tracking cohérent (FLL+PLL+DLL+Kalman), **OTA OK** (z=39.8, BCH 6 erreurs corrigées sur fichier May 6)
-  - `feature/open-loop-demod` — estimation préambule one-shot (freq + phase), plus simple mais mêmes perfs OTA
+- **Branche active** : `feature/fll-pll-tracking`
 - **Build** : `make build/dec406_iq`
 - **Modulateur Pluto** : `/home/fab2/Developpement/COSPAS-SARSAT/ADALM-PLUTO/SARSAT_SGB/` (branche `feature/half-sine`)
 
-## Architecture
-
-### Branche `feature/fll-pll-tracking`
+## Architecture — Chaîne de réception
 
 ```
-Chaîne de réception (src/dsss_demod.c) :
-  1. freq_acq_coarse_fft() — 4th-power FFT at sample rate
-  2. OQPSK delay: Q channel advanced by SPS/2 (integer)
-  3. DC blocker (IIR, alpha=0.001)
-  4. Tracking loop (FLL+PLL+DLL+Kalman) → chip-rate output
-  5. despread_burst()
+src/dsss_demod.c : orchestre la chaîne complète
+  1. DC blocker (IIR alpha=0.001) sur échantillons bruts
+  2. freq_acq_coarse_fft() — 4th-power FFT, ±25 kHz sanity check
+  3. Sweep fallback (±300 Hz PRN correlation) si FFT rejeté
+  4. OQPSK delay (Q avancé de SPS/2)
+  5. Tracking loop (FLL+PLL+DLL+Kalman) → chip-rate output
+  6. despread_burst() — preamble sync + bit extraction
 
-Tracking loop (src/tracking.c) :
-  - EPL correlators (Early/Prompt/Late × PRN I/Q) at every sample
+src/tracking.c : Tracking loop sample-rate
+  - EPL correlators (Early/Prompt/Late × PRN I/Q) à chaque échantillon
   - DLL: normalized E-L discriminator + 1st-order code loop filter
   - FLL: cross-product discriminator + 2nd-order carrier loop filter
-  - PLL: Costas discriminator — actif dans tous les états ATC (gain 0.25 ACQ, 0.5 LOCK1+)
+  - PLL: Costas discriminator (actif tous états, gain réduit en ACQ)
   - ATC: 3-state Adaptive Switching Control (ACQ→LOCK1→LOCK2)
-  - Kalman: 5-state joint carrier/code filter (src/kalman5.c)
+  - Kalman: 5-state joint carrier/code (src/kalman5.c)
   - Lock detector: NBP/WBP ratio over 20-epoch window
   - Output: chip-rate samples at half-sine peak (code_phase + 0.5)
+
+src/freq_acq.c : Coarse FFT + sweep fallback
+  - 4th-power FFT (N=131072, DC guard 3 kHz)
+  - Adaptive window positioning (power-based scan)
+  - Sweep: 4096-chip PRN correlation, 4 Hz step, ±300 Hz
+
+src/despread.c : Preamble sync + soft despread
+  - 2-pass I/Q sync, 6400-chip preamble correlation
+  - Costas 4-phase ambiguity handling
+  - 256 chips/bit soft despread
+
+src/kalman5.c : 5-state Kalman filter
+  - States: [phase, freq, freq_rate, code_phase, code_rate]
+  - Carrier→code coupling via f_chip/f_carrier ratio
+
+src/main_iq.c : Point d'entrée, sliding window, formats -u/-i/-I
 ```
 
-### Branche `feature/open-loop-demod`
+## Fichiers clés (924 lignes total tracking)
+
+| Fichier | Lignes | Rôle |
+|---------|--------|------|
+| `src/tracking.c` | 611 | Boucle sample-rate, EPL, discriminateurs, ATC |
+| `src/kalman5.c` | 108 | Kalman 5×5 (optionnel, activé en LOCK1) |
+| `include/tracking.h` | 147 | Structs et API tracking |
+| `include/kalman5.h` | 58 | Structs et API Kalman |
+
+## Flux de données tracking loop
 
 ```
-Chaîne simplifiée :
-  1. freq_acq_coarse_fft() → coarse_freq_hz
-  2. OQPSK delay (integer SPS/2)
-  3. DC blocker
-  4. NCO wipe-off at sample rate (coarse_freq_hz)
-  5. Fixed-phase decimation (phi=SPS/2)
-  6. Preamble sync + phase/freq estimation from 2 halves (3200 chips each)
-  7. Chip-rate phase+freq correction
-  8. despread_bits()
+samples[n]  (post-OQPSK, post-DC-block)
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│ Carrier wipeoff: bb = sample * exp(-jφ) │  ← NCO initialisé avec coarse_freq_hz
+├─────────────────────────────────────────┤
+│ Code NCO: code_phase += 1/sps           │
+│   cur_chip = int(code_phase)            │
+│   cur_peak = int(code_phase + 0.5)      │
+├─────────────────────────────────────────┤
+│ EPL accum (à chaque sample) :           │
+│   early  += bb × PRN[chip + 0.5]        │
+│   prompt += bb × PRN[chip]              │
+│   late   += bb × PRN[chip - 0.5]        │
+├─────────────────────────────────────────┤
+│ À chaque peak crossing (half-sine pic) :│
+│   → chips_out[out++] = bb               │
+├─────────────────────────────────────────┤
+│ À chaque epoch (coh_chips atteint) :    │
+│   → FLL discrim (cross-product)         │
+│   → PLL discrim (Costas)                │
+│   → DLL discrim (E-L normalisé)         │
+│   → Loop filters (2nd ordre carrier)    │
+│   → ATC update (state transitions)      │
+│   → Reset accumulators                  │
+└─────────────────────────────────────────┘
+    │
+    ▼
+chips_out[] → despread_burst()
 ```
 
-Fichiers :
-  src/dsss_demod.c     → Chaîne principale
-  src/tracking.c       → Tracking loop (tracking branch only)
-  src/kalman5.c        → Kalman filter (tracking branch only)
-  src/freq_est.c       → Kay estimator + phase estimator (open-loop branch only)
-  src/freq_acq.c       → Coarse FFT 4th-power
-  src/despread.c       → Soft correlation ±1, sync 2-pass I/Q, 256 chips/bit
-  src/main_iq.c        → Point d'entrée, sliding window, formats -u/-i/-I/-f
-  include/timing_recovery.h → Gardner TED (src/timing_recovery.c) — non intégré
+## ATC — Adaptive Switching Control
 
-Gardner TED (non intégré) :
-  Porté depuis 1d335b7. Farrow interpolator + Gardner TED + PI loop filter.
-  Gère l'alignement OQPSK fractionnaire ET le timing recovery.
-  Prochaine étape : remplacer l'OQPSK delay manuel + décimation fixe par le TED.
+| État | coh_chips | FLL | PLL | Kalman |
+|------|-----------|-----|-----|--------|
+| ACQ  | 64        | BW=2 Hz, gain 1.0 | gain 0.25 | Off |
+| LOCK1| 128       | BW=1.5 Hz, gain 1.0 | gain 0.5 | On |
+| LOCK2| 256       | Off | gain 0.5, BW=2 Hz | Stabilisé |
 
-## Résultats OTA
+Transitions :
+- ACQ → LOCK1 : lock > 0.35 pendant 1 epoch
+- LOCK1 → LOCK2 : lock > 0.70 pendant 10 epochs
+- LOCK1 → ACQ : lock < 0.25 pendant 5 epochs
+- LOCK2 → LOCK1 : lock < 0.25 pendant 5 epochs
 
-| Fichier | LO | z-score | BCH | Branche |
-|---------|-----|---------|-----|---------|
-| May 6, 431.97 MHz | 29 MHz off | 39.8 | 6 erreurs corrigées | tracking |
-| CNES 1.8 MHz | 406.053 MHz | 5.0 | échec | tracking |
-| May 7, 403 MHz | on-frequency | 35.7 | échec | tracking |
-| May 9, 403 MHz | on-frequency | 11.0 | échec | open-loop |
+## Discriminateurs
+
+**FLL (cross-product, insensible aux bits)** :
+```
+cross = Re(P[k-1]) × Im(P[k]) - Im(P[k-1]) × Re(P[k])
+dot   = Re(P[k-1]) × Re(P[k]) + Im(P[k-1]) × Im(P[k])
+d_freq = atan2(cross, dot) / (2π × T)
+```
+NB: Les transitions de bits entre epochs corrompent le cross-product
+    (une inversion de bit → 150 Hz d'erreur sur le discriminateur).
+    Un moving average 3-tap est appliqué pour atténuer.
+
+**PLL (Costas QPSK)** :
+```
+d_phase = sign(Re(P))×Im(P) - sign(Im(P))×Re(P)
+d_phase /= |P|²
+```
+La caractéristique est sin(4θ) avec pull-in ±45°.
+Le PLL a un terme proportionnel (appliqué au phasor) ET intégral
+(via carr_integrator).
+
+**DLL (E-L normalisé)** :
+```
+d_tau = 0.5 × (E - L) / (E + L)  [chips]
+```
+Dead zone ±0.15 chip. DLL gelé si lock > 0.25.
+
+## Lock detector
+
+```
+NBP = |Σ prompt[k] sur 20 epochs|²    (cohérent)
+WBP = Σ |prompt[k]|² sur 20 epochs     (non-cohérent)
+lock = NBP / (WBP × 20)
+
+= 1.0  si parfaitement locké (phase constante entre epochs)
+= 0.05 si purement bruit (1/20)
+```
+
+## Problèmes identifiés (2026-05-13)
+
+1. **Lock indicator trop bas pour les seuils ATC** :
+   - Le lock ne dépasse ~0.20 en ACQ (coh=64) même quand la fréquence est correcte (−206 Hz)
+   - Les seuils LOCK1_THRESH=0.35 et UNLOCK_THRESH=0.25 sont inatteignables au SNR OTA
+   - Cause : le prompt SNR par epoch de 64 chips est insuffisant pour la cohérence de phase
+
+2. **FLL corrompu par les transitions de bits** :
+   - Après le préambule (bits aléatoires), chaque transition I ou Q injecte
+     jusqu'à ±150 Hz d'erreur dans le discriminateur cross-product
+   - Le moving average 3-tap atténue mais ne supprime pas
+   - Solution possible : FLL decision-directed ou désactiver FLL après ACQ
+
+3. **Gains PLL très faibles** :
+   - En ACQ (coh=64, T=1.67ms) : carr_alpha ≈ 0.009, carr_beta ≈ 4e-5
+   - La correction de phase est proportionnelle avec un gain minuscule
+   - La convergence en phase est extrêmement lente
+
+4. **DLL gelé en early-late identique au premier chip** :
+   - Initialisation code_phase=0 → premier pic à code_phase=0.5
+   - Pour le premier chip, late = chip 0 = prompt (même PRN)
+   - La discrimination E-L est nulle au premier chip
+
+5. **Sweep fallback peu fiable** :
+   - conf 2.6-3.8 au lieu de 38 sur synthétique
+   - 151 bins → expected noise peak ~3.2, seuil à 3.0 trop juste
+
+6. **Fichiers OTA décodés** : 0/5 sur G35_May12 avec le tracking.
+   Le FFT trouve -206 Hz (conf 11000-19000) sur les fenêtres contenant le burst,
+   le tracking converge bien vers -206 Hz, mais le lock indicator reste bas
+   et le despread final donne z=5-8 (bruit).
+
+## État des modifications (vs main)
+
+Les fichiers suivants ont été modifiés par rapport à l'état initial du tracking :
+- `src/despread.c` : Costas phase 1/3 bit decision fix (porté)
+- `src/freq_acq.c` : FFT adaptatif + DC guard 3 kHz + COARSE_FFT_N=131072 (porté)
+- `src/dsss_demod.c` : DC blocker avant FFT, sweep fallback, |f| ≤ 25 kHz
 
 ## Commandes principales
 
@@ -95,23 +204,16 @@ make build/dec406_iq
 # OTA SDRangel ci32_le
 ./build/dec406_iq sdrangel_403000_*.sigmf-data -s 2457600 -I
 
-# CNES int16 (SPS=46.875)
-./build/dec406_iq fichier.raw -s 1800000 -i -f 3053000
+# Debug tracking CSV
+# Génère /tmp/c_tracking_epl.csv avec lock_ind, carrier_freq_hz par epoch
 ```
 
 ## Hardware
 
-- **PlutoSDR** : TX 403 MHz, 2.4576 MHz, gain -g 0 (max TX)
+- **PlutoSDR** : TX 403 MHz, 2.4576 MHz, gain -g 0
 - **RTL-SDR** : Nooelec NESDR SMArTee v5
 - **Distance antennes** : 12 cm
-- **Format SDRangel** : ci32_le (int32 complex little-endian), normalisation ÷2^18 dans main_iq.c
-
-## Tentatives échouées (NE PAS RÉESSAYER)
-
-1. **TED avec q_delay=0 après OQPSK manuel** : double alignement Q → Farrow sans signal à interpoler. Le TED doit être utilisé SEUL, AVEC q_delay=SPS/2, SANS l'étage OQPSK manuel préalable.
-2. **Kay/SKD frequency estimator** : valeurs erratiques (-4500..+4700 Hz) sur OTA. Remplacé par estimation 2 moitiés de préambule.
-3. **Matched filter integrate-and-dump** : dégrade le SNR vs peak-sampling. Le half-sine a son maximum au pic d'échantillonnage.
-4. **freq_acq_sweep / freq_acq_from_alignment** : non fonctionnels.
+- **Format SDRangel** : ci32_le (int32 complex little-endian), normalisation ÷2^22 (4194304)
 
 ## Règles utilisateur
 
@@ -120,3 +222,5 @@ make build/dec406_iq
 - Ne pas faire de timeouts de 10 minutes
 - Le synthétique doit TOUJOURS fonctionner (test de régression obligatoire avant commit)
 - Les commits signés `morel` sont faits par Claude/DeepSeek
+- RÈGLE ABSOLUE : Le signal OTA SGB est FORT et visible. Ne JAMAIS invoquer un SNR insuffisant
+  ou un signal trop faible. Le problème est dans le décodeur, pas dans le signal.

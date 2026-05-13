@@ -270,21 +270,21 @@ int despread_bits(const float complex *samples, int num_chips,
 
         uint8_t d_i, d_q;
         switch (phase) {
-        case 0:
+        case 0:  /* 0°: I→I, Q→Q */
             d_i = (corr_i > 0.0f) ? 1 : 0;
             d_q = (corr_q > 0.0f) ? 1 : 0;
             break;
-        case 1:
-            d_i = (corr_i > 0.0f) ? 1 : 0;
-            d_q = (corr_q > 0.0f) ? 0 : 1;
-            break;
-        case 2:
-            d_i = (corr_i > 0.0f) ? 0 : 1;
-            d_q = (corr_q > 0.0f) ? 0 : 1;
-            break;
-        default: /* 3 */
+        case 1:  /* 90°: I→Q, Q→-I */
             d_i = (corr_i > 0.0f) ? 0 : 1;
             d_q = (corr_q > 0.0f) ? 1 : 0;
+            break;
+        case 2:  /* 180°: I→-I, Q→-Q */
+            d_i = (corr_i > 0.0f) ? 0 : 1;
+            d_q = (corr_q > 0.0f) ? 0 : 1;
+            break;
+        default: /* 270°: I→-Q, Q→I */
+            d_i = (corr_i > 0.0f) ? 1 : 0;
+            d_q = (corr_q > 0.0f) ? 0 : 1;
             break;
         }
 

@@ -234,7 +234,7 @@ int freq_acq_sweep(const float complex *chips, int n_chips,
 /*  Coarse FFT via 4th-power method (sample rate)                     */
 /* ================================================================== */
 
-#define COARSE_FFT_N  65536    /* ~34ms at 1.92MHz, ~27ms at 2.4576MHz */
+#define COARSE_FFT_N  131072   /* ~68ms at 1.92MHz, ~53ms at 2.4576MHz */
 
 static void fft_radix2(float complex *x, int n);  /* forward decl */
 
@@ -252,19 +252,40 @@ int freq_acq_coarse_fft(const float complex *samples, int n_samples,
                                                       sizeof(float complex));
     if (!fft_buf) return -1;
 
+    /* Scan buffer in overlapping N-sample windows, pick the one
+     * with maximum RMS power.  Ensures the FFT is centred on the
+     * strongest part of the signal regardless of burst position. */
+    int n_seg = (n_samples - n) / (n / 4) + 1;
+    if (n_seg < 1) n_seg = 1;
+    if (n_seg > 12) n_seg = 12;
+    int start = n_samples / 4;  /* default fallback */
+    float best_pwr = 0.0f;
+    for (int s = 0; s < n_seg; s++) {
+        int pos = s * (n_samples - n) / (n_seg - 1 > 0 ? n_seg - 1 : 1);
+        if (pos + n > n_samples) pos = n_samples - n;
+        if (pos < 0) pos = 0;
+        double pwr = 0.0;
+        for (int i = 0; i < n; i += 256) {
+            float re = __real__ samples[pos + i];
+            float im = __imag__ samples[pos + i];
+            pwr += (double)re * re + (double)im * im;
+        }
+        if (pwr > best_pwr) { best_pwr = pwr; start = pos; }
+    }
+
     /* Normalise and raise to 4th power: (I+jQ)^4 collapses OQPSK ±1±j */
     float scale = 0.0f;
     for (int i = 0; i < n; i++) {
-        float re = __real__ samples[i];
-        float im = __imag__ samples[i];
+        float re = __real__ samples[start + i];
+        float im = __imag__ samples[start + i];
         float mag = re * re + im * im;
         if (mag > scale) scale = mag;
     }
     scale = scale > 0.0f ? 1.0f / scale : 1.0f;
 
     for (int i = 0; i < n; i++) {
-        float re = __real__ samples[i] * scale;
-        float im = __imag__ samples[i] * scale;
+        float re = __real__ samples[start + i] * scale;
+        float im = __imag__ samples[start + i] * scale;
         /* s² = (re+j*im)² */
         float s2_re = re * re - im * im;
         float s2_im = 2.0f * re * im;
@@ -282,7 +303,7 @@ int freq_acq_coarse_fft(const float complex *samples, int n_samples,
     }
 
     /* Find peak — skip DC (0 Hz ± guard) */
-    int dc_guard = (int)((500.0f * (float)n) / fs);  /* ±500 Hz guard */
+    int dc_guard = (int)((3000.0f * (float)n) / fs);  /* ±3 kHz guard */
     if (dc_guard < 5) dc_guard = 5;
     float peak_mag = 0.0f;
     int   peak_bin = 0;
