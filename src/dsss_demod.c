@@ -191,62 +191,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
         /* Fast code-phase scan: try 4 sub-chip offsets in [0, 0.5).
          * Code NCO always produces first chip at PRN[0]; sub-chip
          * offset controls sample timing within that first chip. */
-        float init_code = 0.0f;
-        {
-            int8_t prn_buf[DESPREAD_PRN_LEN];
-            despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_buf);
-            float best_peak = 0.0f;
-            int best_off = 0;
-            for (int off = 0; off < 4; off++) {
-                float sub = (float)off * 0.125f;  /* 0, 0.125, 0.25, 0.375 */
-                /* Start code_phase so first peak is always at chip 0:
-                 * need code_phase+0.5 < 1.0 initially so prev_peak=0,
-                 * then first crossing at code_phase+0.5=1.0 → chip 0. */
-                float code_phase = sub;
-                float code_freq = 1.0f / sps;
-                float dphi = 2.0f * (float)M_PI * coarse_freq_hz / fs;
-                float ph_r = 1.0f, ph_i = 0.0f;
-                float step_r = cosf(dphi), step_i = sinf(dphi);
-                int prev_peak = 0;  /* force first emission at chip 0 */
-                int chip_idx = 0;
-                int first = 1;
-                float sum_i = 0.0f, sum_q = 0.0f;
-                for (size_t s = 0; s < N && chip_idx < 6400; s++) {
-                    code_phase += code_freq;
-                    int cur_peak = (int)(code_phase + 0.5f);
-                    if (first) {
-                        /* First peak: emit when code_phase+0.5 crosses 0→1 */
-                        if ((int)(code_phase + 0.5f) == 0) continue;
-                        cur_peak = 0;
-                        first = 0;
-                    }
-                    if (cur_peak != prev_peak && cur_peak >= 0
-                        && cur_peak < DESPREAD_PRN_LEN) {
-                        float re = __real__ post_rrc[s];
-                        float im = __imag__ post_rrc[s];
-                        float yr = re * ph_r + im * ph_i;
-                        float yi = im * ph_r - re * ph_i;
-                        float pr = 1.0f - 2.0f * (float)prn_buf[cur_peak];
-                        sum_i += yr * pr;
-                        sum_q += yi * pr;
-                        chip_idx++;
-                        prev_peak = cur_peak;
-                    }
-                    float nr = ph_r * step_r - ph_i * step_i;
-                    float ni = ph_r * step_i + ph_i * step_r;
-                    if ((s & 1023u) == 0u) {
-                        float inv = 1.0f / sqrtf(nr * nr + ni * ni);
-                        nr *= inv; ni *= inv;
-                    }
-                    ph_r = nr; ph_i = ni;
-                }
-                float peak = sum_i * sum_i + sum_q * sum_q;
-                if (peak > best_peak) { best_peak = peak; best_off = off; }
-            }
-            init_code = (float)best_off * 0.125f;
-            fprintf(stderr, "[dsss_demod] scan: best=%.3f chip peak=%.0f\n",
-                    (double)init_code, (double)best_peak);
-        }
+        float init_code = 0.0f;  /* scan disabled — hurts more than helps */
 
         if (tracking_init(&trk, fs, sps, coarse_freq_hz, init_code) != 0) {
             fprintf(stderr, "[dsss_demod] tracking_init failed\n");
