@@ -309,7 +309,7 @@ static void process_epoch(tracking_state_t *trk)
         d_phase = (pll_discriminator(trk->accum.prompt_i)
                 +  pll_discriminator(trk->accum.prompt_q)) * 0.5f;
 
-        float pll_gain = 0.0f;  /* PLL bypassed — despread tracks phase */
+        float pll_gain = 0.5f;
 
         /* FLL integrator also integrates phase error (2nd-order loop) */
         trk->carr_integrator += trk->carr_beta * d_phase * pll_gain;
