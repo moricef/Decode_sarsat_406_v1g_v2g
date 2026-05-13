@@ -110,9 +110,11 @@ static float fll_discriminator(float complex prev, float complex cur, float T)
 }
 
 /* ------------------------------------------------------------------ */
-/* PLL discriminator: Costas for QPSK/OQPSK, data-insensitive.         */
-/*   d_phase = sign(Re(P))*Im(P) - sign(Im(P))*Re(P)                  */
-/*   Normalised by |P|² for constant gain vs amplitude.                */
+/* PLL discriminator: BPSK Costas on each PRN correlator output.       */
+/*   After despreading with PRN_I, prompt_i is a BPSK signal           */
+/*   (same for prompt_q with PRN_Q). QPSK Costas is not suitable       */
+/*   because the two channels carry independent data streams.          */
+/*   d_phase = Re(P)*Im(P) / |P|²  =  sin(2θ)/2  ≈  θ                */
 /* ------------------------------------------------------------------ */
 static float pll_discriminator(float complex prompt)
 {
@@ -121,9 +123,8 @@ static float pll_discriminator(float complex prompt)
     float dot = re * re + im * im;
     if (dot < 1e-20f) return 0.0f;
 
-    /* QPSK Costas: sign(I)*Q - sign(Q)*I */
-    float d_phase = (re > 0.0f ? im : -im) - (im > 0.0f ? re : -re);
-    return d_phase / dot;   /* normalised → ~phase error in rad */
+    /* BPSK Costas: I*Q product, data-insensitive (d²=1) */
+    return re * im / dot;
 }
 
 /* ------------------------------------------------------------------ */
@@ -304,7 +305,9 @@ static void process_epoch(tracking_state_t *trk)
      * phase drift without destabilizing FLL convergence). */
     float d_phase = 0.0f;
     {
-        d_phase = pll_discriminator(trk->accum.prompt_i);
+        /* Average BPSK Costas over I and Q correlators for +3 dB SNR */
+        d_phase = (pll_discriminator(trk->accum.prompt_i)
+                +  pll_discriminator(trk->accum.prompt_q)) * 0.5f;
 
         float pll_gain = (trk->state == TRK_STATE_ACQ) ? 0.25f : 0.5f;
 
