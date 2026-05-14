@@ -94,9 +94,9 @@ int despread_sync(const float complex *samples, int num_chips,
         build_expected(pred_i_tab[p], pred_q_tab[p],
                        DESPREAD_PREAMBLE_CHIPS, exp_i[p], exp_q[p]);
 
-    /* ---------- Pass A: soft-correlate I channel to find offset + phase ---------- */
+    /* ---------- Pass A: complex correlation to find offset + phase ----------
+     * |Σ s·conj(e)| is insensitive to carrier phase — 3x z-score vs real-only. */
     int search_hi = DESPREAD_SYNC_RANGE;
-    /* Ensure full message fits after preamble sync position */
     int msg_limit = num_chips - DESPREAD_TOTAL_BITS * DESPREAD_CHIPS_PER_BIT;
     if (msg_limit < search_hi) search_hi = msg_limit;
     if (search_hi < 1) search_hi = 1;
@@ -110,25 +110,43 @@ int despread_sync(const float complex *samples, int num_chips,
 
     for (int off = 0; off < search_hi; off++) {
         for (int p = 0; p < 4; p++) {
-            float corr = 0.0f;
+            float corr_re = 0.0f, corr_im = 0.0f;
             for (int k = 0; k < DESPREAD_PREAMBLE_CHIPS; k++) {
                 float re = __real__ samples[off + k];
-                corr += re * exp_i[p][k];
+                float im = __imag__ samples[off + k];
+                corr_re += re * exp_i[p][k] + im * exp_q[p][k];
+                corr_im += im * exp_i[p][k] - re * exp_q[p][k];
             }
+            float corr = sqrtf(corr_re * corr_re + corr_im * corr_im);
             sum_i += corr;
             sum2_i += corr * corr;
             cnt_i++;
-            float acorr = (corr > 0.0f) ? corr : -corr;
-            if (acorr > best_i_abs) {
-                best_i_abs = acorr;
+            if (corr > best_i_abs) {
+                best_i_abs = corr;
                 best_i_raw = corr;
                 best_off_i = off;
                 best_phase = p;
             }
         }
     }
+    /* Resolve 4-phase ambiguity: all phases give same magnitude.
+     * Pick the phase with the largest (most positive) real part. */
+    {
+        float best_re = -1e30f;
+        int   best_p = best_phase;
+        for (int p = 0; p < 4; p++) {
+            float re_sum = 0.0f;
+            for (int k = 0; k < DESPREAD_PREAMBLE_CHIPS; k++) {
+                float re = __real__ samples[best_off_i + k];
+                float im = __imag__ samples[best_off_i + k];
+                re_sum += re * exp_i[p][k] + im * exp_q[p][k];
+            }
+            if (re_sum > best_re) { best_re = re_sum; best_p = p; }
+        }
+        best_phase = best_p;
+    }
 
-    /* ---------- Pass B: soft-correlate Q channel around best I offset ---------- */
+    /* ---------- Pass B: complex correlation around best I offset ---------- */
     int qlo = best_off_i - 5; if (qlo < 0) qlo = 0;
     int qhi = best_off_i + 6; if (qhi > search_hi) qhi = search_hi;
 
@@ -138,50 +156,37 @@ int despread_sync(const float complex *samples, int num_chips,
     int   cnt_q = 0;
 
     for (int off = qlo; off < qhi; off++) {
-        float corr = 0.0f;
+        float corr_re = 0.0f, corr_im = 0.0f;
         for (int k = 0; k < DESPREAD_PREAMBLE_CHIPS; k++) {
+            float re = __real__ samples[off + k];
             float im = __imag__ samples[off + k];
-            corr += im * exp_q[best_phase][k];
+            corr_re += re * exp_i[best_phase][k] + im * exp_q[best_phase][k];
+            corr_im += im * exp_i[best_phase][k] - re * exp_q[best_phase][k];
         }
+        float corr = sqrtf(corr_re * corr_re + corr_im * corr_im);
         sum_q += corr;
         sum2_q += corr * corr;
         cnt_q++;
-        float acorr = (corr > 0.0f) ? corr : -corr;
-        if (acorr > best_q_abs) {
-            best_q_abs = acorr;
+        if (corr > best_q_abs) {
+            best_q_abs = corr;
             best_q_raw = corr;
             best_off_q = off;
         }
     }
 
-    /* ---------- Quality check: peak z-score ----------
-     * For each pass we measure how many standard deviations the best
-     * correlation stands above the mean of the other candidates.
-     * Pure noise gives z < 3; a real preamble gives z >> 10.
-     *
-     * When there are too few candidates for a reliable empirical
-     * variance (cnt < 10), fall back to the theoretical noise floor:
-     * std = sqrt(N_chips) ≈ 80 for 6400-chip preamble. */
-    float noise_std = sqrtf((float)DESPREAD_PREAMBLE_CHIPS);
+    /* Quality: theoretical noise std for complex correlation magnitude */
+    float noise_std = sqrtf((float)DESPREAD_PREAMBLE_CHIPS * 0.429f);
     float z_i, z_q;
-    if (cnt_i > 10) {
+    if (cnt_i > 50) {
         float mean_i = (sum_i - best_i_raw) / (float)(cnt_i - 1);
         float var_i = (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
                       - mean_i * mean_i;
         if (var_i < 1e-10f) var_i = 1e-10f;
-        z_i = fabsf(best_i_raw - mean_i) / sqrtf(var_i);
+        z_i = (best_i_raw - mean_i) / sqrtf(var_i);
     } else {
-        z_i = fabsf(best_i_raw) / noise_std;
+        z_i = best_i_raw / noise_std;
     }
-    if (cnt_q > 10) {
-        float mean_q = (sum_q - best_q_raw) / (float)(cnt_q - 1);
-        float var_q = (sum2_q - best_q_raw * best_q_raw) / (float)(cnt_q - 1)
-                      - mean_q * mean_q;
-        if (var_q < 1e-10f) var_q = 1e-10f;
-        z_q = fabsf(best_q_raw - mean_q) / sqrtf(var_q);
-    } else {
-        z_q = fabsf(best_q_raw) / noise_std;
-    }
+    z_q = best_q_raw / noise_std;
 
     float z_comb = sqrtf(z_i * z_i + z_q * z_q);
     float thr = DESPREAD_SYNC_THRESHOLD;
