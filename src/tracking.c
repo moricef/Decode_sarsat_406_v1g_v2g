@@ -303,6 +303,7 @@ static void process_epoch(tracking_state_t *trk)
 
     /* --- PLL (BPSK Costas, all states) ---
      * FLL is disabled — PLL alone tracks phase and frequency. */
+    float freq_one_shot = 0.0f;
     float d_phase = 0.0f;
     {
         /* Average BPSK Costas over I and Q correlators for +3 dB SNR */
@@ -314,12 +315,14 @@ static void process_epoch(tracking_state_t *trk)
         /* FLL integrator also integrates phase error (2nd-order loop) */
         trk->carr_integrator += trk->carr_beta * d_phase * pll_gain;
 
-        /* Proportional phase correction applied each epoch */
-        trk->pending_phase_correction = trk->carr_alpha * d_phase * pll_gain;
+        /* Convert phase step to one-epoch frequency offset */
+        freq_one_shot = trk->carr_alpha * d_phase * pll_gain
+                        / (2.0f * (float)M_PI * T);
+        trk->pending_phase_correction = 0.0f;
     }
 
     /* --- Carrier NCO update --- */
-    float freq_hz = trk->carr_integrator;
+    float freq_hz = trk->carr_integrator + freq_one_shot;
     if (fll_active)
         freq_hz += trk->carr_alpha * d_freq;
     trk->carrier_freq = 2.0f * (float)M_PI * freq_hz / trk->fs;
