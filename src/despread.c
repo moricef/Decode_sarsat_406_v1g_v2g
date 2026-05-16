@@ -237,10 +237,16 @@ int despread_bits(const float complex *samples, int num_chips,
     despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_i);
     despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, prn_q);
 
-    /* Phase tracking: start from sync Costas phase, update each bit
-     * with BPSK Costas on I (real axis) and Q (imag axis). */
+    /* Phase tracking: 2nd-order (proportional + integral).
+     * alpha corrects phase; beta accumulates the per-bit phase drift
+     * (freq_per_bit) to cancel a constant frequency residual instead of
+     * letting it produce a phase ramp. A 1st-order tracker (alpha only)
+     * lags the residual and flips bits mid-message
+     * (measured drift ~0.29 Hz -> 0.012 rad/bit). */
     float phase_rad = (float)phase * (float)M_PI / 2.0f;
+    float freq_per_bit = 0.0f;
     const float alpha = 0.04f;
+    const float beta  = 0.01f;
 
     int out_idx = 0;
     for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
@@ -278,11 +284,18 @@ int despread_bits(const float complex *samples, int num_chips,
             out_idx += 2;
         }
 
-        /* Phase update: BPSK Costas, I real→Re*Im, Q imag→-Re*Im */
+        /* Phase update: BPSK Costas, I real→Re*Im, Q imag→-Re*Im.
+         * 2nd-order: alpha on phase, beta on freq_per_bit (integral). */
         float perr = ri_re * ri_im - rq_re * rq_im;
         float pow = ri_re*ri_re + ri_im*ri_im + rq_re*rq_re + rq_im*rq_im;
-        if (pow > 1e-10f && fabsf(perr/pow) > 0.01f)
-            phase_rad += alpha * perr / pow;
+        if (pow > 1e-10f) {
+            float e = perr / pow;
+            if (fabsf(e) > 0.01f) {       /* dead zone — suppress noise */
+                phase_rad    += alpha * e;
+                freq_per_bit += beta  * e;
+            }
+        }
+        phase_rad += freq_per_bit;        /* apply learned drift each bit */
     }
 
     free(prn_i); free(prn_q);
