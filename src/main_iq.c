@@ -64,7 +64,9 @@ static size_t find_burst_start(const float complex *buf, size_t n, float fs) {
         float thr = sqrtf(noise * sig);
         for (size_t b = 0; b < nblk; b++) {
             if (pwr[b] > thr) {
-                result = (b > 1 ? b - 1 : 0) * BURST_BLK;
+                /* result is in original samples: the block index runs over
+                 * the decimated stream, so it must be scaled by dec. */
+                result = (b > 1 ? b - 1 : 0) * BURST_BLK * (size_t)dec;
                 fprintf(stderr,
                         "[main_iq] burst at blk %zu (%.3f ms), "
                         "trimming %zu samples  P10=%.1e P90=%.1e\n",
@@ -157,7 +159,9 @@ int main(int argc, char *argv[]) {
     uint8_t out[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
     memset(out, 0, sizeof(out));
 
-    size_t win = (size_t)(fs * 1.1f);
+    /* Window must hold a full 1.0 s burst plus one scan step (0.25 s) of
+     * slack, so every burst lands fully inside at least one window. */
+    size_t win = (size_t)(fs * 1.35f);
     float complex *buf = calloc(win, sizeof(float complex));
     if (!buf) return 1;
 

@@ -35,7 +35,11 @@
 #define DESPREAD_MSG_BITS         125      /* per channel */
 #define DESPREAD_TOTAL_BITS       150      /* per channel */
 #define DESPREAD_PREAMBLE_CHIPS   (DESPREAD_PREAMBLE_BITS * DESPREAD_CHIPS_PER_BIT)
-#define DESPREAD_SYNC_RANGE       1000
+/* Preamble search span: one scan step (0.25 s = 9600 chips), so the
+ * window catching a burst at its smallest offset always finds it.
+ * The tracking chip-emission cap and the despread search both scale
+ * off this value. */
+#define DESPREAD_SYNC_RANGE       9600
 #define DESPREAD_SYNC_THRESHOLD   2.8f   /* combined z-score sqrt(z_i²+z_q²) */
 #define DESPREAD_OUTPUT_BITS      250      /* 125 I + 125 Q interleaved */
 
