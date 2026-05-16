@@ -130,3 +130,62 @@ cette limite puis s'effondre. Le BCH (6 erreurs max) n'est jamais sollicité
 en zone de transition : soit 0 erreur, soit >90 erreurs.
 
 Cette courbe en « waterfall » est caractéristique des systèmes DSSS.
+
+---
+
+## 4. Rejet des trames invalides
+
+Fichier : `tests/test_bch_reject.c`
+
+Vérifie que `decode_2g()` n'affiche jamais de balise à partir d'un mot de code
+que le BCH ne peut pas corriger.
+
+```bash
+cc -Iinclude -O2 tests/test_bch_reject.c src/dec406_v2g.c src/display_utils.c \
+   -lm -o /tmp/test_bch_reject
+/tmp/test_bch_reject
+```
+
+| Entrée | Résultat attendu |
+|--------|------------------|
+| Mot de code propre (0 erreur) | balise affichée |
+| 3 erreurs (≤ t=6) | « BCH: 3 errors corrected », balise affichée |
+| 32 erreurs (≫ t=6) | « FRAME REJECTED », aucune balise |
+
+---
+
+## 5. Validation OTA (Pluto → RTL-SDR / SDRangel)
+
+### Test de régression synthétique (obligatoire avant commit)
+
+```bash
+make build/dec406_iq
+./build/dec406_iq <fichier_synthetique>.sigmf-data -s 2457600
+```
+
+Résultat attendu : décodage bit-perfect, z-score préambule ≈ 240, BCH 0 erreur.
+
+### Décodage OTA
+
+```bash
+# SDRangel ci32_le
+./build/dec406_iq <enregistrement>.sigmf-data -s 2457600 -I
+```
+
+Résultat attendu : TAC / Serial / Country / Position corrects, BCH-propre.
+z-score des bursts complets : 33 à 300+.
+
+### Courbe de sensibilité (antennes à ~2.5 m)
+
+| Gain TX Pluto | meilleur z | Résultat |
+|---------------|:----------:|----------|
+| -20 dB | 64 | décode |
+| -30 dB | 62 | décode |
+| -35 dB | 6 | bruit — rejeté |
+| -40 dB | 6 | bruit — rejeté |
+
+Le DSSS décroche en tout-ou-rien : un burst complet corrèle à z ≥ 33 ou
+s'effondre dans le bruit (z ≤ 7) — rien dans l'intervalle (16, 33). Le seuil
+de sync `DESPREAD_SYNC_THRESHOLD` est fixé à 20, au centre de cet intervalle
+vide. En dessous du seuil, ou si le BCH ne corrige pas, la trame est rejetée :
+le décodeur n'imprime jamais de balise fabriquée à partir de bruit.

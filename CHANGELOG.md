@@ -1,5 +1,55 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.4 - 2026-05-16 - Tracking loop + décodage OTA
+
+Branche `feature/fll-pll-tracking`.
+
+### 🎯 Démodulateur OTA fonctionnel
+Le signal over-the-air (PlutoSDR → RTL-SDR / SDRangel) est maintenant décodé,
+BCH-propre. La chaîne de réception est remplacée par une **tracking loop**
+sample-rate (FLL+PLL+DLL+Kalman) qui assure la poursuite de porteuse et la
+décimation en une seule passe, en remplacement du filtre RRC + Costas QPSK.
+
+### 🔧 Chaîne de réception (src/dsss_demod.c)
+1. DC blocker (IIR α=0.001) sur échantillons bruts
+2. `freq_acq_coarse_fft()` — FFT 4e puissance, contrôle de plausibilité ±25 kHz
+3. Sweep fallback ±300 Hz (corrélation PRN) si la FFT est rejetée
+4. OQPSK delay (Q avancé de SPS/2)
+5. Tracking loop → sortie chip-rate
+6. `despread_burst()` — sync préambule + extraction des bits
+
+### 🐛 Corrections
+
+#### Décodage des bursts n'importe où dans la fenêtre (commit 8ffb090)
+- `DESPREAD_SYNC_RANGE` 1000 → 9600 chips (= un pas de scan complet)
+- Fenêtre de scan 1.1 s → 1.35 s
+- **Cause** : un burst dont le préambule tombait au-delà de l'offset 1000
+  n'était jamais trouvé → décodage « à la loterie » sur fichiers courts
+
+#### Rejet des fausses balises (commit fa08382)
+- `DESPREAD_SYNC_THRESHOLD` 2.8 → 20 : le bruit (z ≤ 7) ne synchronise plus
+- `bch_decode_250_202()` retourne maintenant un statut ; `decode_2g()` rejette
+  la trame et n'affiche aucune balise si le BCH ne peut pas corriger
+- **Cause** : à lien faible, le décodeur synchronisait sur du bruit et imprimait
+  une balise fabriquée (faux TAC, fausse position GPS)
+
+#### Poursuite de phase dans le despread (commits 08d8a0a, ad3cc7e, 0995092)
+- Phase tracker BPSK 2e ordre (proportionnel + intégral) dans `despread_bits()`
+- PLL : correction de phase remplacée par un offset de fréquence one-shot
+  (pas de saut de phase aux frontières d'epoch)
+
+#### Sync préambule en corrélation complexe (commit 16d00d6)
+- Corrélation complexe `|Σ s·conj(e)|` insensible à la phase porteuse
+- Résolution d'ambiguïté Costas sur 4 phases
+
+### 🛠️ Nouveaux composants
+- `src/tracking.c` — tracking loop sample-rate (EPL, ATC 3 états, lock P²)
+- `src/kalman5.c` — filtre de Kalman 5 états (optionnel, désactivé)
+- `src/freq_acq.c` — acquisition de fréquence coarse (FFT 4e puissance + sweep)
+- `tests/test_bch_reject.c` — test des chemins BCH propre / corrigé / rejeté
+
+---
+
 ## Version 10.2.3 - 2025-10-24 - Investigation Démodulateur IQ
 
 ### 🔍 Investigation Désalignement Structurel
