@@ -40,7 +40,11 @@
  * The tracking chip-emission cap and the despread search both scale
  * off this value. */
 #define DESPREAD_SYNC_RANGE       9600
-#define DESPREAD_SYNC_THRESHOLD   2.8f   /* combined z-score sqrt(z_i²+z_q²) */
+/* Combined z-score sqrt(z_i²+z_q²). Set into the empty gap between the
+ * noise ceiling (measured ≤7) and the weakest fully-contained burst
+ * (measured ≥33). The DSSS gain is all-or-nothing: a burst either
+ * correlates strongly or collapses into noise — nothing lands in (16,33). */
+#define DESPREAD_SYNC_THRESHOLD   20.0f
 #define DESPREAD_OUTPUT_BITS      250      /* 125 I + 125 Q interleaved */
 
 /**

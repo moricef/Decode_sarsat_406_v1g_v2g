@@ -138,9 +138,10 @@ static int chien_search(const uint8_t lam[13], int L, int pos[6])
  * @param out  Output: 202-bit corrected data (may be modified in msg too)
  *
  * Uses full syndrome + Berlekamp-Massey + Chien search.
- * Falls back to uncorrected copy if decoding fails.
+ * @return 0 if the codeword is clean or fully corrected, -1 if errors
+ *         remain uncorrectable (out still holds the uncorrected copy).
  */
-static void bch_decode_250_202(const uint8_t *msg, uint8_t *out)
+static int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
 {
     gf_init();
 
@@ -153,6 +154,7 @@ static void bch_decode_250_202(const uint8_t *msg, uint8_t *out)
     int orig_errors = 0;
     for (int i = 0; i < 12; i++) if (syn[i]) { orig_errors = 1; break; }
 
+    int rc = 0;
     if (orig_errors) {
         uint8_t lam[13] = {0};
         int L = berlekamp_massey(syn, lam);
@@ -170,19 +172,23 @@ static void bch_decode_250_202(const uint8_t *msg, uint8_t *out)
                 if (still_errors) {
                     memcpy(cw, msg, 250);  /* miscorrect — restore */
                     fprintf(stderr, "BCH: Errors detected, could not correct\n");
+                    rc = -1;
                 } else {
                     fprintf(stderr, "BCH: %d errors corrected\n", L);
                 }
             } else {
                 fprintf(stderr, "BCH: Errors detected, could not correct\n");
+                rc = -1;
             }
         } else {
             fprintf(stderr, "BCH: Errors detected, could not correct\n");
+            rc = -1;
         }
     }
     /* else: no errors, nothing to print */
 
     memcpy(out, cw, 202);
+    return rc;
 }
 
 // ===================================================
@@ -697,8 +703,11 @@ void decode_2g(const uint8_t *rx_bits) {
     memset(&info, 0, sizeof(info));
     
     // 1. Apply BCH error correction
-    bch_decode_250_202(rx_bits, corrected);
-    
+    if (bch_decode_250_202(rx_bits, corrected) != 0) {
+        printf("\n=== FRAME REJECTED — BCH uncorrectable, decode aborted ===\n");
+        return;
+    }
+
     // 2. Decode main field (154 bits)
     decode_main(corrected, &info);
     
