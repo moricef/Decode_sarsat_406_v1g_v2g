@@ -35,6 +35,7 @@ TARGETS = \
 	$(BUILD_DIR)/dec406_audio \
 	$(BUILD_DIR)/dec406_iq \
 	$(BUILD_DIR)/dec406_dsss_test \
+	$(BUILD_DIR)/dec406_scan \
 	$(BUILD_DIR)/generate_2g_hex \
 	$(BUILD_DIR)/reset_usb
 
@@ -98,6 +99,16 @@ $(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $
 	@echo "Built: $@"
 
 # ============================================================================
+# Real-time scanner (unified FGB + SGB)
+# ============================================================================
+
+# dec406_scan - Real-time band scanner (Phase 1: ingestion + double buffer)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread
+	@echo "Built: $@"
+
+# ============================================================================
 # Utility Programs
 # ============================================================================
 
@@ -145,6 +156,7 @@ help:
 	@echo "  dec406_audio     - FGB decoder from audio (WAV/stdin)"
 	@echo "  dec406_iq        - SGB decoder from IQ file (pure-C DSSS chain)"
 	@echo "  dec406_dsss_test - Test DSSS demodulator"
+	@echo "  dec406_scan      - Real-time FGB+SGB band scanner (rtl_sdr)"
 	@echo "  generate_2g_hex  - Generate 2G test frame"
 	@echo ""
 	@echo "Usage examples:"
