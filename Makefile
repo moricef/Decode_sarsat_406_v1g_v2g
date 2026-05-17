@@ -102,8 +102,8 @@ $(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $
 # Real-time scanner (unified FGB + SGB)
 # ============================================================================
 
-# dec406_scan - Real-time band scanner (Phase 1: ingestion + double buffer)
-$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c
+# dec406_scan - Real-time band scanner (rtl_sdr -> detect/classify -> decode)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread
 	@echo "Built: $@"

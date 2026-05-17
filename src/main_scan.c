@@ -2,12 +2,11 @@
  * @file main_scan.c
  * @brief dec406_scan — real-time FGB+SGB band scanner.
  *
- * Phase 2: ingestion + burst detection + classification.
- *  - capture thread pipes raw uint8 I/Q from rtl_sdr into a circular buffer
- *  - processing thread runs a streaming burst detector on the ring, and for
- *    each burst measures its frequency and bandwidth (FFT) and classifies it
- *    FGB (narrow) vs SGB (wide DSSS)
- * Decoding itself comes in later phases.
+ * A capture thread pipes raw uint8 I/Q from rtl_sdr into a circular
+ * buffer; a processing thread runs a streaming burst detector, measures
+ * each burst's frequency and bandwidth (FFT), classifies it FGB (narrow)
+ * vs SGB (wide DSSS), and decodes SGB bursts through the DSSS chain.
+ * FGB decoding comes in a later phase.
  *
  * Usage: dec406_scan <freq_start> <freq_end> [ppm] [gain_dB]
  *   e.g. dec406_scan 406.0M 406.1M
@@ -28,10 +27,12 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
+#include "dsss_demod.h"
+#include "dec406.h"
 
-#define SAMP_RATE        2400000u
+#define SAMP_RATE        2457600u
 #define RING_BITS        23
-#define RING_SAMPLES     (1u << RING_BITS)        /* ~3.5 s at 2.4 Msps */
+#define RING_SAMPLES     (1u << RING_BITS)        /* ~3.4 s at 2.4576 Msps */
 #define RING_MASK        (RING_SAMPLES - 1u)
 #define RING_BYTES       (RING_SAMPLES * 2u)
 #define CAP_CHUNK_BYTES  (1u << 17)               /* 128 KB capture reads */
@@ -153,6 +154,57 @@ static double block_power(uint64_t a) {
     return acc / BLOCK;
 }
 
+/* Extract an SGB burst window from the ring, mix it down to baseband by the
+ * frequency offset measured in analyze_burst, and run the DSSS chain on it.
+ * The chain is a baseband receiver — it expects the SGB near 0 Hz; the burst
+ * sits at an arbitrary offset within the wideband capture, hence the mix.
+ * The capture runs at 2.4576 Msps — the DSSS chain's native rate
+ * (64 samples/chip) — so the window feeds it directly. */
+static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
+    uint64_t head = (uint64_t)(0.05 * SAMP_RATE);   /* slack before onset */
+    uint64_t tail = (uint64_t)(0.20 * SAMP_RATE);   /* slack after burst */
+    if (head > start) head = start;
+    uint64_t ext_start = start - head;
+    uint64_t ext_len   = head + len + tail;
+
+    pthread_mutex_lock(&lock);
+    uint64_t wr = g_wr;
+    pthread_mutex_unlock(&lock);
+    if (ext_start + RING_SAMPLES <= wr) {
+        fprintf(stderr, "WARNING: SGB window overwritten before decode\n");
+        return;
+    }
+    if (ext_start + ext_len > wr) ext_len = wr - ext_start;
+
+    float complex *win = malloc((size_t)ext_len * sizeof(float complex));
+    if (!win) { fprintf(stderr, "WARNING: SGB window alloc failed\n"); return; }
+    double w = 2.0 * M_PI * offset_hz / (double)SAMP_RATE;   /* +offset -> 0 Hz */
+    for (uint64_t i = 0; i < ext_len; i++) {
+        size_t off = (size_t)((ext_start + i) & RING_MASK) * 2;
+        double si = ((double)ring[off]     - 127.5) / 127.5;
+        double sq = ((double)ring[off + 1] - 127.5) / 127.5;
+        double ph = w * (double)i;
+        double c  = cos(ph), s = sin(ph);
+        win[i] = (float)(si * c + sq * s) + (float)(sq * c - si * s) * I;
+    }
+
+    uint8_t bits[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
+    memset(bits, 0, sizeof bits);
+    float z  = 0.0f;
+    float fs = (float)SAMP_RATE;
+    int rc = dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f,
+                                fs, 0, bits, &z);
+    free(win);
+
+    if (rc == 0) {
+        printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
+        decode_beacon(bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    } else {
+        printf("  SGB burst — decode failed (z=%.1f)\n", z);
+    }
+    fflush(stdout);
+}
+
 /* FFT the burst window, measure centre frequency + bandwidth, classify */
 static void analyze_burst(uint64_t start, uint64_t len,
                           double burst_pwr, double noise_pwr) {
@@ -227,6 +279,9 @@ static void analyze_burst(uint64_t start, uint64_t len,
     printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   SNR %2.0f dB   dur %.2f s\n",
            timestr(time(NULL)), abs_hz / 1e6, bw / 1e3, type, snr, dur);
     fflush(stdout);
+
+    if (bw > BW_SPLIT_HZ)
+        decode_sgb(start, len, centroid);
 }
 
 static void *capture_thread(void *arg) {
