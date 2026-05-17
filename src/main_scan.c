@@ -2,10 +2,12 @@
  * @file main_scan.c
  * @brief dec406_scan — real-time FGB+SGB band scanner.
  *
- * Phase 1: ingestion. Pipes raw uint8 I/Q from rtl_sdr into a double
- * ping-pong buffer; a capture thread fills one buffer while a processing
- * thread consumes the other. Phase 1 processing only measures throughput
- * and mean power — burst detection and decoding come in later phases.
+ * Phase 2: ingestion + burst detection + classification.
+ *  - capture thread pipes raw uint8 I/Q from rtl_sdr into a circular buffer
+ *  - processing thread runs a streaming burst detector on the ring, and for
+ *    each burst measures its frequency and bandwidth (FFT) and classifies it
+ *    FGB (narrow) vs SGB (wide DSSS)
+ * Decoding itself comes in later phases.
  *
  * Usage: dec406_scan <freq_start> <freq_end> [ppm] [gain_dB]
  *   e.g. dec406_scan 406.0M 406.1M
@@ -20,27 +22,45 @@
 #include <signal.h>
 #include <pthread.h>
 #include <time.h>
+#include <math.h>
+#include <complex.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
 
-#define DEFAULT_SAMP_RATE  2400000u
-#define BUF_SAMPLES        (1u << 21)            /* complex samples per buffer */
-#define BUF_BYTES          (BUF_SAMPLES * 2u)    /* uint8 I,Q interleaved */
-#define REPORT_EVERY       4                     /* buffers between stat lines */
+#define SAMP_RATE        2400000u
+#define RING_BITS        23
+#define RING_SAMPLES     (1u << RING_BITS)        /* ~3.5 s at 2.4 Msps */
+#define RING_MASK        (RING_SAMPLES - 1u)
+#define RING_BYTES       (RING_SAMPLES * 2u)
+#define CAP_CHUNK_BYTES  (1u << 17)               /* 128 KB capture reads */
+
+#define BLOCK            4096u                    /* power-detection block */
+#define FFT_N            8192                     /* spectral-analysis FFT */
+#define N_AVG            24                       /* spectra averaged per burst */
+#define DC_GUARD_BINS    10                       /* mask the RTL DC spike */
+
+#define NOISE_ALPHA      0.02                     /* noise-floor IIR */
+#define BURST_FACTOR     5.0                      /* burst = power > floor x5 */
+#define ON_BLOCKS        3                        /* blocks hot -> burst start */
+#define OFF_BLOCKS       16                       /* blocks cold -> burst end */
+#define MIN_BURST_SAMP   ((uint64_t)(0.15 * SAMP_RATE))
+#define MAX_BURST_SAMP   ((uint64_t)(1.40 * SAMP_RATE))
+#define BW_SPLIT_HZ      50000.0                  /* FGB/SGB classification */
+#define HEARTBEAT_S      15
 
 static volatile sig_atomic_t running = 1;
 static void on_sigint(int s) { (void)s; running = 0; }
 
-typedef struct {
-    uint8_t *data;
-    size_t   fill;      /* bytes actually filled */
-    int      ready;     /* 1 = filled, awaiting the processing thread */
-} iqbuf_t;
-
-static iqbuf_t         buf[2];
+static uint8_t        *ring     = NULL;
+static uint64_t        g_wr     = 0;      /* total samples written */
 static pthread_mutex_t lock       = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  data_ready = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t  buf_free   = PTHREAD_COND_INITIALIZER;
-static FILE           *iq_pipe    = NULL;
-static unsigned long   stalls     = 0;   /* times capture waited on processing */
+static pthread_cond_t  data_avail = PTHREAD_COND_INITIALIZER;
+static FILE           *iq_pipe   = NULL;
+static unsigned long   overruns  = 0;
+static double          g_center_hz = 0.0;
+static double          hann[FFT_N];
 
 /* parse "406M", "406.1M", "431.5M" or a plain Hz value */
 static double parse_freq(const char *s) {
@@ -55,82 +75,247 @@ static double parse_freq(const char *s) {
     return v;
 }
 
-/* Capture and processing alternate over the two buffers in lockstep:
- * capture fills 0,1,0,1… and processing consumes them in the same order. */
+static const char *timestr(time_t t) {
+    static char b[16];
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(b, sizeof b, "%H:%M:%S", &tm);
+    return b;
+}
+
+/* RTL-SDR specific: a device left claimed by a previous unclean exit
+ * refuses to reopen (libusb error -6). Reset it before launching rtl_sdr,
+ * the same workaround scan406.pl uses. Not needed once the receiver moves
+ * to the Airspy Mini. */
+static void reset_rtl_usb(void) {
+    FILE *p = popen("lsusb", "r");
+    if (!p) return;
+    char line[256];
+    int done = 0;
+    while (fgets(line, sizeof line, p)) {
+        unsigned bus, dev, vid, pid;
+        if (sscanf(line, "Bus %u Device %u: ID %x:%x",
+                   &bus, &dev, &vid, &pid) == 4
+            && vid == 0x0bda && (pid == 0x2832 || pid == 0x2838)) {
+            char path[64];
+            snprintf(path, sizeof path, "/dev/bus/usb/%03u/%03u", bus, dev);
+            int fd = open(path, O_WRONLY);
+            if (fd >= 0) {
+                if (ioctl(fd, USBDEVFS_RESET, 0) == 0) {
+                    printf("  reset RTL-SDR USB device (%s)\n", path);
+                    done = 1;
+                }
+                close(fd);
+            }
+        }
+    }
+    pclose(p);
+    if (done) {
+        printf("  waiting for device re-enumeration...\n");
+        fflush(stdout);
+        usleep(2000000);
+    }
+}
+
+/* in-place iterative radix-2 FFT, n a power of two */
+static void fft(float complex *x, int n) {
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { float complex t = x[i]; x[i] = x[j]; x[j] = t; }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        double ang = -2.0 * M_PI / len;
+        float complex wl = cosf(ang) + sinf(ang) * I;
+        for (int i = 0; i < n; i += len) {
+            float complex w = 1.0f;
+            for (int k = 0; k < len / 2; k++) {
+                float complex u = x[i + k];
+                float complex v = x[i + k + len / 2] * w;
+                x[i + k]             = u + v;
+                x[i + k + len / 2]   = u - v;
+                w *= wl;
+            }
+        }
+    }
+}
+
+/* mean |x|^2 over BLOCK samples starting at absolute index a */
+static double block_power(uint64_t a) {
+    double acc = 0.0;
+    for (unsigned i = 0; i < BLOCK; i++) {
+        size_t off = (size_t)((a + i) & RING_MASK) * 2;
+        double si = (double)ring[off]     - 127.5;
+        double sq = (double)ring[off + 1] - 127.5;
+        acc += si * si + sq * sq;
+    }
+    return acc / BLOCK;
+}
+
+/* FFT the burst window, measure centre frequency + bandwidth, classify */
+static void analyze_burst(uint64_t start, uint64_t len,
+                          double burst_pwr, double noise_pwr) {
+    static double        spec[FFT_N];
+    static float complex win[FFT_N];
+
+    pthread_mutex_lock(&lock);
+    uint64_t wr = g_wr;
+    pthread_mutex_unlock(&lock);
+    if (start + RING_SAMPLES <= wr) {
+        fprintf(stderr, "WARNING: burst window overwritten before analysis\n");
+        return;
+    }
+
+    for (int k = 0; k < FFT_N; k++) spec[k] = 0.0;
+
+    int navg = (int)(len / FFT_N);
+    if (navg < 1)     navg = 1;
+    if (navg > N_AVG) navg = N_AVG;
+    uint64_t span = (len > (uint64_t)FFT_N) ? len - FFT_N : 0;
+    uint64_t step = (navg > 1) ? span / (uint64_t)(navg - 1) : 0;
+
+    for (int w = 0; w < navg; w++) {
+        uint64_t base = start + (uint64_t)w * step;
+        for (int i = 0; i < FFT_N; i++) {
+            size_t off = (size_t)((base + (uint64_t)i) & RING_MASK) * 2;
+            double si = ((double)ring[off]     - 127.5) * hann[i];
+            double sq = ((double)ring[off + 1] - 127.5) * hann[i];
+            win[i] = (float)si + (float)sq * I;
+        }
+        fft(win, FFT_N);
+        for (int k = 0; k < FFT_N; k++) {
+            double re = crealf(win[k]), im = cimagf(win[k]);
+            spec[k] += re * re + im * im;
+        }
+    }
+
+    double binhz = (double)SAMP_RATE / FFT_N;
+    double peak = 0.0;
+    int peak_k = -1;
+    for (int k = 0; k < FFT_N; k++) {
+        int ki = (k <= FFT_N / 2) ? k : k - FFT_N;
+        if (abs(ki) <= DC_GUARD_BINS) continue;
+        if (spec[k] > peak) { peak = spec[k]; peak_k = k; }
+    }
+    if (peak_k < 0) return;
+
+    double thr = peak * 0.1;                 /* -10 dB */
+    double sum_p = 0.0, sum_fp = 0.0;
+    double min_off = 1e12, max_off = -1e12;
+    int nbin = 0;
+    for (int k = 0; k < FFT_N; k++) {
+        int ki = (k <= FFT_N / 2) ? k : k - FFT_N;
+        if (abs(ki) <= DC_GUARD_BINS) continue;
+        if (spec[k] < thr) continue;
+        double off = ki * binhz;
+        sum_p  += spec[k];
+        sum_fp += off * spec[k];
+        if (off < min_off) min_off = off;
+        if (off > max_off) max_off = off;
+        nbin++;
+    }
+    if (nbin == 0 || sum_p <= 0.0) return;
+
+    double centroid = sum_fp / sum_p;
+    double bw       = max_off - min_off;
+    double abs_hz   = g_center_hz + centroid;
+    double snr      = 10.0 * log10(burst_pwr / (noise_pwr > 0 ? noise_pwr : 1.0));
+    const char *type = (bw > BW_SPLIT_HZ) ? "SGB" : "FGB";
+    double dur      = (double)len / SAMP_RATE;
+
+    printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   SNR %2.0f dB   dur %.2f s\n",
+           timestr(time(NULL)), abs_hz / 1e6, bw / 1e3, type, snr, dur);
+    fflush(stdout);
+}
+
 static void *capture_thread(void *arg) {
     (void)arg;
-    int idx = 0;
+    uint64_t wr = 0;
     while (running) {
-        iqbuf_t *b = &buf[idx];
-        size_t got = 0;
-        while (got < BUF_BYTES && running) {
-            size_t n = fread(b->data + got, 1, BUF_BYTES - got, iq_pipe);
-            if (n == 0) { running = 0; break; }   /* EOF or rtl_sdr stopped */
-            got += n;
-        }
-        if (!running) break;
-
+        size_t off     = (size_t)(wr & RING_MASK) * 2;
+        size_t to_end  = RING_BYTES - off;
+        size_t want    = to_end < CAP_CHUNK_BYTES ? to_end : CAP_CHUNK_BYTES;
+        size_t n       = fread(ring + off, 1, want, iq_pipe);
+        if (n == 0) { running = 0; break; }     /* EOF or rtl_sdr stopped */
+        size_t ns = n / 2;
+        wr += ns;
         pthread_mutex_lock(&lock);
-        b->fill  = got;
-        b->ready = 1;
-        pthread_cond_signal(&data_ready);
-        int next = idx ^ 1;
-        if (buf[next].ready) stalls++;            /* processing fell behind */
-        while (buf[next].ready && running)
-            pthread_cond_wait(&buf_free, &lock);
+        g_wr = wr;
+        pthread_cond_signal(&data_avail);
         pthread_mutex_unlock(&lock);
-        idx = next;
     }
     pthread_mutex_lock(&lock);
-    pthread_cond_broadcast(&data_ready);          /* release processing on exit */
+    pthread_cond_broadcast(&data_avail);
     pthread_mutex_unlock(&lock);
     return NULL;
 }
 
 static void *process_thread(void *arg) {
     (void)arg;
-    int idx = 0;
-    unsigned long total = 0, nbuf = 0;
-    struct timespec t0;
-    int timed = 0;   /* rate clock starts at the first buffer, not at thread start */
+    uint64_t rd = 0;
+    double   noise_pwr = -1.0;
+    int      state = 0;            /* 0 = idle, 1 = in burst */
+    int      above = 0, below = 0;
+    uint64_t burst_start = 0;
+    double   burst_pwr_sum = 0.0;
+    uint64_t burst_blocks = 0;
+    time_t   last_beat = time(NULL);
 
     while (running) {
         pthread_mutex_lock(&lock);
-        while (running && !buf[idx].ready)
-            pthread_cond_wait(&data_ready, &lock);
-        int have = buf[idx].ready;
+        while (running && (g_wr - rd) < BLOCK)
+            pthread_cond_wait(&data_avail, &lock);
+        uint64_t avail = g_wr - rd;
         pthread_mutex_unlock(&lock);
-        if (!have) break;
+        if (avail < BLOCK) break;
 
-        iqbuf_t *b = &buf[idx];
-        size_t nsamp = b->fill / 2;
-        double acc = 0.0;
-        for (size_t i = 0; i < nsamp; i++) {
-            double I = (double)b->data[2 * i]     - 127.5;
-            double Q = (double)b->data[2 * i + 1] - 127.5;
-            acc += I * I + Q * Q;
+        if (avail > RING_SAMPLES) {            /* capture lapped the reader */
+            overruns++;
+            fprintf(stderr, "WARNING: ring overrun (%lu)\n", overruns);
+            rd = g_wr - RING_SAMPLES;
+            state = 0; above = 0;
         }
-        double meanpwr = nsamp ? acc / (double)nsamp : 0.0;
-        nbuf++;
-        if (!timed) { clock_gettime(CLOCK_MONOTONIC, &t0); timed = 1; }
-        else        { total += nsamp; }
 
-        pthread_mutex_lock(&lock);
-        b->ready = 0;
-        pthread_cond_signal(&buf_free);
-        pthread_mutex_unlock(&lock);
+        uint64_t blk = rd;
+        double   pwr = block_power(blk);
+        rd += BLOCK;
+        if (noise_pwr < 0.0) noise_pwr = pwr;
+        int hot = (pwr > noise_pwr * BURST_FACTOR);
 
-        if (timed && nbuf % REPORT_EVERY == 0) {
-            struct timespec t1;
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            double dt = (t1.tv_sec - t0.tv_sec)
-                      + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-            double msps = dt > 0 ? total / dt / 1e6 : 0.0;
-            printf("[scan] %.3f Msamp/s   mean power %8.0f   stalls %lu\n",
-                   msps, meanpwr, stalls);
+        if (state == 0) {
+            if (!hot) {
+                noise_pwr += NOISE_ALPHA * (pwr - noise_pwr);
+                above = 0;
+            } else if (++above >= ON_BLOCKS) {
+                state = 1;
+                uint64_t back = (uint64_t)(ON_BLOCKS - 1) * BLOCK;
+                burst_start = (blk > back) ? blk - back : 0;
+                below = 0; burst_pwr_sum = 0.0; burst_blocks = 0;
+            }
+        } else {
+            burst_pwr_sum += pwr;
+            burst_blocks++;
+            below = hot ? 0 : below + 1;
+            uint64_t cur_len = (blk + BLOCK) - burst_start;
+            if (below >= OFF_BLOCKS || cur_len > MAX_BURST_SAMP) {
+                uint64_t end = (blk + BLOCK) - (uint64_t)below * BLOCK;
+                uint64_t len = end - burst_start;
+                if (len >= MIN_BURST_SAMP && len <= MAX_BURST_SAMP)
+                    analyze_burst(burst_start, len,
+                                  burst_pwr_sum / (burst_blocks ? burst_blocks : 1),
+                                  noise_pwr);
+                state = 0; above = 0;
+            }
+        }
+
+        time_t now = time(NULL);
+        if (now - last_beat >= HEARTBEAT_S) {
+            last_beat = now;
+            printf("[%s] monitoring — noise floor %.0f, overruns %lu\n",
+                   timestr(now), noise_pwr, overruns);
             fflush(stdout);
         }
-        idx ^= 1;
     }
     return NULL;
 }
@@ -152,45 +337,47 @@ int main(int argc, char **argv) {
     int has_gain = (argc > 4);
     int gain     = has_gain ? atoi(argv[4]) : 0;
 
-    double   center    = (f1 + f2) / 2.0;
-    double   span      = f2 - f1;
-    unsigned samp_rate = DEFAULT_SAMP_RATE;
+    double span = f2 - f1;
+    g_center_hz = (f1 + f2) / 2.0;
 
-    if (span > samp_rate)
+    if (span > SAMP_RATE)
         fprintf(stderr, "WARNING: band span %.0f Hz exceeds sample rate %u Hz "
                         "— part of the band will not be captured\n",
-                span, samp_rate);
+                span, SAMP_RATE);
 
     char cmd[256];
     if (has_gain)
-        snprintf(cmd, sizeof cmd,
-                 "rtl_sdr -f %.0f -s %u -p %d -g %d -",
-                 center, samp_rate, ppm, gain);
+        snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -g %d -",
+                 g_center_hz, SAMP_RATE, ppm, gain);
     else
-        snprintf(cmd, sizeof cmd,
-                 "rtl_sdr -f %.0f -s %u -p %d -",
-                 center, samp_rate, ppm);
+        snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -",
+                 g_center_hz, SAMP_RATE, ppm);
 
-    printf("dec406_scan — Phase 1 (ingestion + double buffer)\n");
+    printf("dec406_scan — Phase 2 (burst detection + classification)\n");
     printf("  band    : %.3f - %.3f MHz   (span %.0f kHz)\n",
            f1 / 1e6, f2 / 1e6, span / 1e3);
     printf("  center  : %.3f MHz   sample rate %.4f Msps\n",
-           center / 1e6, samp_rate / 1e6);
-    printf("  buffers : 2 x %.1f MB   (~%.2f s each)\n",
-           BUF_BYTES / 1e6, (double)BUF_SAMPLES / samp_rate);
+           g_center_hz / 1e6, SAMP_RATE / 1e6);
+    printf("  ring    : %.0f MB   (~%.1f s)\n",
+           RING_BYTES / 1e6, (double)RING_SAMPLES / SAMP_RATE);
     printf("  rtl_sdr : %s\n\n", cmd);
     fflush(stdout);
 
-    buf[0].data = malloc(BUF_BYTES);
-    buf[1].data = malloc(BUF_BYTES);
-    if (!buf[0].data || !buf[1].data) {
-        fprintf(stderr, "ERROR: buffer allocation failed\n");
+    for (int k = 0; k < FFT_N; k++)
+        hann[k] = 0.5 - 0.5 * cos(2.0 * M_PI * k / (FFT_N - 1));
+
+    ring = malloc(RING_BYTES);
+    if (!ring) {
+        fprintf(stderr, "ERROR: ring allocation failed\n");
         return 1;
     }
+
+    reset_rtl_usb();
 
     iq_pipe = popen(cmd, "r");
     if (!iq_pipe) {
         fprintf(stderr, "ERROR: cannot start rtl_sdr (is it installed?)\n");
+        free(ring);
         return 1;
     }
 
@@ -207,8 +394,7 @@ int main(int argc, char **argv) {
     pthread_join(proc_t, NULL);
 
     pclose(iq_pipe);
-    free(buf[0].data);
-    free(buf[1].data);
-    printf("\nstopped — %lu capture stall(s)\n", stalls);
+    free(ring);
+    printf("\nstopped — %lu ring overrun(s)\n", overruns);
     return 0;
 }
