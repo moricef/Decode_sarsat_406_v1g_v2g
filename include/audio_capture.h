@@ -66,6 +66,15 @@ int lit_ech(FILE *fp);
 int capture_trame(FILE *fp);
 
 /**
+ * Decode a 1G frame from an FM-demodulated sample buffer (no WAV file).
+ * @param samples FM-demodulated samples
+ * @param n       Sample count
+ * @param rate    Sample rate in Hz
+ * @return frame length on success, 0 otherwise
+ */
+int capture_trame_buffer(const int *samples, int n, int rate);
+
+/**
  * Process command line options for audio capture
  * @param argc Argument count
  * @param argv Argument vector

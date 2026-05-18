@@ -36,12 +36,24 @@ char s[200];
 double Y[242];
 double coeff = 100;
 
+/* Buffer sample source for dec406_scan's IQ-domain FGB path: when g_fgb_buf
+ * is set, lit_ech() draws from it instead of a WAV FILE* — no WAV, no sox. */
+static const int *g_fgb_buf = NULL;
+static int g_fgb_n = 0;
+static int g_fgb_i = 0;
+
 // Read sample function
 int lit_ech(FILE *fp) {
     int echantillon = 0;
     unsigned char ech8[10];
     unsigned short ech16[10];
-    
+
+    if (g_fgb_buf) {
+        if (g_fgb_i >= g_fgb_n) return 1000000;
+        n_ech++;
+        return g_fgb_buf[g_fgb_i++];
+    }
+
     if (bits == 8) {
         if (N_canaux == 1) {
             if (fread(ech8, 1, 1, fp) < 1) return 1000000;
@@ -271,6 +283,25 @@ int capture_trame(FILE *fp) {
     }
     
     return 0;
+}
+
+/* Decode a 1G burst from an FM-demodulated sample buffer (dec406_scan IQ
+ * path) — same algorithm as capture_trame(), no WAV file involved. */
+int capture_trame_buffer(const int *samples, int n, int rate) {
+    bauds       = 400;
+    bits        = 16;
+    N_canaux    = 1;
+    canal_audio = 0;
+    opt_minute  = 0;
+    coeff       = 100;
+    f_ech       = rate;
+    ech_par_bit = f_ech / bauds;
+    g_fgb_buf   = samples;
+    g_fgb_n     = n;
+    g_fgb_i     = 0;
+    int r = capture_trame(NULL);
+    g_fgb_buf = NULL;
+    return r;
 }
 
 // Initialize audio capture parameters

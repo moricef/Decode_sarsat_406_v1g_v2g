@@ -5,8 +5,8 @@
  * A capture thread pipes raw uint8 I/Q from rtl_sdr into a circular
  * buffer; a processing thread runs a streaming burst detector, measures
  * each burst's frequency and bandwidth (FFT), classifies it FGB (narrow)
- * vs SGB (wide DSSS), and decodes SGB bursts through the DSSS chain.
- * FGB decoding comes in a later phase.
+ * vs SGB (wide DSSS), and decodes both — SGB bursts through the DSSS
+ * chain, FGB bursts through an IQ-domain biphase-L demodulator.
  *
  * Usage: dec406_scan <freq_start> <freq_end> [ppm] [gain_dB]
  *   e.g. dec406_scan 406.0M 406.1M
@@ -29,6 +29,7 @@
 #include <linux/usbdevice_fs.h>
 #include "dsss_demod.h"
 #include "dec406.h"
+#include "audio_capture.h"
 
 #define SAMP_RATE        2457600u
 #define RING_BITS        23
@@ -50,6 +51,8 @@
 #define MAX_BURST_SAMP   ((uint64_t)(1.40 * SAMP_RATE))
 #define BW_SPLIT_HZ      50000.0                  /* FGB/SGB classification */
 #define HEARTBEAT_S      15
+#define FGB_DECIM        128                      /* IQ decimation, FGB path */
+#define FGB_RATE         (SAMP_RATE / FGB_DECIM)  /* 19200 Hz audio rate */
 
 static volatile sig_atomic_t running = 1;
 static void on_sigint(int s) { (void)s; running = 0; }
@@ -205,6 +208,66 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
     fflush(stdout);
 }
 
+/* Extract an FGB burst, mix it to baseband, decimate and FM-demodulate it
+ * to an audio-rate stream, then run F4EHY's biphase-L decoder on that
+ * buffer. Pure IQ in — no WAV, no sox, no rtl_fm. */
+static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
+    uint64_t head = (uint64_t)(0.05 * SAMP_RATE);
+    uint64_t tail = (uint64_t)(0.10 * SAMP_RATE);
+    if (head > start) head = start;
+    uint64_t ext_start = start - head;
+    uint64_t ext_len   = head + len + tail;
+
+    pthread_mutex_lock(&lock);
+    uint64_t wr = g_wr;
+    pthread_mutex_unlock(&lock);
+    if (ext_start + RING_SAMPLES <= wr) {
+        fprintf(stderr, "WARNING: FGB window overwritten before decode\n");
+        return;
+    }
+    if (ext_start + ext_len > wr) ext_len = wr - ext_start;
+
+    uint64_t ndec = ext_len / FGB_DECIM;
+    if (ndec < 64) return;
+
+    float complex *dec = malloc((size_t)ndec * sizeof(float complex));
+    int           *aud = malloc((size_t)ndec * sizeof(int));
+    if (!dec || !aud) { free(dec); free(aud); return; }
+
+    /* down-convert to baseband and boxcar-decimate the IQ */
+    double w = 2.0 * M_PI * offset_hz / (double)SAMP_RATE;
+    for (uint64_t b = 0; b < ndec; b++) {
+        double ar = 0.0, ai = 0.0;
+        for (int j = 0; j < FGB_DECIM; j++) {
+            uint64_t k   = b * FGB_DECIM + (uint64_t)j;
+            size_t   off = (size_t)((ext_start + k) & RING_MASK) * 2;
+            double si = ((double)ring[off]     - 127.5) / 127.5;
+            double sq = ((double)ring[off + 1] - 127.5) / 127.5;
+            double ph = w * (double)k;
+            double c  = cos(ph), s = sin(ph);
+            ar += si * c + sq * s;
+            ai += sq * c - si * s;
+        }
+        dec[b] = (float)(ar / FGB_DECIM) + (float)(ai / FGB_DECIM) * I;
+    }
+
+    /* FM-demodulate: instantaneous frequency = arg(x[n] * conj(x[n-1])) */
+    aud[0] = 0;
+    for (uint64_t b = 1; b < ndec; b++) {
+        float complex d = dec[b] * conjf(dec[b - 1]);
+        double f = atan2((double)cimagf(d), (double)crealf(d));
+        aud[b] = (int)(f * 8000.0);
+    }
+
+    int r = capture_trame_buffer(aud, (int)ndec, FGB_RATE);
+    free(dec);
+    free(aud);
+    if (r <= 0) {
+        printf("  FGB burst — no frame decoded\n");
+        fflush(stdout);
+    }
+}
+
 /* FFT the burst window, measure centre frequency + bandwidth, classify */
 static void analyze_burst(uint64_t start, uint64_t len,
                           double burst_pwr, double noise_pwr) {
@@ -282,6 +345,8 @@ static void analyze_burst(uint64_t start, uint64_t len,
 
     if (bw > BW_SPLIT_HZ)
         decode_sgb(start, len, centroid);
+    else
+        decode_fgb(start, len, centroid);
 }
 
 static void *capture_thread(void *arg) {
