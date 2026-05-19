@@ -101,7 +101,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
      *    loop's own carrier NCO handles the wipe-off (Zhang et al. Fig. 59.1).
      *    No separate NCO correction stage here (was redundant).
      * --------------------------------------------------------------- */
-    #define COARSE_FFT_MIN_CONF  5.0f
+    #define COARSE_FFT_MIN_CONF  2000.0f  /* below this the 4th-power FFT is
+                                             unreliable — use FFT-corr */
     #define COARSE_FFT_MIN_HZ     1.0f
     #define COARSE_FFT_MAX_HZ     25000.0f   /* Pluto 40 ppm + RTL-SDR 1 ppm ≈ 16.5 kHz */
     float coarse_freq_hz = 0.0f;
@@ -137,7 +138,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
         if (!acq_ok) {
             int phi = isps / 2;
             size_t n_chips_test = N / (size_t)isps;
-            if (n_chips_test > 5000) n_chips_test = 5000;
+            if (n_chips_test > 12000) n_chips_test = 12000;
             float complex *chip_test = (float complex *)calloc(n_chips_test, sizeof(float complex));
             if (chip_test) {
                 for (size_t k = 0; k < n_chips_test; k++) {
@@ -145,12 +146,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
                     chip_test[k] = (idx < N) ? post_rrc[idx] : 0.0f;
                 }
                 freq_acq_result_t acq2;
-                if (freq_acq_sweep(chip_test, (int)n_chips_test, chip_rate,
-                                   -300.0f, 300.0f, &acq2) == 0
-                    && acq2.confidence > 3.0f) {
+                if (freq_acq_fft_corr(chip_test, (int)n_chips_test, chip_rate,
+                                      -8000.0f, 8000.0f, &acq2) == 0
+                    && acq2.confidence > 4.0f) {
                     coarse_freq_hz = acq2.freq_hz;
-                    fprintf(stderr, "[freq_acq] sweep: %.0f Hz conf=%.1f\n",
-                            (double)acq2.freq_hz, (double)acq2.confidence);
                 }
                 free(chip_test);
             }

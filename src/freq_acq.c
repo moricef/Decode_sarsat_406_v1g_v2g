@@ -479,3 +479,147 @@ int freq_acq_from_alignment(const float complex *chips, int n_chips,
 
     return 0;
 }
+
+/* ================================================================== */
+/*  FFT-correlation acquisition — robust for weak DSSS bursts.        */
+/*                                                                    */
+/*  Correlates the chip-rate input against the preamble PRN through    */
+/*  the FFT: one FFT pair yields the correlation at EVERY chip-lag, so */
+/*  the chip alignment is found for free and only carrier frequency is */
+/*  swept. The PRN processing gain lifts a weak SGB clear of the noise */
+/*  where the 4th-power FFT collapses.                                 */
+/* ================================================================== */
+
+#define FFTC_N          16384  /* FFT size */
+#define FFTC_PRN_LEN    4096   /* preamble chips generated */
+#define FFTC_COARSE_L   1024   /* chips correlated in the coarse FFT stage */
+#define FFTC_STEP_HZ    12.0f  /* coarse freq step (1024-chip null ~37 Hz) */
+#define FFTC_FINE_HZ    1.0f   /* fine freq step */
+#define FFTC_FINE_RANGE 18.0f  /* fine search half-range around the coarse peak */
+
+int freq_acq_fft_corr(const float complex *chips, int n_chips,
+                      float chip_rate,
+                      float freq_min, float freq_max,
+                      freq_acq_result_t *result)
+{
+    if (!chips || !result || chip_rate <= 0.0f)
+        return -1;
+    memset(result, 0, sizeof(*result));
+
+    int nf = FFTC_N;
+    if (n_chips < FFTC_PRN_LEN + 64)
+        return -1;
+    if (n_chips + FFTC_COARSE_L > nf)        /* keep the correlation linear */
+        n_chips = nf - FFTC_COARSE_L;
+
+    int8_t        *prn_i = (int8_t *)malloc(FFTC_PRN_LEN);
+    int8_t        *prn_q = (int8_t *)malloc(FFTC_PRN_LEN);
+    float         *ei    = (float *)malloc((size_t)FFTC_PRN_LEN * sizeof(float));
+    float         *eq    = (float *)malloc((size_t)FFTC_PRN_LEN * sizeof(float));
+    float complex *pf_i  = (float complex *)calloc((size_t)nf, sizeof(float complex));
+    float complex *pf_q  = (float complex *)calloc((size_t)nf, sizeof(float complex));
+    float complex *rot   = (float complex *)malloc((size_t)nf * sizeof(float complex));
+    float complex *spec  = (float complex *)malloc((size_t)nf * sizeof(float complex));
+    float complex *work  = (float complex *)malloc((size_t)nf * sizeof(float complex));
+    if (!prn_i || !prn_q || !ei || !eq || !pf_i || !pf_q || !rot || !spec || !work) {
+        free(prn_i); free(prn_q); free(ei); free(eq);
+        free(pf_i); free(pf_q); free(rot); free(spec); free(work);
+        return -1;
+    }
+
+    /* Reference: preamble PRN → expected I/Q chip values (±1). */
+    despread_gen_prn(DESPREAD_PRN_SEED_I, FFTC_PRN_LEN, prn_i);
+    despread_gen_prn(DESPREAD_PRN_SEED_Q, FFTC_PRN_LEN, prn_q);
+    for (int k = 0; k < FFTC_PRN_LEN; k++) {
+        ei[k] = 1.0f - 2.0f * (float)prn_i[k];
+        eq[k] = 1.0f - 2.0f * (float)prn_q[k];
+    }
+    /* Coarse matched filters: PF = conj(FFT(first FFTC_COARSE_L chips)). */
+    for (int k = 0; k < FFTC_COARSE_L; k++) {
+        pf_i[k] = ei[k];
+        pf_q[k] = eq[k];
+    }
+    fft_radix2(pf_i, nf);
+    fft_radix2(pf_q, nf);
+    for (int i = 0; i < nf; i++) {
+        pf_i[i] = conjf(pf_i[i]);
+        pf_q[i] = conjf(pf_q[i]);
+    }
+
+    /* ---- Stage 1: coarse 2D (frequency × chip-lag) search ---- */
+    int    last_lag = n_chips - FFTC_COARSE_L;
+    int    n_f = (int)((freq_max - freq_min) / FFTC_STEP_HZ) + 1;
+    float  peak_pwr = 0.0f, best_f = 0.0f;
+    int    best_lag = 0, best_phase = 0;
+    double sum_step = 0.0;
+    int    n_step = 0;
+
+    for (int s = 0; s < n_f; s++) {
+        float f = freq_min + (float)s * FFTC_STEP_HZ;
+
+        nco_rotate(chips, n_chips, f, chip_rate, rot);
+        for (int i = n_chips; i < nf; i++) rot[i] = 0.0f;
+        memcpy(spec, rot, (size_t)nf * sizeof(float complex));
+        fft_radix2(spec, nf);
+
+        for (int pq = 0; pq < 2; pq++) {
+            const float complex *pf = (pq == 0) ? pf_i : pf_q;
+            /* corr = IFFT(spec · PF):  IFFT(X) ∝ conj(FFT(conj(X))) */
+            for (int i = 0; i < nf; i++)
+                work[i] = conjf(spec[i] * pf[i]);
+            fft_radix2(work, nf);
+            float step_max = 0.0f;
+            int   step_lag = 0;
+            for (int lag = 0; lag <= last_lag; lag++) {
+                float re = __real__ work[lag], im = __imag__ work[lag];
+                float m = re * re + im * im;
+                if (m > step_max) { step_max = m; step_lag = lag; }
+            }
+            sum_step += (double)step_max;
+            n_step++;
+            if (step_max > peak_pwr) {
+                peak_pwr   = step_max;
+                best_f     = f;
+                best_lag   = step_lag;
+                best_phase = pq;
+            }
+        }
+    }
+
+    float mean = (n_step > 0) ? (float)(sum_step / (double)n_step) : 1e-10f;
+    float conf = (mean > 0.0f) ? peak_pwr / mean : 0.0f;
+
+    /* ---- Stage 2: fine frequency at the located chip-lag ----
+     * The coarse grid quantises to ~6 Hz; the despread needs ~1 Hz, so
+     * refine with a direct correlation of the full preamble segment. */
+    float f_fine = best_f;
+    if (best_lag + FFTC_PRN_LEN <= n_chips) {
+        const float *e = (best_phase == 0) ? ei : eq;
+        float fbest_m = 0.0f;
+        for (float f = best_f - FFTC_FINE_RANGE;
+             f <= best_f + FFTC_FINE_RANGE; f += FFTC_FINE_HZ) {
+            nco_rotate(chips + best_lag, FFTC_PRN_LEN, f, chip_rate, rot);
+            float cr = 0.0f, ci = 0.0f;
+            for (int k = 0; k < FFTC_PRN_LEN; k++) {
+                cr += __real__ rot[k] * e[k];
+                ci += __imag__ rot[k] * e[k];
+            }
+            float m = cr * cr + ci * ci;
+            if (m > fbest_m) { fbest_m = m; f_fine = f; }
+        }
+    }
+
+    free(prn_i); free(prn_q); free(ei); free(eq);
+    free(pf_i); free(pf_q); free(rot); free(spec); free(work);
+
+    result->freq_hz      = f_fine;
+    result->confidence   = conf;
+    result->costas_phase = best_phase;
+
+    fprintf(stderr,
+            "[freq_acq] fft-corr: offset %.0f Hz  conf %.1f  "
+            "lag %d  phase %d\n",
+            (double)f_fine, (double)conf, best_lag, best_phase);
+
+    return 0;
+}

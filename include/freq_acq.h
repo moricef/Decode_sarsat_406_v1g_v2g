@@ -77,4 +77,26 @@ int freq_acq_from_alignment(const float complex *chips, int n_chips,
                             float chip_rate,
                             freq_acq_result_t *result);
 
+/**
+ * @brief FFT-correlation acquisition for weak DSSS bursts.
+ *
+ * Correlates the chip-rate input against the preamble PRN through the FFT:
+ * one FFT pair yields the correlation at EVERY chip-lag, so chip alignment
+ * is found for free and only carrier frequency is swept. The PRN
+ * processing gain lifts a weak SGB clear of the noise where the 4th-power
+ * FFT collapses.
+ *
+ * @param chips       Chip-rate complex samples.
+ * @param n_chips     Available chip count.
+ * @param chip_rate   Chip rate in Hz.
+ * @param freq_min    Carrier-offset search range, low bound (Hz).
+ * @param freq_max    Carrier-offset search range, high bound (Hz).
+ * @param result      Output: freq offset, confidence, phase.
+ * @return 0 on success, -1 on error.
+ */
+int freq_acq_fft_corr(const float complex *chips, int n_chips,
+                      float chip_rate,
+                      float freq_min, float freq_max,
+                      freq_acq_result_t *result);
+
 #endif /* FREQ_ACQ_H */
