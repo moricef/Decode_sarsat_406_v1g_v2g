@@ -1,15 +1,6 @@
 /**
  * @file dsss_demod.c
  * @brief Pure-C DSSS OQPSK receive chain.
- *
- * Orchestrates (per Zhang et al. ICEE 2025, Fig. 59.1):
- *   1. freq_acq_coarse_fft() — 4th-power FFT at sample rate.
- *   2. Q-channel advance by SPS/2 (undo OQPSK Tc/2 delay).
- *   3. DC blocker (IIR, alpha=0.001).
- *   4. Tracking loop (FLL+PLL+DLL+Kalman) — coarse freq feeds carrier NCO.
- *   5. Despreader (T.018 PRN seeds, 2-pass I/Q sync, per-bit majority).
- *
- * On success, writes 250 bits to output_bits[] suitable for decode_2g().
  */
 
 #include "dsss_demod.h"
