@@ -172,7 +172,6 @@ int capture_trame(FILE *fp) {
         
         echantillon = lit_ech(fp);
         if (echantillon == 1000000) {
-            fprintf(stderr, "Fin de lecture wav\n");
             return 0;
         }
         
