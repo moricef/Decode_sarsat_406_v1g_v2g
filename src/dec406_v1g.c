@@ -1109,7 +1109,12 @@ void decode_1g(const uint8_t *bits, int length) {
 
     BeaconInfo1G info;
     decode_1g_frame(frame_str, length, &info);
-    
+
+    if (info.crc_error) {
+        printf("\n=== FRAME REJECTED — CRC uncorrectable, decode aborted ===\n");
+        return;
+    }
+
     char coord_buf[100] = "Position not available";
     if (info.has_position && (info.lat != 0.0 || info.lon != 0.0)) {
         if (validate_coordinates(info.lat, info.lon)) {
@@ -1120,11 +1125,7 @@ void decode_1g(const uint8_t *bits, int length) {
         }
     }
     
-    if (info.crc_error) {
-        printf("\nCRC ERROR - Data may be corrupted\n");
-    }
-    
-    printf("\n=== 406 MHz BEACON DECODE (1G %s) ===", 
+    printf("\n=== 406 MHz BEACON DECODE (1G %s) ===",
            (length == LONG_FRAME_BITS) ? "LONG" : "SHORT");
     
      const char* protocol_name;
