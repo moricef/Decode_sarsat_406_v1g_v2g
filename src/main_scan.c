@@ -48,7 +48,7 @@
 #define MAX_CLUSTER 600  /* max plausible beacon width (~180 kHz) */
 #define CENTER_TOL 40    /* bins: cluster-centre stability window */
 #define ON_FRAMES 4      /* frames a cluster persists -> burst start */
-#define OFF_FRAMES 16    /* frames a cluster absent  -> burst end */
+#define OFF_FRAMES 48    /* frames a cluster absent  -> burst end (160 ms of tolerance to intra-burst dropouts at marginal SNR) */
 #define WARMUP_FRAMES 64 /* frames to settle the per-bin noise floor */
 #define BURST_AVG 24     /* spectra averaged to measure a finished burst */
 #define MIN_BURST_SAMP ((uint64_t)(0.20 * SAMP_RATE))
@@ -75,6 +75,11 @@ static double g_center_hz = 0.0;
 static double g_f1 = 0.0, g_f2 = 0.0; /* requested band edges (Hz) */
 static double hann[FFT_N];
 static double floor_bin[FFT_N]; /* per-bin noise floor */
+
+static int cmp_double_asc(const void *a, const void *b) {
+  double da = *(const double *)a, db = *(const double *)b;
+  return (da > db) - (da < db);
+}
 
 /* parse "406M", "406.1M", "431.5M" or a plain Hz value */
 static double parse_freq(const char *s) {
@@ -449,9 +454,20 @@ static void *process_thread(void *arg) {
     }
     rd += FFT_N;
     frame++;
-    if (frame == 1)
+    if (frame == 1) {
+      /* Outlier-aware floor init. A bin much hotter than the frame
+       * median is likely inside a burst (or a stable spur); initializing
+       * it to its own P[k] would permanently mask future bursts there
+       * (P > floor*DET_FACTOR can never fire). For outliers we fall back
+       * to the median; normal bins keep their own power. */
+      static double tmp[FFT_N];
       for (int k = 0; k < FFT_N; k++)
-        floor_bin[k] = P[k];
+        tmp[k] = P[k];
+      qsort(tmp, FFT_N, sizeof(double), cmp_double_asc);
+      double med = tmp[FFT_N / 2];
+      for (int k = 0; k < FFT_N; k++)
+        floor_bin[k] = (P[k] < med * DET_FACTOR) ? P[k] : med;
+    }
 
     /* Hot-bin test. The FGB is a narrowband carrier (high power density):
      * the raw per-bin threshold catches it. The SGB is DSSS — its power is
