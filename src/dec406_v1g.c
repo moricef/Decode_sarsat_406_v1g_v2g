@@ -1110,6 +1110,31 @@ void decode_1g(const uint8_t *bits, int length) {
     BeaconInfo1G info;
     decode_1g_frame(frame_str, length, &info);
 
+    /* Diagnostic dump (FGB_DIAG): one row per frame produced by the
+     * slicer. Comparison target: differentiate CRC-OK from CRC-FAIL
+     * (1-2 bit slicing errors? systematic offset? wrong polynomial?).
+     * Enable with: FGB_DIAG=1 ./build/dec406_scan ...
+     * Output: /tmp/fgb_bits.csv */
+    if (getenv("FGB_DIAG")) {
+        static FILE *diag_csv = NULL;
+        static int diag_id = 0;
+        if (!diag_csv) {
+            diag_csv = fopen("/tmp/fgb_bits.csv", "w");
+            if (diag_csv)
+                fprintf(diag_csv, "frame,length,crc_error,bits\n");
+        }
+        diag_id++;
+        if (diag_csv) {
+            fprintf(diag_csv, "%d,%d,%u,", diag_id, length,
+                    (unsigned)info.crc_error);
+            for (int b = 0; b < length; b++) fputc(frame_str[b], diag_csv);
+            fputc('\n', diag_csv);
+            fflush(diag_csv);
+            fprintf(stderr, "[diag] fgb frame=%d crc_error=%u\n",
+                    diag_id, (unsigned)info.crc_error);
+        }
+    }
+
     if (info.crc_error) {
         printf("\n=== FRAME REJECTED — CRC uncorrectable, decode aborted ===\n");
         return;

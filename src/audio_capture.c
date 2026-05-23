@@ -158,7 +158,9 @@ int capture_trame(FILE *fp) {
     k = 0;
     l = 0;
     t1 = clock();
-    
+    double diag_max_y1 = 0.0;   /* peak correlator value over the buffer */
+    int    diag_depart_count = 0; /* how many times we crossed seuil1 */
+
     while (numBit < longueur_trame) {
         
         if (opt_minute == 1) {
@@ -195,6 +197,8 @@ int capture_trame(FILE *fp) {
             max = Y1;
             seuil1 = max / coeff;
         }
+        if (Y1 > diag_max_y1) diag_max_y1 = Y1;
+        if (synchro == 0 && depart == 0 && Y1 > seuil1) diag_depart_count++;
         if (Y1 < min) {
             min = Y1;
             seuil0 = min / coeff;
@@ -268,19 +272,27 @@ int capture_trame(FILE *fp) {
     }
     
     if (numBit >= longueur_trame) {
-        printf("%s frame captured (%d bits)\n", 
+        printf("%s frame captured (%d bits)\n",
                longueur_trame == 112 ? "Short" : "Long", longueur_trame);
-        
+
         uint8_t bits_array[256];
         for (int i = 0; i < longueur_trame; i++) {
             bits_array[i] = (s[i] == '1') ? 1 : 0;
         }
-        
+
         decode_1g(bits_array, longueur_trame);
-        
+
         return longueur_trame;
     }
-    
+
+    /* Diagnostic (FGB_DIAG): why this burst produced no frame. */
+    if (getenv("FGB_DIAG")) {
+        fprintf(stderr,
+                "[diag] fgb no-frame: samples=%d depart=%d synchro=%d "
+                "numBit=%d max_y1=%.0f seuil1=%.0f crossings=%d\n",
+                l, depart, synchro, numBit,
+                diag_max_y1, seuil1, diag_depart_count);
+    }
     return 0;
 }
 

@@ -701,12 +701,23 @@ void decode_2g(const uint8_t *rx_bits) {
     uint8_t corrected[BCH_K];  // Corrected information bits
     BeaconInfo info;
     memset(&info, 0, sizeof(info));
-    
+
+    /* Diagnostic (DSSS_DIAG): emit a marker matching the despread_bits.c
+     * burst counter so the post-hoc analyzer can match a BCH outcome
+     * to the bit-PLL trajectory of the same burst. */
+    static int diag_bch_id = 0;
+    int diag_on = (getenv("DSSS_DIAG") != NULL);
+    if (diag_on) diag_bch_id++;
+
     // 1. Apply BCH error correction
     if (bch_decode_250_202(rx_bits, corrected) != 0) {
+        if (diag_on)
+            fprintf(stderr, "[diag] bch burst=%d status=FAIL\n", diag_bch_id);
         printf("\n=== FRAME REJECTED — BCH uncorrectable, decode aborted ===\n");
         return;
     }
+    if (diag_on)
+        fprintf(stderr, "[diag] bch burst=%d status=OK\n", diag_bch_id);
 
     // 2. Decode main field (154 bits)
     decode_main(corrected, &info);

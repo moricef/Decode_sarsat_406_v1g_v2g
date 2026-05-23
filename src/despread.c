@@ -248,6 +248,26 @@ int despread_bits(const float complex *samples, int num_chips,
     const float alpha = 0.04f;
     const float beta  = 0.01f;
 
+    /* Diagnostic dump (DSSS_DIAG): one CSV row per bit per burst.
+     * Goal: compare phase_rad / freq_per_bit / re·im trajectories of
+     * BCH-OK vs BCH-FAIL bursts of equivalent SNR. Enable with:
+     *   DSSS_DIAG=1 ./build/dec406_scan ...
+     * Output: /tmp/despread_bits.csv */
+    static FILE *diag_csv = NULL;
+    static int   diag_burst_id = 0;
+    int diag_on = (getenv("DSSS_DIAG") != NULL);
+    if (diag_on) {
+        if (!diag_csv) {
+            diag_csv = fopen("/tmp/despread_bits.csv", "w");
+            if (diag_csv)
+                fprintf(diag_csv,
+                        "burst,bit,phase_rad,freq_per_bit,"
+                        "ri_re,ri_im,rq_re,rq_im,d_i,d_q,e\n");
+        }
+        diag_burst_id++;
+        fprintf(stderr, "[diag] despread burst=%d\n", diag_burst_id);
+    }
+
     int out_idx = 0;
     for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
         int cs_i = off_i + k * DESPREAD_CHIPS_PER_BIT;
@@ -288,15 +308,26 @@ int despread_bits(const float complex *samples, int num_chips,
          * 2nd-order: alpha on phase, beta on freq_per_bit (integral). */
         float perr = ri_re * ri_im - rq_re * rq_im;
         float pow = ri_re*ri_re + ri_im*ri_im + rq_re*rq_re + rq_im*rq_im;
+        float e_val = 0.0f;
         if (pow > 1e-10f) {
-            float e = perr / pow;
-            if (fabsf(e) > 0.01f) {       /* dead zone — suppress noise */
-                phase_rad    += alpha * e;
-                freq_per_bit += beta  * e;
+            e_val = perr / pow;
+            if (fabsf(e_val) > 0.01f) {   /* dead zone — suppress noise */
+                phase_rad    += alpha * e_val;
+                freq_per_bit += beta  * e_val;
             }
+        }
+        if (diag_on && diag_csv) {
+            fprintf(diag_csv,
+                    "%d,%d,%.6f,%.6f,%.4e,%.4e,%.4e,%.4e,%u,%u,%.6f\n",
+                    diag_burst_id, k,
+                    (double)phase_rad, (double)freq_per_bit,
+                    (double)ri_re, (double)ri_im,
+                    (double)rq_re, (double)rq_im,
+                    (unsigned)d_i, (unsigned)d_q, (double)e_val);
         }
         phase_rad += freq_per_bit;        /* apply learned drift each bit */
     }
+    if (diag_on && diag_csv) fflush(diag_csv);
 
     free(prn_i); free(prn_q);
     return (out_idx == DESPREAD_OUTPUT_BITS) ? 0 : -1;
