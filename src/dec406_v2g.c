@@ -141,7 +141,7 @@ static int chien_search(const uint8_t lam[13], int L, int pos[6])
  * @return 0 if the codeword is clean or fully corrected, -1 if errors
  *         remain uncorrectable (out still holds the uncorrected copy).
  */
-static int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
+int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
 {
     gf_init();
 

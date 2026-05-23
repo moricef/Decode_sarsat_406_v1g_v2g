@@ -26,6 +26,10 @@
 #include "despread.h"
 #include "freq_acq.h"
 
+/* Provided by dec406_v2g.c — BCH(250,202) decoder used here as a
+ * Costas-phase oracle (try the 4 candidates, keep the one that decodes). */
+extern int bch_decode_250_202(const uint8_t *msg, uint8_t *out);
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,8 +180,51 @@ int dsss_receive_burst(const float complex *ota_buffer,
     free(work);
     work = NULL;
 
-    /* 6. Despread: sync (4-phase Costas via magnitude) + bits with bit-PLL. */
-    rc = despread_burst(chips, (int)n_chips, output_bits, z_score);
+    /* 6. Despread: sync (4-phase Costas via magnitude) + bits with bit-PLL.
+     *
+     *    Multi-rotation BCH-oracle. despread_sync's 4-phase resolution
+     *    sometimes picks the wrong Costas phase by 90° at marginal SNR
+     *    (re_sum magnitudes for the 4 phases are close enough that
+     *    noise tips the choice). The bit-PLL then needs ~25 bits to
+     *    converge to the true axis, corrupting the early message bits
+     *    beyond BCH(250,202) correction capability.
+     *
+     *    Try all 4 phases through despread_bits + BCH, keep the first
+     *    that BCH-validates. Cost: 4× despread_bits (~50 ms total). */
+    {
+        despread_sync_t sync;
+        if (despread_sync(chips, (int)n_chips, &sync) != 0) {
+            rc = -1;
+            goto cleanup;
+        }
+        if (z_score) *z_score = sync.z_comb;
+
+        int original_phase = sync.phase;
+        uint8_t bch_tmp[202];
+        int bch_ok_phase = -1;
+        for (int p = 0; p < 4; p++) {
+            sync.phase = p;
+            if (despread_bits(chips, (int)n_chips, &sync, output_bits) != 0)
+                continue;
+            if (bch_decode_250_202(output_bits, bch_tmp) == 0) {
+                bch_ok_phase = p;
+                break;
+            }
+        }
+        if (bch_ok_phase >= 0) {
+            fprintf(stderr,
+                    "[dsss_demod] BCH validated on Costas phase %d° "
+                    "(sync chose %d°)\n",
+                    bch_ok_phase * 90, original_phase * 90);
+            rc = 0;
+        } else {
+            /* None of 4 phases pass BCH. Emit bits from the original
+             * sync.phase so downstream BCH gate produces a clean
+             * 'FRAME REJECTED' on a deterministic candidate. */
+            sync.phase = original_phase;
+            rc = despread_bits(chips, (int)n_chips, &sync, output_bits);
+        }
+    }
 
 cleanup:
     free(work);
