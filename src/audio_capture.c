@@ -214,7 +214,7 @@ int capture_trame(FILE *fp) {
                 cpte++;
                 if (Y1 < seuil0) {
                     Nb15 = cpte / Nb;
-                    if ((Nb15 < 16) && (Nb15 > 11)) {
+                    if ((Nb15 >= 12) && (Nb15 <= 18)) {
                         synchro = 1;
                         cpte = 0;
                         for (i = 0; i < 15; i++) {
