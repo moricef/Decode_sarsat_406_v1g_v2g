@@ -176,7 +176,7 @@ static void fft(float complex *x, int n) {
  * The capture runs at 2.4576 Msps — the DSSS chain's native rate
  * (64 samples/chip) — so the window feeds it directly. */
 static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
-  uint64_t head = (uint64_t)(0.05 * SAMP_RATE); /* slack before onset */
+  uint64_t head = (uint64_t)(0.20 * SAMP_RATE); /* slack before onset */
   uint64_t tail = (uint64_t)(0.20 * SAMP_RATE); /* slack after burst */
   if (head > start)
     head = start;
