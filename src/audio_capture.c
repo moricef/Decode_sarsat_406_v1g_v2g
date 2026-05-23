@@ -174,7 +174,7 @@ int capture_trame(FILE *fp) {
         
         echantillon = lit_ech(fp);
         if (echantillon == 1000000) {
-            return 0;
+            break;
         }
         
         l++;
@@ -224,6 +224,10 @@ int capture_trame(FILE *fp) {
                         }
                         printf("Sync found: %d ones\n", Nb15);
                     } else {
+                        if (getenv("FGB_DIAG"))
+                            fprintf(stderr,
+                                    "[diag] fgb false-sync: Nb15=%d cpte=%d Nb=%d\n",
+                                    Nb15, cpte, Nb);
                         cpte = 0;
                         depart = 0;
                         synchro = 0;
