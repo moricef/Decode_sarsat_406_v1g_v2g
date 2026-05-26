@@ -10,7 +10,7 @@
 #define SYMBOL_RATE_HZ   400
 #define CW_DURATION_MS   160
 #define FSYNC_LEN        9
-#define FSYNC_THRESHOLD  7
+#define FSYNC_THRESHOLD  6
 #define PREAMBLE_BITS    15
 
 extern int test_crc1(const char *s);
@@ -99,7 +99,7 @@ static long find_cw_end_cmplx(const float complex *iq, long len,
     /* Expected |S1-S2| for data: 2 × amplitude × half × sin(1.1) ≈ 1.78 × amp × half */
     float expected = 2.0f * cw_mag * (float)half * sinf(1.1f);
     float thresh = expected * 0.3f;
-    if (thresh < 0.3f) thresh = 0.3f;
+    if (thresh < 0.1f) thresh = 0.1f;
 
     int sustain = 3;
     int count = 0;
@@ -300,7 +300,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
                   long burst_start, uint8_t out_bits[FGB_LONG_BITS]) {
     int diag = (getenv("FGB_IQ_DIAG") != NULL);
     static int burst_id = 0;
-    if (diag) burst_id++;
+    burst_id++;
 
     if (!iq || !out_bits || burst_start < 0) return -1;
 
