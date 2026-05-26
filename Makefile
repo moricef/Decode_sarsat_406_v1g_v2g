@@ -101,7 +101,7 @@ $(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $
 # ============================================================================
 
 # dec406_scan - Real-time band scanner (rtl_sdr -> detect/classify -> decode)
-$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(DSSS_SRCS)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(DSSS_SRCS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread
 	@echo "Built: $@"

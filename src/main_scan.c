@@ -17,6 +17,7 @@
 #include "audio_capture.h"
 #include "dec406.h"
 #include "dsss_demod.h"
+#include "fgb_iq_demod.h"
 #include <complex.h>
 #include <fcntl.h>
 #include <linux/usbdevice_fs.h>
@@ -225,9 +226,8 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
   fflush(stdout);
 }
 
-/* Extract an FGB burst, mix it to baseband, decimate and FM-demodulate it
- * to an audio-rate stream, then run F4EHY's biphase-L decoder on that
- * buffer. Pure IQ in — no WAV, no sox, no rtl_fm. */
+/* Extract an FGB burst, mix it to baseband at the FULL sample rate, and
+ * run the IQ-direct demodulator/decoder. No FM-demod, no audio detour. */
 static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
   uint64_t head = (uint64_t)(0.05 * SAMP_RATE);
   uint64_t tail = (uint64_t)(0.10 * SAMP_RATE);
@@ -246,48 +246,34 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
   if (ext_start + ext_len > wr)
     ext_len = wr - ext_start;
 
-  uint64_t ndec = ext_len / FGB_DECIM;
-  if (ndec < 64)
-    return;
-
-  float complex *dec = malloc((size_t)ndec * sizeof(float complex));
-  int *aud = malloc((size_t)ndec * sizeof(int));
-  if (!dec || !aud) {
-    free(dec);
-    free(aud);
+  float complex *win = malloc((size_t)ext_len * sizeof(float complex));
+  if (!win) {
+    fprintf(stderr, "WARNING: FGB window alloc failed\n");
     return;
   }
 
-  /* down-convert to baseband and boxcar-decimate the IQ */
+  /* Down-convert to baseband at FULL rate (no decimation). */
   double w = 2.0 * M_PI * offset_hz / (double)SAMP_RATE;
-  for (uint64_t b = 0; b < ndec; b++) {
-    double ar = 0.0, ai = 0.0;
-    for (int j = 0; j < FGB_DECIM; j++) {
-      uint64_t k = b * FGB_DECIM + (uint64_t)j;
-      size_t off = (size_t)((ext_start + k) & RING_MASK) * 2;
-      double si = ((double)ring[off] - 127.5) / 127.5;
-      double sq = ((double)ring[off + 1] - 127.5) / 127.5;
-      double ph = w * (double)k;
-      double c = cos(ph), s = sin(ph);
-      ar += si * c + sq * s;
-      ai += sq * c - si * s;
-    }
-    dec[b] = (float)(ar / FGB_DECIM) + (float)(ai / FGB_DECIM) * I;
+  for (uint64_t i = 0; i < ext_len; i++) {
+    size_t off = (size_t)((ext_start + i) & RING_MASK) * 2;
+    double si = ((double)ring[off] - 127.5) / 127.5;
+    double sq = ((double)ring[off + 1] - 127.5) / 127.5;
+    double ph = w * (double)i;
+    double c = cos(ph), s = sin(ph);
+    win[i] = (float)(si * c + sq * s) + (float)(sq * c - si * s) * I;
   }
 
-  /* FM-demodulate: instantaneous frequency = arg(x[n] * conj(x[n-1])) */
-  aud[0] = 0;
-  for (uint64_t b = 1; b < ndec; b++) {
-    float complex d = dec[b] * conjf(dec[b - 1]);
-    double f = atan2((double)cimagf(d), (double)crealf(d));
-    aud[b] = (int)(f * 8000.0);
-  }
+  uint8_t bits[FGB_LONG_BITS];
+  int rc = fgb_iq_decode(win, (size_t)ext_len, SAMP_RATE, (long)head, bits);
+  free(win);
 
-  int r = capture_trame_buffer(aud, (int)ndec, FGB_RATE);
-  free(dec);
-  free(aud);
-  if (r <= 0) {
-    printf("  FGB burst — no frame decoded\n");
+  if (rc == 0) {
+    decode_1g(bits, FGB_LONG_BITS);
+  } else if (rc == -2) {
+    printf("  FGB burst — CRC FAIL (bits sliced but CRC mismatched both polarities)\n");
+    fflush(stdout);
+  } else {
+    printf("  FGB burst — no frame decoded (no sync/burst)\n");
     fflush(stdout);
   }
 }

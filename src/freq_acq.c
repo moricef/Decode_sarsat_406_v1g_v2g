@@ -595,12 +595,12 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     float f_fine = best_f;
     /* Diagnostic (FREQ_DIAG): dump the full fine-stage magnitude vs f
      * curve to assess the actual frequency precision (is the peak sharp
-     * = 1 Hz precise, or broad = several Hz). Output: /tmp/freq_acq_fine.csv */
+     * = 1 Hz precise, or broad = several Hz). Output: freq_acq_fine.csv */
     static FILE *fine_csv = NULL;
     static int   fine_burst = 0;
     int fine_diag = (getenv("FREQ_DIAG") != NULL);
     if (fine_diag && !fine_csv) {
-        fine_csv = fopen("/tmp/freq_acq_fine.csv", "w");
+        fine_csv = fopen("freq_acq_fine.csv", "w");
         if (fine_csv) fprintf(fine_csv, "burst,f_hz,mag2\n");
     }
     if (fine_diag) fine_burst++;

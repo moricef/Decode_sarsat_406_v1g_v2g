@@ -252,13 +252,13 @@ int despread_bits(const float complex *samples, int num_chips,
      * Goal: compare phase_rad / freq_per_bit / re·im trajectories of
      * BCH-OK vs BCH-FAIL bursts of equivalent SNR. Enable with:
      *   DSSS_DIAG=1 ./build/dec406_scan ...
-     * Output: /tmp/despread_bits.csv */
+     * Output: despread_bits.csv */
     static FILE *diag_csv = NULL;
     static int   diag_burst_id = 0;
     int diag_on = (getenv("DSSS_DIAG") != NULL);
     if (diag_on) {
         if (!diag_csv) {
-            diag_csv = fopen("/tmp/despread_bits.csv", "w");
+            diag_csv = fopen("despread_bits.csv", "w");
             if (diag_csv)
                 fprintf(diag_csv,
                         "burst,bit,phase_rad,freq_per_bit,"
