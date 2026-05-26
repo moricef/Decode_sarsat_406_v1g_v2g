@@ -69,8 +69,7 @@ static double estimate_cw_freq(const float complex *iq, long cw_start,
     if (count == 0) return 0.0;
     double dphi_avg = sum / count;
     double freq_hz = dphi_avg / (2.0 * M_PI) * samp_rate;
-    if (diag)
-        fprintf(stderr, "[fgb_iq] CW freq est: %.1f Hz (n=%ld)\n", freq_hz, count);
+    fprintf(stderr, "[fgb_iq] CW freq est: %.1f Hz (n=%ld)\n", freq_hz, count);
     return freq_hz;
 }
 
@@ -98,10 +97,10 @@ static long find_cw_end_cmplx(const float complex *iq, long len,
     cw_mag /= (float)cw_count;
     /* Expected |S1-S2| for data: 2 × amplitude × half × sin(1.1) ≈ 1.78 × amp × half */
     float expected = 2.0f * cw_mag * (float)half * sinf(1.1f);
-    float thresh = expected * 0.3f;
-    if (thresh < 0.1f) thresh = 0.1f;
+    float thresh = expected * 0.2f;
+    if (thresh < 0.08f) thresh = 0.08f;
 
-    int sustain = 3;
+    int sustain = 4;
     int count = 0;
     long edge = -1;
     float prev_e = 0.0f;
@@ -361,8 +360,9 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
                                      cw_search_start, cw_search_end, diag);
     if (cw_end < 0) {
-        fprintf(stderr, "[fgb_iq] burst=%d CW end not found (amp=%.3f n=%zu sr=%d bs=%ld)\n",
-                burst_id, cabsf(wiq[(burst_start - w0) + cw_samp/2]), n, samp_rate, burst_start);
+        fprintf(stderr, "[fgb_iq] burst=%d CW end not found (amp=%.3f fq=%.1f n=%zu sr=%d bs=%ld)\n",
+                burst_id, cabsf(wiq[(burst_start - w0) + cw_samp/2]),
+                fq_off, n, samp_rate, burst_start);
         free(wiq); if (owned_iq) free(iq_dec);
         return -1;
     }
