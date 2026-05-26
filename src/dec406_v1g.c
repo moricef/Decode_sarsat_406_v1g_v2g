@@ -133,7 +133,7 @@ int test_crc1(const char *s) {
     }
 
     for (j = 0; j < 22; j++) ss += div[j];
-    return (ss == 0 || zero == 0) ? 0 : 1;
+    return (ss == 0) ? 0 : 1;
 }
 
 int test_crc2(const char *s) {
@@ -167,7 +167,7 @@ int test_crc2(const char *s) {
     }
 
     for (j = 0; j < 13; j++) ss += div[j];
-    return (ss == 0 || zero == 0) ? 0 : 1;
+    return (ss == 0) ? 0 : 1;
 }
 
 // ===================================================

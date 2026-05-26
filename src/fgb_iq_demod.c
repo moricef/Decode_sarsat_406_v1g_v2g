@@ -30,13 +30,8 @@ static int sync_pattern_ok(const uint8_t *bits) {
 
 static int crc_ok(const uint8_t *bits, int length) {
     char s[200];
-    int ones1 = 0, ones2 = 0;
     for (int i = 0; i < length; i++) s[i] = bits[i] ? '1' : '0';
     s[length] = '\0';
-    for (int i = 85; i < 106; i++) if (bits[i]) ones1++;
-    if (length == 144) for (int i = 132; i < 144; i++) if (bits[i]) ones2++;
-    if (ones1 == 0) return 0;
-    if (length == 144 && ones2 == 0) return 0;
     if (!sync_pattern_ok(bits)) return 0;
     if (test_crc1(s)) return 0;
     if (length == 144 && test_crc2(s)) return 0;
@@ -212,6 +207,97 @@ static void dump_bits(int id, long anchor, int state, const uint8_t *b) {
     fflush(csv);
 }
 
+/* Multi-stage filtered decimation for high-rate input.
+ * Uses simple 3-stage MA+decimate (same as decode_fgb_iq.c). */
+static int decimate_iq(float complex **iq_ptr, size_t *n_ptr, int *samp_rate,
+                        long *burst_start) {
+    int sr = *samp_rate;
+    if (sr <= 24000) return 0;
+    int target_hz = 9600;
+    int total_decim = sr / target_hz;
+    if (total_decim < 1) total_decim = 1;
+
+    int M1, M2, M3, N1, N2, N3;
+    M3 = 2; M2 = 8; M1 = total_decim / (M2 * M3);
+    if (M1 < 1) { M1 = total_decim / M2; M3 = 0; }
+    if (M1 < 1) { M1 = total_decim; M2 = M3 = 0; }
+    N1 = M1 * 2; N2 = M2 * 2; N3 = M3 * 2;
+
+    const float complex *in = *iq_ptr;
+    size_t n_in = *n_ptr;
+
+    /* Stage 1 */
+    size_t n1 = (n_in - N1) / M1 + 1;
+    float complex *s1 = malloc(n1 * sizeof(float complex));
+    if (!s1) return -1;
+    double sum_i = 0, sum_q = 0;
+    for (int j = 0; j < N1; j++) { sum_i += crealf(in[j]); sum_q += cimagf(in[j]); }
+    for (size_t k = 0; k < n1; k++) {
+        if (k > 0) {
+            size_t old = (size_t)(k - 1) * M1;
+            for (int j = 0; j < M1; j++) {
+                sum_i -= crealf(in[old + j]); sum_q -= cimagf(in[old + j]);
+                size_t ni = (size_t)k * M1 + N1 - M1 + j;
+                if (ni < n_in) { sum_i += crealf(in[ni]); sum_q += cimagf(in[ni]); }
+            }
+        }
+        float sc = 1.0f / (float)N1;
+        s1[k] = (float)(sum_i * sc) + (float)(sum_q * sc) * I;
+    }
+    sr /= M1;
+    /* Stage 2 */
+    float complex *s2 = NULL;
+    if (M2 && n1 > (size_t)N2) {
+        size_t n2 = (n1 - N2) / M2 + 1;
+        s2 = malloc(n2 * sizeof(float complex));
+        if (!s2) { free(s1); return -1; }
+        sum_i = sum_q = 0;
+        for (int j = 0; j < N2; j++) { sum_i += crealf(s1[j]); sum_q += cimagf(s1[j]); }
+        for (size_t k = 0; k < n2; k++) {
+            if (k > 0) {
+                size_t old = (size_t)(k - 1) * M2;
+                for (int j = 0; j < M2; j++) {
+                    sum_i -= crealf(s1[old + j]); sum_q -= cimagf(s1[old + j]);
+                    size_t ni = (size_t)k * M2 + N2 - M2 + j;
+                    if (ni < n1) { sum_i += crealf(s1[ni]); sum_q += cimagf(s1[ni]); }
+                }
+            }
+            float sc = 1.0f / (float)N2;
+            s2[k] = (float)(sum_i * sc) + (float)(sum_q * sc) * I;
+        }
+        free(s1); s1 = s2; n1 = n2;
+        sr /= M2;
+    }
+    /* Stage 3 */
+    if (M3 && n1 > (size_t)N3) {
+        size_t n3 = (n1 - N3) / M3 + 1;
+        s2 = malloc(n3 * sizeof(float complex));
+        if (!s2) { free(s1); return -1; }
+        sum_i = sum_q = 0;
+        for (int j = 0; j < N3; j++) { sum_i += crealf(s1[j]); sum_q += cimagf(s1[j]); }
+        for (size_t k = 0; k < n3; k++) {
+            if (k > 0) {
+                size_t old = (size_t)(k - 1) * M3;
+                for (int j = 0; j < M3; j++) {
+                    sum_i -= crealf(s1[old + j]); sum_q -= cimagf(s1[old + j]);
+                    size_t ni = (size_t)k * M3 + N3 - M3 + j;
+                    if (ni < n1) { sum_i += crealf(s1[ni]); sum_q += cimagf(s1[ni]); }
+                }
+            }
+            float sc = 1.0f / (float)N3;
+            s2[k] = (float)(sum_i * sc) + (float)(sum_q * sc) * I;
+        }
+        free(s1); s1 = s2; n1 = n3;
+        sr /= M3;
+    }
+
+    *iq_ptr = s1;
+    *n_ptr = n1;
+    *samp_rate = sr;
+    *burst_start /= total_decim;
+    return 0;
+}
+
 int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
                   long burst_start, uint8_t out_bits[FGB_LONG_BITS]) {
     int diag = (getenv("FGB_IQ_DIAG") != NULL);
@@ -219,6 +305,19 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     if (diag) burst_id++;
 
     if (!iq || !out_bits || burst_start < 0) return -1;
+
+    /* Internal decimation if sample rate > 24 kHz */
+    float complex *iq_dec = NULL;
+    int owned_iq = 0;
+    if (samp_rate > 24000) {
+        if (decimate_iq(&iq_dec, &n, &samp_rate, &burst_start) != 0)
+            return -1;
+        iq = iq_dec;
+        owned_iq = 1;
+        if (diag)
+            fprintf(stderr, "[fgb_iq] internal decim -> %d Hz (%zu samples)\n",
+                    samp_rate, n);
+    }
 
     double bit_prd  = (double)samp_rate / SYMBOL_RATE_HZ;
     int    half_bit = (int)(bit_prd / 2.0 + 0.5);
@@ -238,7 +337,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
 
     /* Create working copy (we may apply freq correction) */
     float complex *wiq = malloc((size_t)wlen * sizeof(float complex));
-    if (!wiq) return -1;
+    if (!wiq) { if (owned_iq) free(iq_dec); return -1; }
     memcpy(wiq, iq + w0, (size_t)wlen * sizeof(float complex));
 
     /* Estimate residual carrier freq from CW zone and wipe it off */
@@ -346,28 +445,32 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
                 burst_id, pream_ones, PREAMBLE_BITS, best_fs_score, FSYNC_LEN,
                 need_flip ? "(flipped)" : "");
 
+    int final_rc = -2;
     if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
         if (diag) {
             fprintf(stderr, "[fgb_iq] burst=%d CRC OK\n", burst_id);
             dump_bits(burst_id, bit0 + w0, 1, out_bits);
         }
-        return 0;
-    }
-
-    /* Try opposite polarity as fallback */
-    for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-    if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-        if (diag) {
-            fprintf(stderr, "[fgb_iq] burst=%d CRC OK (polarity fallback)\n", burst_id);
-            dump_bits(burst_id, bit0 + w0, 2, out_bits);
+        final_rc = 0;
+    } else {
+        /* Try opposite polarity as fallback */
+        for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
+        if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
+            if (diag) {
+                fprintf(stderr, "[fgb_iq] burst=%d CRC OK (polarity fallback)\n",
+                        burst_id);
+                dump_bits(burst_id, bit0 + w0, 2, out_bits);
+            }
+            final_rc = 0;
+        } else {
+            for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
+            if (diag) {
+                fprintf(stderr, "[fgb_iq] burst=%d CRC FAIL\n", burst_id);
+                dump_bits(burst_id, bit0 + w0, 0, out_bits);
+            }
         }
-        return 0;
     }
-    for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-
-    if (diag) {
-        fprintf(stderr, "[fgb_iq] burst=%d CRC FAIL\n", burst_id);
-        dump_bits(burst_id, bit0 + w0, 0, out_bits);
-    }
-    return -2;
+    free(wiq);
+    if (owned_iq) free(iq_dec);
+    return final_rc;
 }
