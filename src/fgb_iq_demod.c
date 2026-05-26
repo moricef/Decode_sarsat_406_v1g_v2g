@@ -429,8 +429,8 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     int need_flip = best_flip;
 
     if (best_fs_score < FSYNC_THRESHOLD) {
-        if (diag) fprintf(stderr, "[fgb_iq] burst=%d FSYNC FAIL best=%d/%d\n",
-                          burst_id, best_fs_score, FSYNC_LEN);
+        fprintf(stderr, "[fgb_iq] burst=%d FSYNC FAIL best=%d/%d\n",
+                burst_id, best_fs_score, FSYNC_LEN);
         free(wiq); if (owned_iq) free(iq_dec);
         return -2;
     }
@@ -451,25 +451,20 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     int final_rc = -2;
     if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
         fprintf(stderr, "[fgb_iq] burst=%d CRC OK\n", burst_id);
-            dump_bits(burst_id, bit0 + w0, 1, out_bits);
-        }
+        dump_bits(burst_id, bit0 + w0, 1, out_bits);
         final_rc = 0;
     } else {
         /* Try opposite polarity as fallback */
         for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
         if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-            if (diag) {
-                fprintf(stderr, "[fgb_iq] burst=%d CRC OK (polarity fallback)\n",
-                        burst_id);
-                dump_bits(burst_id, bit0 + w0, 2, out_bits);
-            }
+            fprintf(stderr, "[fgb_iq] burst=%d CRC OK (polarity fallback)\n",
+                    burst_id);
+            dump_bits(burst_id, bit0 + w0, 2, out_bits);
             final_rc = 0;
         } else {
             for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-            if (diag) {
-                fprintf(stderr, "[fgb_iq] burst=%d CRC FAIL\n", burst_id);
-                dump_bits(burst_id, bit0 + w0, 0, out_bits);
-            }
+            fprintf(stderr, "[fgb_iq] burst=%d CRC FAIL\n", burst_id);
+            dump_bits(burst_id, bit0 + w0, 0, out_bits);
         }
     }
     free(wiq);
