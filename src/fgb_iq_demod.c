@@ -359,7 +359,8 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
                                      cw_search_start, cw_search_end, diag);
     if (cw_end < 0) {
-        if (diag) fprintf(stderr, "[fgb_iq] burst=%d CW end not found\n", burst_id);
+        fprintf(stderr, "[fgb_iq] burst=%d CW end not found (amp=%.3f n=%zu sr=%d bs=%ld)\n",
+                burst_id, cabsf(wiq[(burst_start - w0) + cw_samp/2]), n, samp_rate, burst_start);
         free(wiq); if (owned_iq) free(iq_dec);
         return -1;
     }
@@ -443,15 +444,13 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     /* Step 5: Validate preamble and CRC */
     int pream_ones = 0;
     for (int i = 0; i < PREAMBLE_BITS; i++) pream_ones += out_bits[i];
-    if (diag)
-        fprintf(stderr, "[fgb_iq] burst=%d preamble=%d/%d fsync=%d/%d %s\n",
-                burst_id, pream_ones, PREAMBLE_BITS, best_fs_score, FSYNC_LEN,
-                need_flip ? "(flipped)" : "");
+    fprintf(stderr, "[fgb_iq] burst=%d preamble=%d/%d fsync=%d/%d %s\n",
+            burst_id, pream_ones, PREAMBLE_BITS, best_fs_score, FSYNC_LEN,
+            need_flip ? "(flipped)" : "");
 
     int final_rc = -2;
     if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-        if (diag) {
-            fprintf(stderr, "[fgb_iq] burst=%d CRC OK\n", burst_id);
+        fprintf(stderr, "[fgb_iq] burst=%d CRC OK\n", burst_id);
             dump_bits(burst_id, bit0 + w0, 1, out_bits);
         }
         final_rc = 0;
