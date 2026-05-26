@@ -102,7 +102,7 @@ static void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *i
 // ===================================================
 // CRC validation functions
 // ===================================================
-static int test_crc1(const char *s) {
+int test_crc1(const char *s) {
     int g[] = {1,0,0,1,1,0,1,1,0,1,1,0,0,1,1,1,1,0,0,0,1,1};
     int div[22];
     int i, j, ss = 0;
@@ -136,7 +136,7 @@ static int test_crc1(const char *s) {
     return (ss == 0 || zero == 0) ? 0 : 1;
 }
 
-static int test_crc2(const char *s) {
+int test_crc2(const char *s) {
     int g[] = {1,0,1,0,1,0,0,1,1,1,0,0,1};
     int div[13];
     int i, j, ss = 0;
@@ -1114,12 +1114,12 @@ void decode_1g(const uint8_t *bits, int length) {
      * slicer. Comparison target: differentiate CRC-OK from CRC-FAIL
      * (1-2 bit slicing errors? systematic offset? wrong polynomial?).
      * Enable with: FGB_DIAG=1 ./build/dec406_scan ...
-     * Output: /tmp/fgb_bits.csv */
+     * Output: fgb_bits.csv */
     if (getenv("FGB_DIAG")) {
         static FILE *diag_csv = NULL;
         static int diag_id = 0;
         if (!diag_csv) {
-            diag_csv = fopen("/tmp/fgb_bits.csv", "w");
+            diag_csv = fopen("fgb_bits.csv", "w");
             if (diag_csv)
                 fprintf(diag_csv, "frame,length,crc_error,bits\n");
         }
