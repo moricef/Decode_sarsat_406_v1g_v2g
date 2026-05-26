@@ -309,8 +309,10 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     size_t n_dec = 0;
     int    owned_iq = 0;
     if (samp_rate > 24000) {
-        if (decimate_iq(iq, n, &iq_dec, &n_dec, &samp_rate, &burst_start) != 0)
+        if (decimate_iq(iq, n, &iq_dec, &n_dec, &samp_rate, &burst_start) != 0) {
+            fprintf(stderr, "[fgb_iq] burst=%d FAIL decimation\n", burst_id);
             return -1;
+        }
         iq = iq_dec;
         n = n_dec;
         owned_iq = 1;
@@ -331,7 +333,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long wlen = w1 - w0;
     long need = (long)(FGB_LONG_BITS * bit_prd) + half_bit * 2;
     if (wlen < need) {
-        if (diag) fprintf(stderr, "[fgb_iq] burst=%d FAIL buffer short\n", burst_id);
+        fprintf(stderr, "[fgb_iq] burst=%d FAIL buffer short\n", burst_id);
         if (owned_iq) free(iq_dec);
         return -1;
     }
@@ -368,7 +370,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     /* Step 2: Refine bit-clock phase on preamble */
     long bit0_base = refine_bit_phase_cmplx(wiq, cw_end, bit_prd, half_bit, wlen);
     if (bit0_base + need >= wlen) {
-        if (diag) fprintf(stderr, "[fgb_iq] burst=%d bit0 too late\n", burst_id);
+        fprintf(stderr, "[fgb_iq] burst=%d bit0 too late\n", burst_id);
         free(wiq); if (owned_iq) free(iq_dec);
         return -1;
     }
