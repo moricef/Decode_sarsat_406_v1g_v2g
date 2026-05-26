@@ -209,10 +209,11 @@ static void dump_bits(int id, long anchor, int state, const uint8_t *b) {
 
 /* Multi-stage filtered decimation for high-rate input.
  * Uses simple 3-stage MA+decimate (same as decode_fgb_iq.c). */
-static int decimate_iq(float complex **iq_ptr, size_t *n_ptr, int *samp_rate,
-                        long *burst_start) {
+static int decimate_iq(const float complex *in, size_t n_in,
+                        float complex **out_ptr, size_t *n_out,
+                        int *samp_rate, long *burst_start) {
     int sr = *samp_rate;
-    if (sr <= 24000) return 0;
+    if (sr <= 24000) { *out_ptr = NULL; return 0; }
     int target_hz = 9600;
     int total_decim = sr / target_hz;
     if (total_decim < 1) total_decim = 1;
@@ -222,9 +223,6 @@ static int decimate_iq(float complex **iq_ptr, size_t *n_ptr, int *samp_rate,
     if (M1 < 1) { M1 = total_decim / M2; M3 = 0; }
     if (M1 < 1) { M1 = total_decim; M2 = M3 = 0; }
     N1 = M1 * 2; N2 = M2 * 2; N3 = M3 * 2;
-
-    const float complex *in = *iq_ptr;
-    size_t n_in = *n_ptr;
 
     /* Stage 1 */
     size_t n1 = (n_in - N1) / M1 + 1;
@@ -291,8 +289,8 @@ static int decimate_iq(float complex **iq_ptr, size_t *n_ptr, int *samp_rate,
         sr /= M3;
     }
 
-    *iq_ptr = s1;
-    *n_ptr = n1;
+    *out_ptr = s1;
+    *n_out = n1;
     *samp_rate = sr;
     *burst_start /= total_decim;
     return 0;
@@ -308,11 +306,13 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
 
     /* Internal decimation if sample rate > 24 kHz */
     float complex *iq_dec = NULL;
-    int owned_iq = 0;
+    size_t n_dec = 0;
+    int    owned_iq = 0;
     if (samp_rate > 24000) {
-        if (decimate_iq(&iq_dec, &n, &samp_rate, &burst_start) != 0)
+        if (decimate_iq(iq, n, &iq_dec, &n_dec, &samp_rate, &burst_start) != 0)
             return -1;
         iq = iq_dec;
+        n = n_dec;
         owned_iq = 1;
         if (diag)
             fprintf(stderr, "[fgb_iq] internal decim -> %d Hz (%zu samples)\n",
@@ -332,6 +332,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long need = (long)(FGB_LONG_BITS * bit_prd) + half_bit * 2;
     if (wlen < need) {
         if (diag) fprintf(stderr, "[fgb_iq] burst=%d FAIL buffer short\n", burst_id);
+        if (owned_iq) free(iq_dec);
         return -1;
     }
 
@@ -359,6 +360,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
                                      cw_search_start, cw_search_end, diag);
     if (cw_end < 0) {
         if (diag) fprintf(stderr, "[fgb_iq] burst=%d CW end not found\n", burst_id);
+        free(wiq); if (owned_iq) free(iq_dec);
         return -1;
     }
 
@@ -366,6 +368,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long bit0_base = refine_bit_phase_cmplx(wiq, cw_end, bit_prd, half_bit, wlen);
     if (bit0_base + need >= wlen) {
         if (diag) fprintf(stderr, "[fgb_iq] burst=%d bit0 too late\n", burst_id);
+        free(wiq); if (owned_iq) free(iq_dec);
         return -1;
     }
 
@@ -427,7 +430,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     if (best_fs_score < FSYNC_THRESHOLD) {
         if (diag) fprintf(stderr, "[fgb_iq] burst=%d FSYNC FAIL best=%d/%d\n",
                           burst_id, best_fs_score, FSYNC_LEN);
-        free(wiq);
+        free(wiq); if (owned_iq) free(iq_dec);
         return -2;
     }
 
