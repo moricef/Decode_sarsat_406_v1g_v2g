@@ -677,6 +677,8 @@ int main(int argc, char **argv) {
     }
 
     running = 1;
+    g_wr = 0;
+    overruns = 0;
     pthread_t cap_t, proc_t;
     pthread_create(&cap_t, NULL, capture_thread, NULL);
     pthread_create(&proc_t, NULL, process_thread, NULL);
