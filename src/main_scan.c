@@ -408,9 +408,9 @@ static void *process_thread(void *arg) {
   time_t t_start = last_beat;
 
   while (running) {
-    /* Periodic restart: recycle rtl_sdr every 10 min to avoid USB errors */
-    if (time(NULL) - t_start > 600) {
-      fprintf(stderr, "--- periodic rtl_sdr restart (10 min) ---\n");
+    /* Periodic restart: recycle rtl_sdr every 55s to avoid USB errors */
+    if (time(NULL) - t_start > 55) {
+      fprintf(stderr, "--- periodic rtl_sdr restart (55s) ---\n");
       running = 0;
       break;
     }
