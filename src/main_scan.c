@@ -405,15 +405,8 @@ static void *process_thread(void *arg) {
   double bcenter_sum = 0.0, bsnr = 0.0;
   int bcenter_n = 0;
   time_t last_beat = time(NULL);
-  time_t t_start = last_beat;
 
   while (running) {
-    /* Periodic restart: recycle rtl_sdr every 55s to avoid USB errors */
-    if (time(NULL) - t_start > 55) {
-      fprintf(stderr, "--- periodic rtl_sdr restart (55s) ---\n");
-      running = 0;
-      break;
-    }
     pthread_mutex_lock(&lock);
     while (running && (g_wr - rd) < FFT_N)
       pthread_cond_wait(&data_avail, &lock);
@@ -642,11 +635,11 @@ int main(int argc, char **argv) {
 
   char cmd[256];
   if (has_gain)
-    snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -g %d -",
-             g_center_hz, SAMP_RATE, ppm, gain);
+    snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -g %d -n %u -",
+             g_center_hz, SAMP_RATE, ppm, gain, (unsigned)(SAMP_RATE * 55u));
   else
-    snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -", g_center_hz,
-             SAMP_RATE, ppm);
+    snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -n %u -",
+             g_center_hz, SAMP_RATE, ppm, (unsigned)(SAMP_RATE * 55u));
 
   printf("dec406_scan — unified FGB+SGB real-time decoder\n");
   printf("  band    : %.3f - %.3f MHz   (span %.0f kHz)\n", f1 / 1e6, f2 / 1e6,
