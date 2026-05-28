@@ -61,9 +61,11 @@
 #define FGB_RATE (SAMP_RATE / FGB_DECIM) /* 19200 Hz audio rate */
 
 static volatile sig_atomic_t running = 1;
+static volatile sig_atomic_t sigint_recvd = 0;
 static void on_sigint(int s) {
   (void)s;
   running = 0;
+  sigint_recvd = 1;
 }
 
 static uint8_t *ring = NULL;
@@ -403,8 +405,15 @@ static void *process_thread(void *arg) {
   double bcenter_sum = 0.0, bsnr = 0.0;
   int bcenter_n = 0;
   time_t last_beat = time(NULL);
+  time_t t_start = last_beat;
 
   while (running) {
+    /* Periodic restart: recycle rtl_sdr every 10 min to avoid USB errors */
+    if (time(NULL) - t_start > 600) {
+      fprintf(stderr, "--- periodic rtl_sdr restart (10 min) ---\n");
+      running = 0;
+      break;
+    }
     pthread_mutex_lock(&lock);
     while (running && (g_wr - rd) < FFT_N)
       pthread_cond_wait(&data_avail, &lock);
@@ -658,28 +667,33 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  reset_rtl_usb();
-
-  iq_pipe = popen(cmd, "r");
-  if (!iq_pipe) {
-    fprintf(stderr, "ERROR: cannot start rtl_sdr (is it installed?)\n");
-    free(ring);
-    return 1;
-  }
-
   struct sigaction sa;
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = on_sigint;
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
 
-  pthread_t cap_t, proc_t;
-  pthread_create(&cap_t, NULL, capture_thread, NULL);
-  pthread_create(&proc_t, NULL, process_thread, NULL);
-  pthread_join(cap_t, NULL);
-  pthread_join(proc_t, NULL);
+  while (1) {
+    reset_rtl_usb();
 
-  pclose(iq_pipe);
+    iq_pipe = popen(cmd, "r");
+    if (!iq_pipe) {
+      fprintf(stderr, "ERROR: cannot start rtl_sdr (is it installed?)\n");
+      free(ring);
+      return 1;
+    }
+
+    running = 1;
+    pthread_t cap_t, proc_t;
+    pthread_create(&cap_t, NULL, capture_thread, NULL);
+    pthread_create(&proc_t, NULL, process_thread, NULL);
+    pthread_join(cap_t, NULL);
+    pthread_join(proc_t, NULL);
+
+    pclose(iq_pipe);
+    if (sigint_recvd)
+      break;
+  }
   free(ring);
   printf("\nstopped — %lu ring overrun(s)\n", overruns);
   return 0;
