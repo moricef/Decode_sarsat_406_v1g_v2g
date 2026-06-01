@@ -1,5 +1,86 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.5 - 2026-06-01 - Production scanner wiring
+
+Branche `feature/dsss-flat-chain`.
+
+### Refactor chaîne DSSS — flat-chain (commits `b6bbcc4`, `e5c5e5d`)
+Suppression de la tracking loop sample-rate (FLL+PLL+DLL+Kalman) introduite
+en 10.2.4. La nouvelle chaîne `dsss_demod.c` est plate :
+DC blocker → boxcar décimation chip-rate → `freq_acq_fft_corr` (FFT-corr) →
+NCO wipeoff → OQPSK delay → boxcar finale → despread + per-bit Costas PLL.
+Beaucoup moins de code, performance équivalente sur OTA.
+
+### Acquisition fréquence par FFT-corrélation (`freq_acq_fft_corr`)
+Précision ~1 Hz via une paire de FFT (signal × conj(PRN preamble)), balaie
+±8 kHz à 12 Hz puis fine ±18 Hz à 1 Hz autour du pic. Métrique `conf` =
+peak/mean sur la grille, seuil `ACQ_CONF_MIN = 8.0`.
+
+### Multi-rotation BCH oracle dans `dsss_demod`
+À chaque burst acquis, les 4 phases Costas (0°/90°/180°/270°) sont
+essayées contre `bch_decode_250_202` ; on garde la première qui décode.
+Récupère les bursts où `despread_sync` a choisi la mauvaise phase à SNR
+marginal. Coût ~50 ms.
+
+### Démod FGB IQ-direct (`src/fgb_iq_demod.c`, commit `2d6cc73`)
+Décodeur 1G en bande de base complexe, sans pipeline FM-demod → audio :
+- Estimation de fréquence de porteuse sur le préambule CW (160 ms)
+- Détection de fin de CW par |S1-S2| lissé sur deux bits
+- Refinement de phase bit par balayage ±half_bit
+- Recherche multi-offset du frame sync sur 9 bits
+- Boucle Costas BPSK + slicer Manchester
+- Validation CRC1/CRC2
+
+Au relais firmin (80 km de la balise de test) : ~75 % de décodage,
+équivalent au F4EHY (62 % référence sur le même relais).
+
+### Scanner temps réel `dec406_scan`
+Remplace le pipeline `rtl_power + rtl_fm + sox + dec406_audio` du Perl
+historique. Détection spectrale de bursts sur 100 kHz, classification
+FGB/SGB par bande passante, ingestion en `librtlsdr` synchrone.
+
+**Capture librtlsdr synchrone** (`62e6e92`) : `popen("rtl_sdr")` →
+`rtlsdr_read_sync()`. Plus de `cb transfer status: 5` sur les hoquets USB
+en mode async. Cycle de 55 s piloté par compteur d'échantillons. Silence
+des prints internes de librtlsdr par `dup2` autour de `rtlsdr_open/close`.
+
+**Diagnostics journal par priorité** : macros `DIAG`/`DWARN`/`DERR`
+(`include/diag_log.h`) qui préfixent stderr avec les niveaux kernel-syslog
+(`<7>`, `<4>`, `<3>`). `journalctl -p info` donne la sortie propre style
+F4EHY ; `-p debug` ramène tous les `[fgb_iq]/[freq_acq]/[despread]/[dsss_demod]`,
+le heartbeat, les CRC, l'Orbitography data, etc.
+
+**Alertes mail T.012** (`src/scan_alert.{c,h}`, ported from `scan406.pl`) :
+- Liste blanche des canaux de détresse T.012 Table H.2 (B/C/D/F/G/J/K/N/O/R/S,
+  ±2 kHz) ; canal A (406.022 orbitographie) exclu
+- SMTP config dans `data/config_mail.txt` (clé=valeur, format identique au Perl)
+- `sendemail` en arrière-plan pour éviter le blocage du pipeline pendant
+  le handshake TLS Gmail (sinon : ring overruns sur les décodages SGB)
+- Corps = en-tête (UTC, type, freq, SNR, hex frame complet) + bloc de
+  décodage capturé via `dup2(tmpfile)` autour de `decode_1g/decode_beacon`
+- Garde SGB : alertes uniquement si T.018 §3 bit 43 = 0 (Normal Operation).
+  Les transmissions de test (CNES sur canal K) restent silencieuses.
+
+**Lisibilité de la sortie** : timestamps milliseconde, `dt` inter-burst
+calculé en samples (précis, immune au jitter d'affichage), ligne vide
+entre trames décodées.
+
+### Petits fixes
+- `g_wr` / `overruns` réinitialisés à chaque cycle rtl_sdr (`f4649d5`)
+- `rtl_sdr -n` pour exit naturel après 55 s (`f239e7c`, remplacé ensuite
+  par lecture sync librtlsdr)
+- CW threshold abaissé (0.1 → 0.08), sustain 3 → 4 (`9676768`)
+- Prints "BCH could not correct" des rotations rejetées supprimés (`33064cf`)
+- BCH error counting nettoyé : seul "N errors corrected" reste visible
+
+### Régression synthétique
+```
+./build/dec406_iq ../../GNURADIO/test_sgb_halfsine.sigmf-data -s 2457600
+```
+→ z=9639.2, BCH validé sur phase 0°, Hex ID décodé. OK.
+
+---
+
 ## Version 10.2.4 - 2026-05-16 - Tracking loop + décodage OTA
 
 Branche `feature/fll-pll-tracking`.
