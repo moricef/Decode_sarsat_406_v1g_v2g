@@ -171,17 +171,14 @@ int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
                 for (int i = 0; i < 12; i++) if (syn2[i]) { still_errors = 1; break; }
                 if (still_errors) {
                     memcpy(cw, msg, 250);  /* miscorrect — restore */
-                    fprintf(stderr, "BCH: Errors detected, could not correct\n");
                     rc = -1;
                 } else {
                     fprintf(stderr, "BCH: %d errors corrected\n", L);
                 }
             } else {
-                fprintf(stderr, "BCH: Errors detected, could not correct\n");
                 rc = -1;
             }
         } else {
-            fprintf(stderr, "BCH: Errors detected, could not correct\n");
             rc = -1;
         }
     }
