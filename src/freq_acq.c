@@ -554,6 +554,20 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     double sum_step = 0.0;
     int    n_step = 0;
 
+    /* Diagnostic (COARSE_DIAG): dump the coarse marginal — for each test
+     * frequency, the best correlation power over all lags and where it
+     * lands. Lets us tell, on a rejected burst, whether a real PRN peak
+     * exists at the expected lag (~7500) but is drowned by the conf
+     * metric, or whether no peak exists at all. Output: freq_acq_coarse.csv */
+    static FILE *coarse_csv = NULL;
+    static int   coarse_burst = 0;
+    int coarse_diag = (getenv("COARSE_DIAG") != NULL);
+    if (coarse_diag && !coarse_csv) {
+        coarse_csv = fopen("freq_acq_coarse.csv", "w");
+        if (coarse_csv) fprintf(coarse_csv, "burst,f_hz,phase,step_max,step_lag\n");
+    }
+    if (coarse_diag) coarse_burst++;
+
     for (int s = 0; s < n_f; s++) {
         float f = freq_min + (float)s * FFTC_STEP_HZ;
 
@@ -575,6 +589,10 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
                 float m = re * re + im * im;
                 if (m > step_max) { step_max = m; step_lag = lag; }
             }
+            if (coarse_diag && coarse_csv)
+                fprintf(coarse_csv, "%d,%.0f,%d,%.4e,%d\n",
+                        coarse_burst, (double)f, pq,
+                        (double)step_max, step_lag);
             sum_step += (double)step_max;
             n_step++;
             if (step_max > peak_pwr) {
@@ -585,6 +603,7 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
             }
         }
     }
+    if (coarse_diag && coarse_csv) fflush(coarse_csv);
 
     float mean = (n_step > 0) ? (float)(sum_step / (double)n_step) : 1e-10f;
     float conf = (mean > 0.0f) ? peak_pwr / mean : 0.0f;

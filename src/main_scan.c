@@ -108,6 +108,19 @@ static const char *timestr(time_t t) {
   return b;
 }
 
+/* Wall-clock with millisecond resolution — to see burst grouping (rafales
+ * spaced by tens of ms) that the second-resolution timestr() hides. */
+static const char *timestr_ms(void) {
+  static char b[24];
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  struct tm tm;
+  localtime_r(&ts.tv_sec, &tm);
+  int n = (int)strftime(b, sizeof b, "%H:%M:%S", &tm);
+  snprintf(b + n, sizeof b - n, ".%03ld", ts.tv_nsec / 1000000L);
+  return b;
+}
+
 /* RTL-SDR specific: a device left claimed by a previous unclean exit
  * refuses to reopen (libusb error -6). Reset it before launching rtl_sdr,
  * the same workaround scan406.pl uses. Not needed once the receiver moves
@@ -572,10 +585,19 @@ static void *process_thread(void *arg) {
         if (len >= MIN_BURST_SAMP && len <= MAX_BURST_SAMP &&
             measure_burst(burst_start, len, &fmeas, &bwmeas)) {
           const char *type = (bwmeas > BW_SPLIT_HZ) ? "SGB" : "FGB";
+          /* Sample-accurate gap since the previous burst onset — reveals
+           * the tens-of-ms grouping that wall-clock print latency blurs. */
+          static uint64_t prev_burst_start = 0;
+          /* burst_start < prev means g_wr was reset on an rtl_sdr restart;
+           * skip the cross-cycle gap (would underflow). */
+          double dt = (prev_burst_start && burst_start >= prev_burst_start)
+                          ? (double)(burst_start - prev_burst_start) / SAMP_RATE
+                          : 0.0;
+          prev_burst_start = burst_start;
           printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
-                 "SNR %2.0f dB   dur %.2f s\n",
-                 timestr(time(NULL)), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
-                 type, bsnr, (double)len / SAMP_RATE);
+                 "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
+                 timestr_ms(), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
+                 type, bsnr, (double)len / SAMP_RATE, dt);
           fflush(stdout);
           if (bwmeas > BW_SPLIT_HZ)
             decode_sgb(burst_start, len, fmeas);
