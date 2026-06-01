@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include "dec406.h"
 #include "display_utils.h"
+#include "diag_log.h"
 
 // ===================================================
 // Constants and structures
@@ -809,7 +810,7 @@ static int validate_frame_sync(const char *frame, int frame_length) {
     // Check bit sync pattern (15 ones)
     for (int i = 0; i < 15; i++) {
         if (frame[i] != '1') {
-            printf("Warning: Bit sync pattern error at position %d\n", i);
+            DIAG("Warning: Bit sync pattern error at position %d\n", i);
             return 0;
         }
     }
@@ -880,20 +881,17 @@ static void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *i
     if (crc1_failed || crc2_failed) {
         info->crc_error = 1;
         if (is_orbitography) {
-            // Orbitography: only show CRC1 (CRC2 N/A)
-            printf("CRC: CRC1=%s\n", crc1_failed ? "FAIL" : "OK");
+            DIAG("CRC: CRC1=%s\n", crc1_failed ? "FAIL" : "OK");
         } else {
-            // Normal beacon: show both CRC1 and CRC2
-            printf("CRC ERROR: CRC1=%s CRC2=%s\n",
-                   crc1_failed ? "FAIL" : "OK",
-                   crc2_failed ? "FAIL" : "OK");
+            DIAG("CRC ERROR: CRC1=%s CRC2=%s\n",
+                 crc1_failed ? "FAIL" : "OK",
+                 crc2_failed ? "FAIL" : "OK");
         }
     } else {
-        // All CRCs OK
         if (is_orbitography) {
-            printf("CRC: CRC1=OK\n");
+            DIAG("CRC: CRC1=OK\n");
         } else {
-            printf("CRC: CRC1=OK CRC2=OK\n");
+            DIAG("CRC: CRC1=OK CRC2=OK\n");
         }
     }
     
@@ -1082,13 +1080,13 @@ switch (info->protocol) {
 // ===================================================
 void decode_1g(const uint8_t *bits, int length) {
     if (length != SHORT_FRAME_BITS && length != LONG_FRAME_BITS) {
-        fprintf(stderr, "ERROR: Invalid frame length: %d bits (expected %d or %d)\n", 
-                length, SHORT_FRAME_BITS, LONG_FRAME_BITS);
+        DERR("ERROR: Invalid frame length: %d bits (expected %d or %d)\n",
+             length, SHORT_FRAME_BITS, LONG_FRAME_BITS);
         return;
     }
 
     if (!bits) {
-        fprintf(stderr, "ERROR: NULL bits array\n");
+        DERR("ERROR: NULL bits array\n");
         return;
     }
 
@@ -1104,7 +1102,7 @@ void decode_1g(const uint8_t *bits, int length) {
     //printf("Hexadecimal content: %s\n", hex_str);
 
     if (!validate_frame_sync(frame_str, length)) {
-        printf("Warning: Frame synchronization issues detected\n");
+        DIAG("Warning: Frame synchronization issues detected\n");
     }
 
     BeaconInfo1G info;
@@ -1130,8 +1128,8 @@ void decode_1g(const uint8_t *bits, int length) {
             for (int b = 0; b < length; b++) fputc(frame_str[b], diag_csv);
             fputc('\n', diag_csv);
             fflush(diag_csv);
-            fprintf(stderr, "[diag] fgb frame=%d crc_error=%u\n",
-                    diag_id, (unsigned)info.crc_error);
+            DIAG("[diag] fgb frame=%d crc_error=%u\n",
+                 diag_id, (unsigned)info.crc_error);
         }
     }
 
@@ -1290,27 +1288,27 @@ static void print_hex_byte(int x) {
     int a, b;
     a = x / 16;
     b = x % 16;
-    printf("%x", a);
-    printf("%x", b);
+    fprintf(stderr, "%x", a);
+    fprintf(stderr, "%x", b);
 }
 
 // Orbitography/calibration beacon decoder (adapted from dec406_V7)
 static void decode_orbitography_data(const char *bits, BeaconInfo1G *info) {
     int i, j, a;
     
-    printf("Orbitography data: ");
-    
+    DIAG("Orbitography data: ");
+
     // Extract 5 bytes of orbitography data (bits 39-78)
     for (j = 0; j < 5; j++) {
         i = 39 + j * 8;
         a = calculate_bit_value(bits, i, i + 7);
         print_hex_byte(a);
     }
-    
-    // Extract final 6-bit value (bits 79-84) 
+
+    // Extract final 6-bit value (bits 79-84)
     i = 79;
     a = calculate_bit_value(bits, i, i + 5);
-    printf("%02d", a);
+    fprintf(stderr, "%02d\n", a);
     
     // Mark as system beacon with no position data
     info->has_position = 0;

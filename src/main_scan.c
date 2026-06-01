@@ -16,8 +16,10 @@
 #define _GNU_SOURCE
 #include "audio_capture.h"
 #include "dec406.h"
+#include "diag_log.h"
 #include "dsss_demod.h"
 #include "fgb_iq_demod.h"
+#include "scan_alert.h"
 #include <complex.h>
 #include <fcntl.h>
 #include <linux/usbdevice_fs.h>
@@ -31,6 +33,7 @@
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+#include <rtl-sdr.h>
 
 #define SAMP_RATE 2457600u
 #define RING_BITS 23
@@ -72,7 +75,12 @@ static uint8_t *ring = NULL;
 static uint64_t g_wr = 0; /* total samples written */
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t data_avail = PTHREAD_COND_INITIALIZER;
-static FILE *iq_pipe = NULL;
+static rtlsdr_dev_t *rtl_dev = NULL;
+/* Samples per acquisition cycle, matching the historical
+ *   rtl_sdr -n (SAMP_RATE * 55)
+ * pattern: 55 s of capture, then close/reset/reopen the dongle to clear
+ * accumulated libusb state. Cycle ends naturally — no kill/timeout. */
+#define CYCLE_SAMPLES ((uint64_t)SAMP_RATE * 55u)
 static unsigned long overruns = 0;
 static double g_center_hz = 0.0;
 static double g_f1 = 0.0, g_f2 = 0.0; /* requested band edges (Hz) */
@@ -125,6 +133,29 @@ static const char *timestr_ms(void) {
  * refuses to reopen (libusb error -6). Reset it before launching rtl_sdr,
  * the same workaround scan406.pl uses. Not needed once the receiver moves
  * to the Airspy Mini. */
+
+/* Silence librtlsdr's internal printf chatter ("Reattached kernel driver",
+ * "[R82XX] PLL not locked!", etc.) around rtlsdr_open/configure/close. The
+ * library writes those to stderr directly, bypassing our diag macros, so
+ * the only way to hide them is to redirect fd 2 for the duration of the
+ * call. Returns the saved fd (negative on error); pass it back to restore. */
+static int silence_stderr_begin(void) {
+  fflush(stderr);
+  int saved = dup(STDERR_FILENO);
+  int devnull = open("/dev/null", O_WRONLY);
+  if (devnull >= 0) {
+    dup2(devnull, STDERR_FILENO);
+    close(devnull);
+  }
+  return saved;
+}
+static void silence_stderr_end(int saved) {
+  if (saved < 0) return;
+  fflush(stderr);
+  dup2(saved, STDERR_FILENO);
+  close(saved);
+}
+
 static void reset_rtl_usb(void) {
   FILE *p = popen("lsusb", "r");
   if (!p)
@@ -141,7 +172,7 @@ static void reset_rtl_usb(void) {
       int fd = open(path, O_WRONLY);
       if (fd >= 0) {
         if (ioctl(fd, USBDEVFS_RESET, 0) == 0) {
-          printf("  reset RTL-SDR USB device (%s)\n", path);
+          DIAG("  reset RTL-SDR USB device (%s)\n", path);
           done = 1;
         }
         close(fd);
@@ -150,7 +181,7 @@ static void reset_rtl_usb(void) {
   }
   pclose(p);
   if (done) {
-    printf("  waiting for device re-enumeration...\n");
+    DIAG("  waiting for device re-enumeration...\n");
     fflush(stdout);
     usleep(2000000);
   }
@@ -191,7 +222,40 @@ static void fft(float complex *x, int n) {
  * sits at an arbitrary offset within the wideband capture, hence the mix.
  * The capture runs at 2.4576 Msps — the DSSS chain's native rate
  * (64 samples/chip) — so the window feeds it directly. */
-static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
+/* Run a decode that prints to stdout, capturing its output to a heap
+ * buffer. The buffer is also re-printed to the real stdout so the live
+ * log keeps the human-readable trace. Returns a malloc'd string the
+ * caller must free, or NULL on capture failure (in which case the decode
+ * was still run normally — fallback path). */
+typedef void (*decode_print_fn)(const uint8_t *, int);
+static char *capture_decode(decode_print_fn fn, const uint8_t *bits, int n) {
+  fflush(stdout);
+  FILE *tmp = tmpfile();
+  if (!tmp) { fn(bits, n); return NULL; }
+  int saved = dup(STDOUT_FILENO);
+  if (saved < 0) { fclose(tmp); fn(bits, n); return NULL; }
+  dup2(fileno(tmp), STDOUT_FILENO);
+
+  fn(bits, n);
+
+  fflush(stdout);
+  dup2(saved, STDOUT_FILENO);
+  close(saved);
+
+  fseek(tmp, 0, SEEK_END);
+  long sz = ftell(tmp);
+  rewind(tmp);
+  char *buf = (sz >= 0) ? malloc((size_t)sz + 1) : NULL;
+  if (buf) {
+    size_t nread = fread(buf, 1, (size_t)sz, tmp);
+    buf[nread] = '\0';
+    fputs(buf, stdout);  /* echo to real stdout */
+  }
+  fclose(tmp);
+  return buf;
+}
+
+static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double snr_db) {
   uint64_t head = (uint64_t)(0.20 * SAMP_RATE); /* slack before onset */
   uint64_t tail = (uint64_t)(0.20 * SAMP_RATE); /* slack after burst */
   if (head > start)
@@ -203,7 +267,7 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
   uint64_t wr = g_wr;
   pthread_mutex_unlock(&lock);
   if (ext_start + RING_SAMPLES <= wr) {
-    fprintf(stderr, "WARNING: SGB window overwritten before decode\n");
+    DWARN("WARNING: SGB window overwritten before decode\n");
     return;
   }
   if (ext_start + ext_len > wr)
@@ -211,7 +275,7 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
 
   float complex *win = malloc((size_t)ext_len * sizeof(float complex));
   if (!win) {
-    fprintf(stderr, "WARNING: SGB window alloc failed\n");
+    DWARN("WARNING: SGB window alloc failed\n");
     return;
   }
   double w = 2.0 * M_PI * offset_hz / (double)SAMP_RATE; /* +offset -> 0 Hz */
@@ -234,16 +298,32 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz) {
 
   if (rc == 0) {
     printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
-    decode_beacon(bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    char *body = capture_decode(decode_beacon, bits,
+                                DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    double freq_mhz = (g_center_hz + offset_hz) / 1e6;
+    /* Only alert on a SGB frame that fully decoded AND is operational.
+     * Positive match on "Test Protocol: Normal Operation" (T.018 §3
+     * bit 43 = 0, dec406_v2g.c:775). Any other body — BCH-uncorrectable
+     * ("FRAME REJECTED" with no Test Protocol line), test beacon
+     * ("Test Protocol: Active (Non-operational)" — CNES on channel K,
+     * TAC 65535), or any corruption — is silenced. */
+    int is_real_distress =
+        (body && strstr(body, "Test Protocol: Normal Operation") != NULL);
+    if (is_real_distress && scan_alert_freq_authorised(freq_mhz)) {
+      scan_alert_send("SGB", freq_mhz, snr_db, bits,
+                      DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, body);
+    }
+    free(body);
   } else {
     printf("  SGB burst — decode failed (z=%.1f)\n", z);
   }
+  printf("\n");  /* blank line between frames — separates the firehose */
   fflush(stdout);
 }
 
 /* Extract an FGB burst, mix it to baseband at the FULL sample rate, and
  * run the IQ-direct demodulator/decoder. No FM-demod, no audio detour. */
-static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
+static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double snr_db) {
   uint64_t head = (uint64_t)(0.05 * SAMP_RATE);
   uint64_t tail = (uint64_t)(0.10 * SAMP_RATE);
   if (head > start)
@@ -255,7 +335,7 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
   uint64_t wr = g_wr;
   pthread_mutex_unlock(&lock);
   if (ext_start + RING_SAMPLES <= wr) {
-    fprintf(stderr, "WARNING: FGB window overwritten before decode\n");
+    DWARN("WARNING: FGB window overwritten before decode\n");
     return;
   }
   if (ext_start + ext_len > wr)
@@ -263,7 +343,7 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
 
   float complex *win = malloc((size_t)ext_len * sizeof(float complex));
   if (!win) {
-    fprintf(stderr, "WARNING: FGB window alloc failed\n");
+    DWARN("WARNING: FGB window alloc failed\n");
     return;
   }
 
@@ -283,35 +363,42 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz) {
   free(win);
 
   if (rc == 0) {
-    decode_1g(bits, FGB_LONG_BITS);
+    char *body = capture_decode(decode_1g, bits, FGB_LONG_BITS);
+    double freq_mhz = (g_center_hz + offset_hz) / 1e6;
+    if (body && scan_alert_freq_authorised(freq_mhz)) {
+      scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
+    }
+    free(body);
   } else if (rc == -2) {
     printf("  FGB burst — CRC FAIL (bits sliced but CRC mismatched both polarities)\n");
-    fflush(stdout);
   } else {
     printf("  FGB burst — no frame decoded (no sync/burst)\n");
-    fflush(stdout);
   }
+  printf("\n");  /* blank line between frames — separates the firehose */
+  fflush(stdout);
 }
 
 static void *capture_thread(void *arg) {
   (void)arg;
   uint64_t wr = 0;
-  while (running) {
+  while (running && wr < CYCLE_SAMPLES) {
     size_t off = (size_t)(wr & RING_MASK) * 2;
     size_t to_end = RING_BYTES - off;
     size_t want = to_end < CAP_CHUNK_BYTES ? to_end : CAP_CHUNK_BYTES;
-    size_t n = fread(ring + off, 1, want, iq_pipe);
-    if (n == 0) {
+    int n_read = 0;
+    int rc = rtlsdr_read_sync(rtl_dev, ring + off, (int)want, &n_read);
+    if (rc < 0 || n_read <= 0) {
       running = 0;
       break;
-    } /* EOF or rtl_sdr stopped */
-    size_t ns = n / 2;
+    }
+    size_t ns = (size_t)n_read / 2;
     wr += ns;
     pthread_mutex_lock(&lock);
     g_wr = wr;
     pthread_cond_signal(&data_avail);
     pthread_mutex_unlock(&lock);
   }
+  running = 0;  /* signal process_thread the cycle is done */
   pthread_mutex_lock(&lock);
   pthread_cond_broadcast(&data_avail);
   pthread_mutex_unlock(&lock);
@@ -430,7 +517,7 @@ static void *process_thread(void *arg) {
 
     if (avail > RING_SAMPLES) { /* capture lapped the reader */
       overruns++;
-      fprintf(stderr, "WARNING: ring overrun (%lu)\n", overruns);
+      DWARN("WARNING: ring overrun (%lu)\n", overruns);
       rd = g_wr - RING_SAMPLES;
       state = 0;
       above = 0;
@@ -600,9 +687,9 @@ static void *process_thread(void *arg) {
                  type, bsnr, (double)len / SAMP_RATE, dt);
           fflush(stdout);
           if (bwmeas > BW_SPLIT_HZ)
-            decode_sgb(burst_start, len, fmeas);
+            decode_sgb(burst_start, len, fmeas, bsnr);
           else
-            decode_fgb(burst_start, len, fmeas);
+            decode_fgb(burst_start, len, fmeas, bsnr);
         }
         state = 0;
         above = 0;
@@ -615,9 +702,8 @@ static void *process_thread(void *arg) {
       double fl = 0.0;
       for (int k = 0; k < FFT_N; k++)
         fl += floor_bin[k];
-      printf("[%s] monitoring — mean noise floor %.0f, overruns %lu\n",
-             timestr(now), fl / FFT_N, overruns);
-      fflush(stdout);
+      DIAG("[%s] monitoring — mean noise floor %.0f, overruns %lu\n",
+           timestr(now), fl / FFT_N, overruns);
     }
   }
   return NULL;
@@ -650,18 +736,9 @@ int main(int argc, char **argv) {
   g_f2 = f2;
 
   if (span > SAMP_RATE)
-    fprintf(stderr,
-            "WARNING: band span %.0f Hz exceeds sample rate %u Hz "
-            "— part of the band will not be captured\n",
-            span, SAMP_RATE);
-
-  char cmd[256];
-  if (has_gain)
-    snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -g %d -n %u -",
-             g_center_hz, SAMP_RATE, ppm, gain, (unsigned)(SAMP_RATE * 55u));
-  else
-    snprintf(cmd, sizeof cmd, "rtl_sdr -f %.0f -s %u -p %d -n %u -",
-             g_center_hz, SAMP_RATE, ppm, (unsigned)(SAMP_RATE * 55u));
+    DWARN("WARNING: band span %.0f Hz exceeds sample rate %u Hz "
+          "— part of the band will not be captured\n",
+          span, SAMP_RATE);
 
   printf("dec406_scan — unified FGB+SGB real-time decoder\n");
   printf("  band    : %.3f - %.3f MHz   (span %.0f kHz)\n", f1 / 1e6, f2 / 1e6,
@@ -670,7 +747,16 @@ int main(int argc, char **argv) {
          SAMP_RATE / 1e6);
   printf("  ring    : %.0f MB   (~%.1f s)\n", RING_BYTES / 1e6,
          (double)RING_SAMPLES / SAMP_RATE);
-  printf("  rtl_sdr : %s\n\n", cmd);
+  if (has_gain)
+    printf("  rtl-sdr : librtlsdr sync, gain=%d dB, ppm=%d, cycle=%u s\n",
+           gain, ppm, (unsigned)(CYCLE_SAMPLES / SAMP_RATE));
+  else
+    printf("  rtl-sdr : librtlsdr sync, gain=auto, ppm=%d, cycle=%u s\n",
+           ppm, (unsigned)(CYCLE_SAMPLES / SAMP_RATE));
+
+  /* Email alerts on authorised T.012 channels, ported from scan406.pl. */
+  int alerts_ok = (scan_alert_load_config("data/config_mail.txt") == 0);
+  printf("  alerts  : %s\n\n", alerts_ok ? "enabled" : "disabled");
   fflush(stdout);
 
   for (int k = 0; k < FFT_N; k++)
@@ -678,7 +764,7 @@ int main(int argc, char **argv) {
 
   ring = malloc(RING_BYTES);
   if (!ring) {
-    fprintf(stderr, "ERROR: ring allocation failed\n");
+    DERR("ERROR: ring allocation failed\n");
     return 1;
   }
 
@@ -691,12 +777,30 @@ int main(int argc, char **argv) {
   while (1) {
     reset_rtl_usb();
 
-    iq_pipe = popen(cmd, "r");
-    if (!iq_pipe) {
-      fprintf(stderr, "ERROR: cannot start rtl_sdr (is it installed?)\n");
-      free(ring);
-      return 1;
+    /* Open + configure RTL-SDR in synchronous read mode. This replaces the
+     * popen("rtl_sdr ...") pipe: no async libusb callbacks → no spurious
+     * 'cb transfer status: 5' on bus hiccups. The dongle is closed and
+     * reopened at each cycle (same as the historical pipe restart). */
+    int saved_err = silence_stderr_begin();
+    int rc = rtlsdr_open(&rtl_dev, 0);
+    silence_stderr_end(saved_err);
+    if (rc < 0) {
+      DERR("ERROR: rtlsdr_open failed (%d), retrying after reset\n", rc);
+      sleep(1);
+      continue;
     }
+    saved_err = silence_stderr_begin();
+    rtlsdr_set_sample_rate(rtl_dev, SAMP_RATE);
+    rtlsdr_set_center_freq(rtl_dev, (uint32_t)g_center_hz);
+    rtlsdr_set_freq_correction(rtl_dev, ppm);
+    if (has_gain) {
+      rtlsdr_set_tuner_gain_mode(rtl_dev, 1);
+      rtlsdr_set_tuner_gain(rtl_dev, gain * 10);  /* tenths of dB */
+    } else {
+      rtlsdr_set_tuner_gain_mode(rtl_dev, 0);     /* AGC */
+    }
+    rtlsdr_reset_buffer(rtl_dev);
+    silence_stderr_end(saved_err);
 
     running = 1;
     g_wr = 0;
@@ -707,7 +811,10 @@ int main(int argc, char **argv) {
     pthread_join(cap_t, NULL);
     pthread_join(proc_t, NULL);
 
-    pclose(iq_pipe);
+    saved_err = silence_stderr_begin();
+    rtlsdr_close(rtl_dev);
+    silence_stderr_end(saved_err);
+    rtl_dev = NULL;
     if (sigint_recvd)
       break;
   }

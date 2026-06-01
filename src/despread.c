@@ -11,6 +11,7 @@
  */
 
 #include "despread.h"
+#include "diag_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -191,10 +192,9 @@ int despread_sync(const float complex *samples, int num_chips,
     float z_comb = sqrtf(z_i * z_i + z_q * z_q);
     float thr = DESPREAD_SYNC_THRESHOLD;
     if (z_comb < thr) {
-        fprintf(stderr,
-                "[despread] SYNC FAILED: "
-                "I z=%.1f Q z=%.1f combined=%.1f (need %.1f)\n",
-                (double)z_i, (double)z_q, (double)z_comb, (double)thr);
+        DIAG("[despread] SYNC FAILED: "
+             "I z=%.1f Q z=%.1f combined=%.1f (need %.1f)\n",
+             (double)z_i, (double)z_q, (double)z_comb, (double)thr);
         for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
         free(prn_i); free(prn_q); free(npi); free(npq);
         return -1;
@@ -207,12 +207,11 @@ int despread_sync(const float complex *samples, int num_chips,
     sync->score_i = (z_i < 10000.0f) ? (int)(z_i * 10.0f) : 0x7FFF;
     sync->score_q = (z_i < 10000.0f) ? (int)(z_q * 10.0f) : 0x7FFF;
 
-    fprintf(stderr,
-            "[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
-            "combined=%.1f, phase=%d°\n",
-            best_off_i, (double)z_i,
-            best_off_q, (double)z_q,
-            (double)z_comb, best_phase * 90);
+    DIAG("[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
+         "combined=%.1f, phase=%d°\n",
+         best_off_i, (double)z_i,
+         best_off_q, (double)z_q,
+         (double)z_comb, best_phase * 90);
 
     for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
     free(prn_i); free(prn_q); free(npi); free(npq);
@@ -265,7 +264,7 @@ int despread_bits(const float complex *samples, int num_chips,
                         "ri_re,ri_im,rq_re,rq_im,d_i,d_q,e\n");
         }
         diag_burst_id++;
-        fprintf(stderr, "[diag] despread burst=%d\n", diag_burst_id);
+        DIAG("[diag] despread burst=%d\n", diag_burst_id);
     }
 
     int out_idx = 0;

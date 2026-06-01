@@ -11,6 +11,7 @@
 
 #include "freq_acq.h"
 #include "despread.h"
+#include "diag_log.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -221,7 +222,7 @@ int freq_acq_sweep(const float complex *chips, int n_chips,
     result->confidence  = best_conf;
     result->costas_phase = best_p;
 
-    fprintf(stderr,
+    DIAG(
             "[freq_acq] sweep: offset %.0f Hz  conf %.1f  "
             "phase %d  chips=%d bins=%d\n",
             (double)result->freq_hz, (double)result->confidence,
@@ -344,7 +345,7 @@ int freq_acq_coarse_fft(const float complex *samples, int n_samples,
     result->confidence  = ratio;
     result->costas_phase = 0;
 
-    fprintf(stderr,
+    DIAG(
             "[freq_acq] coarse fft: raw=%.0f Hz  corr=%.0f Hz  "
             "conf=%.1f  peak_bin=%d\n",
             (double)fo_raw, (double)fo_corr, (double)ratio, peak_bin);
@@ -472,7 +473,7 @@ int freq_acq_from_alignment(const float complex *chips, int n_chips,
     result->confidence  = ratio;
     result->costas_phase = p;
 
-    fprintf(stderr,
+    DIAG(
             "[freq_acq] align fft: offset %.0f Hz  conf %.1f  "
             "peak_bin=%d phase=%d\n",
             (double)est_hz, (double)ratio, peak_bin, p);
@@ -650,7 +651,7 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     result->confidence   = conf;
     result->costas_phase = best_phase;
 
-    fprintf(stderr,
+    DIAG(
             "[freq_acq] fft-corr: offset %.0f Hz  conf %.1f  "
             "lag %d/%d (n_chips %d remain %d)  peak %.2e  mean %.2e  phase %d\n",
             (double)f_fine, (double)conf, best_lag, last_lag, n_chips,

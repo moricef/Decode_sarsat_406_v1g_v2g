@@ -1,4 +1,5 @@
 #include "fgb_iq_demod.h"
+#include "diag_log.h"
 
 #include <complex.h>
 #include <math.h>
@@ -69,7 +70,7 @@ static double estimate_cw_freq(const float complex *iq, long cw_start,
     if (count == 0) return 0.0;
     double dphi_avg = sum / count;
     double freq_hz = dphi_avg / (2.0 * M_PI) * samp_rate;
-    fprintf(stderr, "[fgb_iq] CW freq est: %.1f Hz (n=%ld)\n", freq_hz, count);
+    DIAG("[fgb_iq] CW freq est: %.1f Hz (n=%ld)\n", freq_hz, count);
     return freq_hz;
 }
 
@@ -117,7 +118,7 @@ static long find_cw_end_cmplx(const float complex *iq, long len,
             if (count >= sustain) {
                 long result = search_start + (long)(edge * bit_prd + 0.5);
                 if (diag)
-                    fprintf(stderr, "[fgb_iq] CW end at sample %ld "
+                    DIAG("[fgb_iq] CW end at sample %ld "
                             "(amp=%.3f expect=%.1f thresh=%.1f)\n",
                             result, cw_mag, expected, thresh);
                 return result;
@@ -126,7 +127,7 @@ static long find_cw_end_cmplx(const float complex *iq, long len,
             count = 0;
         }
     }
-    if (diag) fprintf(stderr, "[fgb_iq] CW end not found (amp=%.3f expect=%.1f thresh=%.1f)\n",
+    if (diag) DIAG("[fgb_iq] CW end not found (amp=%.3f expect=%.1f thresh=%.1f)\n",
                       cw_mag, expected, thresh);
     return -1;
 }
@@ -309,14 +310,14 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     int    owned_iq = 0;
     if (samp_rate > 24000) {
         if (decimate_iq(iq, n, &iq_dec, &n_dec, &samp_rate, &burst_start) != 0) {
-            fprintf(stderr, "[fgb_iq] burst=%d FAIL decimation\n", burst_id);
+            DIAG("[fgb_iq] burst=%d FAIL decimation\n", burst_id);
             return -1;
         }
         iq = iq_dec;
         n = n_dec;
         owned_iq = 1;
         if (diag)
-            fprintf(stderr, "[fgb_iq] internal decim -> %d Hz (%zu samples)\n",
+            DIAG("[fgb_iq] internal decim -> %d Hz (%zu samples)\n",
                     samp_rate, n);
     }
 
@@ -332,7 +333,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long wlen = w1 - w0;
     long need = (long)(FGB_LONG_BITS * bit_prd) + half_bit * 2;
     if (wlen < need) {
-        fprintf(stderr, "[fgb_iq] burst=%d FAIL buffer short\n", burst_id);
+        DIAG("[fgb_iq] burst=%d FAIL buffer short\n", burst_id);
         if (owned_iq) free(iq_dec);
         return -1;
     }
@@ -360,7 +361,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
                                      cw_search_start, cw_search_end, diag);
     if (cw_end < 0) {
-        fprintf(stderr, "[fgb_iq] burst=%d CW end not found (amp=%.3f fq=%.1f n=%zu sr=%d bs=%ld)\n",
+        DIAG("[fgb_iq] burst=%d CW end not found (amp=%.3f fq=%.1f n=%zu sr=%d bs=%ld)\n",
                 burst_id, cabsf(wiq[(burst_start - w0) + cw_samp/2]),
                 fq_off, n, samp_rate, burst_start);
         free(wiq); if (owned_iq) free(iq_dec);
@@ -370,7 +371,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     /* Step 2: Refine bit-clock phase on preamble */
     long bit0_base = refine_bit_phase_cmplx(wiq, cw_end, bit_prd, half_bit, wlen);
     if (bit0_base + need >= wlen) {
-        fprintf(stderr, "[fgb_iq] burst=%d bit0 too late\n", burst_id);
+        DIAG("[fgb_iq] burst=%d bit0 too late\n", burst_id);
         free(wiq); if (owned_iq) free(iq_dec);
         return -1;
     }
@@ -410,7 +411,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
         if (msi > score) { score = msi; flip = 1; }
 
         if (diag)
-            fprintf(stderr, "[fgb_iq] off=%+3d bit0=%ld fs=%d/%d\n",
+            DIAG("[fgb_iq] off=%+3d bit0=%ld fs=%d/%d\n",
                     try_off, try_bit0 + w0, score, FSYNC_LEN);
 
         if (score > best_fs_score) {
@@ -431,7 +432,7 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     int need_flip = best_flip;
 
     if (best_fs_score < FSYNC_THRESHOLD) {
-        fprintf(stderr, "[fgb_iq] burst=%d FSYNC FAIL best=%d/%d\n",
+        DIAG("[fgb_iq] burst=%d FSYNC FAIL best=%d/%d\n",
                 burst_id, best_fs_score, FSYNC_LEN);
         free(wiq); if (owned_iq) free(iq_dec);
         return -2;
@@ -446,26 +447,26 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     /* Step 5: Validate preamble and CRC */
     int pream_ones = 0;
     for (int i = 0; i < PREAMBLE_BITS; i++) pream_ones += out_bits[i];
-    fprintf(stderr, "[fgb_iq] burst=%d preamble=%d/%d fsync=%d/%d %s\n",
+    DIAG("[fgb_iq] burst=%d preamble=%d/%d fsync=%d/%d %s\n",
             burst_id, pream_ones, PREAMBLE_BITS, best_fs_score, FSYNC_LEN,
             need_flip ? "(flipped)" : "");
 
     int final_rc = -2;
     if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-        fprintf(stderr, "[fgb_iq] burst=%d CRC OK\n", burst_id);
+        DIAG("[fgb_iq] burst=%d CRC OK\n", burst_id);
         dump_bits(burst_id, bit0 + w0, 1, out_bits);
         final_rc = 0;
     } else {
         /* Try opposite polarity as fallback */
         for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
         if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-            fprintf(stderr, "[fgb_iq] burst=%d CRC OK (polarity fallback)\n",
+            DIAG("[fgb_iq] burst=%d CRC OK (polarity fallback)\n",
                     burst_id);
             dump_bits(burst_id, bit0 + w0, 2, out_bits);
             final_rc = 0;
         } else {
             for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-            fprintf(stderr, "[fgb_iq] burst=%d CRC FAIL\n", burst_id);
+            DIAG("[fgb_iq] burst=%d CRC FAIL\n", burst_id);
             dump_bits(burst_id, bit0 + w0, 0, out_bits);
         }
     }

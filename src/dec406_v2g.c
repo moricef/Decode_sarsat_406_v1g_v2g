@@ -22,6 +22,7 @@
 #include "dec406.h"
 #include "display_utils.h"
 #include "country_codes.h"
+#include "diag_log.h"
 
 // ===================================================
 // BCH Error Correction Implementation (T.018 Appendix B)
@@ -173,7 +174,7 @@ int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
                     memcpy(cw, msg, 250);  /* miscorrect — restore */
                     rc = -1;
                 } else {
-                    fprintf(stderr, "BCH: %d errors corrected\n", L);
+                    DIAG("BCH: %d errors corrected\n", L);
                 }
             } else {
                 rc = -1;
@@ -632,13 +633,13 @@ static void compute_hex_id(const uint8_t *bits, BeaconInfo *info) {
 static void validate_gnss(BeaconInfo *info) {
     // Check latitude range
     if (info->lat < -90.0 || info->lat > 90.0) {
-        fprintf(stderr, "Validation: Invalid latitude %.5f\n", info->lat);
+        DWARN("Validation: Invalid latitude %.5f\n", info->lat);
         info->lat = 0.0;
     }
     
     // Check longitude range
     if (info->lon < -180.0 || info->lon > 180.0) {
-        fprintf(stderr, "Validation: Invalid longitude %.5f\n", info->lon);
+        DWARN("Validation: Invalid longitude %.5f\n", info->lon);
         info->lon = 0.0;
     }
     
@@ -661,15 +662,15 @@ static void validate_beacon_type(BeaconInfo *info) {
     switch(info->beacon_type) {
         case 3:  // ELT(DT)
             if (info->rot.id != 1) {
-                fprintf(stderr, "Consistency: ELT(DT) should use RF#1 (found %d)\n", 
-                        info->rot.id);
+                DWARN("Consistency: ELT(DT) should use RF#1 (found %d)\n",
+                      info->rot.id);
             }
             break;
             
         case 1:  // EPIRB
         case 2:  // PLB
             if (info->rot.id == 1) {
-                fprintf(stderr, "Consistency: Non-ELT beacon using RF#1\n");
+                DWARN("Consistency: Non-ELT beacon using RF#1\n");
             }
             break;
     }
@@ -709,12 +710,12 @@ void decode_2g(const uint8_t *rx_bits) {
     // 1. Apply BCH error correction
     if (bch_decode_250_202(rx_bits, corrected) != 0) {
         if (diag_on)
-            fprintf(stderr, "[diag] bch burst=%d status=FAIL\n", diag_bch_id);
+            DIAG("[diag] bch burst=%d status=FAIL\n", diag_bch_id);
         printf("\n=== FRAME REJECTED — BCH uncorrectable, decode aborted ===\n");
         return;
     }
     if (diag_on)
-        fprintf(stderr, "[diag] bch burst=%d status=OK\n", diag_bch_id);
+        DIAG("[diag] bch burst=%d status=OK\n", diag_bch_id);
 
     // 2. Decode main field (154 bits)
     decode_main(corrected, &info);

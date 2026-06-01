@@ -25,6 +25,7 @@
 #include "dsss_demod.h"
 #include "despread.h"
 #include "freq_acq.h"
+#include "diag_log.h"
 
 /* Provided by dec406_v2g.c — BCH(250,202) decoder used here as a
  * Costas-phase oracle (try the 4 candidates, keep the one that decodes). */
@@ -98,12 +99,12 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     float chip_rate = fs / sps;
     if (fabsf(chip_rate - 38400.0f) > 100.0f) {
-        fprintf(stderr, "[dsss_demod] chip rate %.0f Hz out of range\n",
+        DIAG("[dsss_demod] chip rate %.0f Hz out of range\n",
                 (double)chip_rate);
         return -1;
     }
     if (buffer_length < (size_t)fs) {
-        fprintf(stderr, "[dsss_demod] buffer too short (%zu < %.0f samples)\n",
+        DIAG("[dsss_demod] buffer too short (%zu < %.0f samples)\n",
                 buffer_length, (double)fs);
         return -1;
     }
@@ -116,7 +117,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     float complex *work  = (float complex *)malloc(N * sizeof(float complex));
     float complex *chips = (float complex *)calloc(n_chips, sizeof(float complex));
     if (!work || !chips) {
-        fprintf(stderr, "[dsss_demod] allocation failure\n");
+        DIAG("[dsss_demod] allocation failure\n");
         goto cleanup;
     }
 
@@ -152,11 +153,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
     if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
                           -8000.0f, 8000.0f, &acq) != 0 ||
         acq.confidence < ACQ_CONF_MIN) {
-        fprintf(stderr,
-                "[dsss_demod] acquisition rejected "
-                "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
-                (double)acq.freq_hz, (double)acq.confidence,
-                (double)ACQ_CONF_MIN);
+        DIAG("[dsss_demod] acquisition rejected "
+             "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
+             (double)acq.freq_hz, (double)acq.confidence,
+             (double)ACQ_CONF_MIN);
         goto cleanup;
     }
 
@@ -212,10 +212,9 @@ int dsss_receive_burst(const float complex *ota_buffer,
             }
         }
         if (bch_ok_phase >= 0) {
-            fprintf(stderr,
-                    "[dsss_demod] BCH validated on Costas phase %d° "
-                    "(sync chose %d°)\n",
-                    bch_ok_phase * 90, original_phase * 90);
+            DIAG("[dsss_demod] BCH validated on Costas phase %d° "
+                 "(sync chose %d°)\n",
+                 bch_ok_phase * 90, original_phase * 90);
             rc = 0;
         } else {
             /* None of 4 phases pass BCH. Emit bits from the original
