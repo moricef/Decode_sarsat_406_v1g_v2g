@@ -1,5 +1,136 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.5 - 2026-06-01 - Production scanner wiring
+
+Branche `feature/dsss-flat-chain`.
+
+### Refactor chaîne DSSS — flat-chain (commits `b6bbcc4`, `e5c5e5d`)
+Suppression de la tracking loop sample-rate (FLL+PLL+DLL+Kalman) introduite
+en 10.2.4. La nouvelle chaîne `dsss_demod.c` est plate :
+DC blocker → boxcar décimation chip-rate → `freq_acq_fft_corr` (FFT-corr) →
+NCO wipeoff → OQPSK delay → boxcar finale → despread + per-bit Costas PLL.
+Beaucoup moins de code, performance équivalente sur OTA.
+
+### Acquisition fréquence par FFT-corrélation (`freq_acq_fft_corr`)
+Précision ~1 Hz via une paire de FFT (signal × conj(PRN preamble)), balaie
+±8 kHz à 12 Hz puis fine ±18 Hz à 1 Hz autour du pic. Métrique `conf` =
+peak/mean sur la grille, seuil `ACQ_CONF_MIN = 8.0`.
+
+### Multi-rotation BCH oracle dans `dsss_demod`
+À chaque burst acquis, les 4 phases Costas (0°/90°/180°/270°) sont
+essayées contre `bch_decode_250_202` ; on garde la première qui décode.
+Récupère les bursts où `despread_sync` a choisi la mauvaise phase à SNR
+marginal. Coût ~50 ms.
+
+### Démod FGB IQ-direct (`src/fgb_iq_demod.c`, commit `2d6cc73`)
+Décodeur 1G en bande de base complexe, sans pipeline FM-demod → audio :
+- Estimation de fréquence de porteuse sur le préambule CW (160 ms)
+- Détection de fin de CW par |S1-S2| lissé sur deux bits
+- Refinement de phase bit par balayage ±half_bit
+- Recherche multi-offset du frame sync sur 9 bits
+- Boucle Costas BPSK + slicer Manchester
+- Validation CRC1/CRC2
+
+Au relais firmin (80 km de la balise de test) : ~75 % de décodage,
+équivalent au F4EHY (62 % référence sur le même relais).
+
+### Scanner temps réel `dec406_scan`
+Remplace le pipeline `rtl_power + rtl_fm + sox + dec406_audio` du Perl
+historique. Détection spectrale de bursts sur 100 kHz, classification
+FGB/SGB par bande passante, ingestion en `librtlsdr` synchrone.
+
+**Capture librtlsdr synchrone** (`62e6e92`) : `popen("rtl_sdr")` →
+`rtlsdr_read_sync()`. Plus de `cb transfer status: 5` sur les hoquets USB
+en mode async. Cycle de 55 s piloté par compteur d'échantillons. Silence
+des prints internes de librtlsdr par `dup2` autour de `rtlsdr_open/close`.
+
+**Diagnostics journal par priorité** : macros `DIAG`/`DWARN`/`DERR`
+(`include/diag_log.h`) qui préfixent stderr avec les niveaux kernel-syslog
+(`<7>`, `<4>`, `<3>`). `journalctl -p info` donne la sortie propre style
+F4EHY ; `-p debug` ramène tous les `[fgb_iq]/[freq_acq]/[despread]/[dsss_demod]`,
+le heartbeat, les CRC, l'Orbitography data, etc.
+
+**Alertes mail T.012** (`src/scan_alert.{c,h}`, ported from `scan406.pl`) :
+- Liste blanche des canaux de détresse T.012 Table H.2 (B/C/D/F/G/J/K/N/O/R/S,
+  ±2 kHz) ; canal A (406.022 orbitographie) exclu
+- SMTP config dans `data/config_mail.txt` (clé=valeur, format identique au Perl)
+- `sendemail` en arrière-plan pour éviter le blocage du pipeline pendant
+  le handshake TLS Gmail (sinon : ring overruns sur les décodages SGB)
+- Corps = en-tête (UTC, type, freq, SNR, hex frame complet) + bloc de
+  décodage capturé via `dup2(tmpfile)` autour de `decode_1g/decode_beacon`
+- Garde SGB : alertes uniquement si T.018 §3 bit 43 = 0 (Normal Operation).
+  Les transmissions de test (CNES sur canal K) restent silencieuses.
+
+**Lisibilité de la sortie** : timestamps milliseconde, `dt` inter-burst
+calculé en samples (précis, immune au jitter d'affichage), ligne vide
+entre trames décodées.
+
+### Petits fixes
+- `g_wr` / `overruns` réinitialisés à chaque cycle rtl_sdr (`f4649d5`)
+- `rtl_sdr -n` pour exit naturel après 55 s (`f239e7c`, remplacé ensuite
+  par lecture sync librtlsdr)
+- CW threshold abaissé (0.1 → 0.08), sustain 3 → 4 (`9676768`)
+- Prints "BCH could not correct" des rotations rejetées supprimés (`33064cf`)
+- BCH error counting nettoyé : seul "N errors corrected" reste visible
+
+### Régression synthétique
+```
+./build/dec406_iq ../../GNURADIO/test_sgb_halfsine.sigmf-data -s 2457600
+```
+→ z=9639.2, BCH validé sur phase 0°, Hex ID décodé. OK.
+
+---
+
+## Version 10.2.4 - 2026-05-16 - Tracking loop + décodage OTA
+
+Branche `feature/fll-pll-tracking`.
+
+### 🎯 Démodulateur OTA fonctionnel
+Le signal over-the-air (PlutoSDR → RTL-SDR / SDRangel) est maintenant décodé,
+BCH-propre. La chaîne de réception est remplacée par une **tracking loop**
+sample-rate (FLL+PLL+DLL+Kalman) qui assure la poursuite de porteuse et la
+décimation en une seule passe, en remplacement du filtre RRC + Costas QPSK.
+
+### 🔧 Chaîne de réception (src/dsss_demod.c)
+1. DC blocker (IIR α=0.001) sur échantillons bruts
+2. `freq_acq_coarse_fft()` — FFT 4e puissance, contrôle de plausibilité ±25 kHz
+3. Sweep fallback ±300 Hz (corrélation PRN) si la FFT est rejetée
+4. OQPSK delay (Q avancé de SPS/2)
+5. Tracking loop → sortie chip-rate
+6. `despread_burst()` — sync préambule + extraction des bits
+
+### 🐛 Corrections
+
+#### Décodage des bursts n'importe où dans la fenêtre (commit 8ffb090)
+- `DESPREAD_SYNC_RANGE` 1000 → 9600 chips (= un pas de scan complet)
+- Fenêtre de scan 1.1 s → 1.35 s
+- **Cause** : un burst dont le préambule tombait au-delà de l'offset 1000
+  n'était jamais trouvé → décodage « à la loterie » sur fichiers courts
+
+#### Rejet des fausses balises (commit fa08382)
+- `DESPREAD_SYNC_THRESHOLD` 2.8 → 20 : le bruit (z ≤ 7) ne synchronise plus
+- `bch_decode_250_202()` retourne maintenant un statut ; `decode_2g()` rejette
+  la trame et n'affiche aucune balise si le BCH ne peut pas corriger
+- **Cause** : à lien faible, le décodeur synchronisait sur du bruit et imprimait
+  une balise fabriquée (faux TAC, fausse position GPS)
+
+#### Poursuite de phase dans le despread (commits 08d8a0a, ad3cc7e, 0995092)
+- Phase tracker BPSK 2e ordre (proportionnel + intégral) dans `despread_bits()`
+- PLL : correction de phase remplacée par un offset de fréquence one-shot
+  (pas de saut de phase aux frontières d'epoch)
+
+#### Sync préambule en corrélation complexe (commit 16d00d6)
+- Corrélation complexe `|Σ s·conj(e)|` insensible à la phase porteuse
+- Résolution d'ambiguïté Costas sur 4 phases
+
+### 🛠️ Nouveaux composants
+- `src/tracking.c` — tracking loop sample-rate (EPL, ATC 3 états, lock P²)
+- `src/kalman5.c` — filtre de Kalman 5 états (optionnel, désactivé)
+- `src/freq_acq.c` — acquisition de fréquence coarse (FFT 4e puissance + sweep)
+- `tests/test_bch_reject.c` — test des chemins BCH propre / corrigé / rejeté
+
+---
+
 ## Version 10.2.3 - 2025-10-24 - Investigation Démodulateur IQ
 
 ### 🔍 Investigation Désalignement Structurel

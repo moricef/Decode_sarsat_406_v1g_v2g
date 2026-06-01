@@ -1,0 +1,167 @@
+# Makefile for COSPAS-SARSAT 406 MHz Decoder
+# Support FGB (1G) BPSK et SGB (2G) DSSS/OQPSK
+# Licence Creative Commons CC BY-NC-SA
+
+CC = gcc
+CFLAGS = -Wall -Wextra -O2 -march=native -g -Iinclude
+LDFLAGS = -lm
+LDFLAGS_DSSS = -lm -fopenmp -lgomp -lfftw3f
+
+# Directories
+SRC_DIR = src
+INC_DIR = include
+BUILD_DIR = build
+UTILS_DIR = utils
+
+# MATLAB Coder generated files (for DSSS/SGB)
+MATLAB_DIR = test_matlab_coder
+MATLAB_SRCS = \
+	$(MATLAB_DIR)/dsss_receiver.c \
+	$(MATLAB_DIR)/dsss_receiver_emxutil.c \
+	$(MATLAB_DIR)/dsss_receiver_initialize.c \
+	$(MATLAB_DIR)/dsss_receiver_rtwutil.c \
+	$(MATLAB_DIR)/dsss_receiver_terminate.c \
+	$(MATLAB_DIR)/helperPolyphaseCorrelator.c \
+	$(MATLAB_DIR)/minOrMax.c \
+	$(MATLAB_DIR)/pskdemod.c \
+	$(MATLAB_DIR)/rtGetInf.c \
+	$(MATLAB_DIR)/rtGetNaN.c \
+	$(MATLAB_DIR)/rt_nonfinite.c \
+	$(MATLAB_DIR)/sign.c
+
+# Executables
+TARGETS = \
+	$(BUILD_DIR)/dec406_hex \
+	$(BUILD_DIR)/dec406_audio \
+	$(BUILD_DIR)/dec406_iq \
+	$(BUILD_DIR)/dec406_dsss_test \
+	$(BUILD_DIR)/dec406_scan \
+	$(BUILD_DIR)/generate_2g_hex \
+	$(BUILD_DIR)/reset_usb
+
+.PHONY: all clean check_deps help
+
+all: check_deps $(TARGETS)
+
+# Check dependencies
+check_deps:
+	@echo "Checking dependencies..."
+	@which $(CC) > /dev/null || (echo "ERROR: gcc not found" && exit 1)
+	@echo "All basic dependencies OK"
+	@pkg-config --exists fftw3f 2>/dev/null || echo "WARNING: libfftw3f-dev not installed. DSSS programs will fail to link."
+
+# ============================================================================
+# FGB (1G) BPSK Programs
+# ============================================================================
+
+# dec406_hex - Decode from hex string
+$(BUILD_DIR)/dec406_hex: $(SRC_DIR)/dec406_hex.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# dec406_audio - Decode from audio (WAV file or stdin)
+$(BUILD_DIR)/dec406_audio: $(SRC_DIR)/main_audio.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# ============================================================================
+# SGB (2G) DSSS/OQPSK Programs
+# ============================================================================
+
+# Compile MATLAB Coder object files
+$(BUILD_DIR)/matlab_%.o: $(MATLAB_DIR)/%.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -c $< -o $@
+
+# Pure-C DSSS demodulator sources (replaces MATLAB Coder wrapper)
+DSSS_SRCS = \
+	$(SRC_DIR)/dsss_demod.c \
+	$(SRC_DIR)/rrc_filter.c \
+	$(SRC_DIR)/symbol_sync.c \
+	$(SRC_DIR)/costas4.c \
+	$(SRC_DIR)/despread.c \
+	$(SRC_DIR)/freq_acq.c \
+
+# dec406_iq - Decode 2G from IQ file (pure-C DSSS chain)
+$(BUILD_DIR)/dec406_iq: $(SRC_DIR)/main_iq.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# dec406_dsss_test - Test DSSS demodulator
+$(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# ============================================================================
+# Real-time scanner (unified FGB + SGB)
+# ============================================================================
+
+# dec406_scan - Real-time band scanner (rtl_sdr -> detect/classify -> decode)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr
+	@echo "Built: $@"
+
+# ============================================================================
+# Utility Programs
+# ============================================================================
+
+# generate_2g_hex - Generate 2G test frame in hex
+$(BUILD_DIR)/generate_2g_hex: $(UTILS_DIR)/generate_2g_hex.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# reset_usb - USB device reset utility (for scan406.pl)
+$(BUILD_DIR)/reset_usb: $(UTILS_DIR)/reset_usb.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -o $@ $^
+	@echo "Built: $@"
+
+# ============================================================================
+# Maintenance
+# ============================================================================
+
+clean:
+	rm -rf $(BUILD_DIR)/*
+	@echo "Cleaned build artifacts"
+
+# Install dependencies (Debian/Ubuntu)
+install-deps:
+	@echo "Installing dependencies..."
+	sudo apt-get update
+	sudo apt-get install -y build-essential libfftw3-dev pkg-config
+	@echo "Dependencies installed"
+
+# Help
+help:
+	@echo "COSPAS-SARSAT 406 MHz Decoder Makefile"
+	@echo "======================================="
+	@echo ""
+	@echo "Targets:"
+	@echo "  all              - Build all executables (default)"
+	@echo "  clean            - Remove build artifacts"
+	@echo "  check_deps       - Check if dependencies are installed"
+	@echo "  install-deps     - Install required dependencies (requires sudo)"
+	@echo "  help             - Show this help message"
+	@echo ""
+	@echo "Executables:"
+	@echo "  dec406_hex       - FGB decoder from hex string"
+	@echo "  dec406_audio     - FGB decoder from audio (WAV/stdin)"
+	@echo "  dec406_iq        - SGB decoder from IQ file (pure-C DSSS chain)"
+	@echo "  dec406_dsss_test - Test DSSS demodulator"
+	@echo "  dec406_scan      - Real-time FGB+SGB band scanner (rtl_sdr)"
+	@echo "  generate_2g_hex  - Generate 2G test frame"
+	@echo ""
+	@echo "Usage examples:"
+	@echo "  make                                    # Build all"
+	@echo "  make clean                              # Clean build"
+	@echo "  ./build/dec406_hex 1AD050B7D8A06F     # Decode hex FGB"
+	@echo "  ./build/dec406_audio capture.wav        # Decode WAV FGB"
+	@echo "  ./build/dec406_iq file.iq               # Decode SGB from IQ"
+	@echo "  ./build/generate_2g_hex                 # Generate 2G frame"
+	@echo ""

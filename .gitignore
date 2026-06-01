@@ -1,15 +1,26 @@
 # Binaires compilés
 dec406_iq
+dec406_audio
+dec406_hex
 resample_iq
 test_sample_rate
 dec406_main
 dec406
+generate_2g_*
+code
 *.o
 *.a
 
 # Fichiers de test IQ
 *.iq
 *.cfile
+
+# Documentation
+docs/*
+
+# Fichiers audio/données
+*.wav
+*.asc
 
 # Sorties de test
 demod_*.txt
@@ -35,3 +46,4 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+CLAUDE.md
