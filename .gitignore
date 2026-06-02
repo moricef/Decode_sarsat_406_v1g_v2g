@@ -31,6 +31,14 @@ demod_*.txt
 *.bak
 *~
 
+archive/*
+Fichiers_IQ/*
+logs/*
+test_matlab_coder/*
+tests/*
+utils/*
+tools/*
+
 # Analyses temporaires
 ANALYSE_*.md
 
