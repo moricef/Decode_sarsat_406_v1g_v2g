@@ -36,8 +36,8 @@
 #include <rtl-sdr.h>
 
 #define SAMP_RATE 2457600u
-#define RING_BITS 23
-#define RING_SAMPLES (1u << RING_BITS) /* ~3.4 s at 2.4576 Msps */
+#define RING_BITS 24
+#define RING_SAMPLES (1u << RING_BITS) /* ~6.8 s at 2.4576 Msps */
 #define RING_MASK (RING_SAMPLES - 1u)
 #define RING_BYTES (RING_SAMPLES * 2u)
 #define CAP_CHUNK_BYTES (1u << 17) /* 128 KB capture reads */
@@ -309,7 +309,12 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
      * TAC 65535), or any corruption — is silenced. */
     int is_real_distress =
         (body && strstr(body, "Test Protocol: Normal Operation") != NULL);
-    if (is_real_distress && scan_alert_freq_authorised(freq_mhz)) {
+    /* Repetition gate (same as FGB): require a second sighting of the
+     * same Hex ID within 3 min before mailing. */
+    const char *hex_id = scan_alert_extract_hex_id(body);
+    int is_repeat = scan_alert_is_repeat(hex_id);
+    if (is_real_distress && is_repeat &&
+        scan_alert_freq_authorised(freq_mhz)) {
       scan_alert_send("SGB", freq_mhz, snr_db, bits,
                       DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, body);
     }
@@ -365,7 +370,25 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
   if (rc == 0) {
     char *body = capture_decode(decode_1g, bits, FGB_LONG_BITS);
     double freq_mhz = (g_center_hz + offset_hz) / 1e6;
-    if (body && scan_alert_freq_authorised(freq_mhz)) {
+    /* Filter A — orbitography beacons (Cospas-Sarsat ground reference
+     * stations, not distress). decode_1g prints "Identification:
+     * Orbitography" for them. They emit continuously, would otherwise
+     * spam every cycle. */
+    int is_orbitography =
+        (body && strstr(body, "Identification: Orbitography") != NULL);
+    /* Filter B — repetition gate. Real distress repeats every ~50 s;
+     * one-shot bench tests fire one burst then stop. Require a second
+     * sighting of the same Hex ID within 3 min before mailing. */
+    const char *hex_id = scan_alert_extract_hex_id(body);
+    int is_repeat = scan_alert_is_repeat(hex_id);
+    /* Filter C — unprogrammed identification. decode_1g prints
+     * "ID-NOT-AVAIL" when the beacon serial/identifier is all-zero,
+     * which means a factory-fresh unit being bench-tested (e.g. the
+     * Airbus ELT-DT bench at Toulouse Blagnac on channel D). A real
+     * distress beacon has a configured identity. */
+    int is_id_not_avail = (body && strstr(body, "ID-NOT-AVAIL") != NULL);
+    if (body && !is_orbitography && !is_id_not_avail && is_repeat &&
+        scan_alert_freq_authorised(freq_mhz)) {
       scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
     }
     free(body);

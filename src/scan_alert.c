@@ -75,6 +75,66 @@ int scan_alert_load_config(const char *path) {
     return 0;
 }
 
+const char *scan_alert_extract_hex_id(const char *body) {
+    if (!body) return NULL;
+    const char *p = strstr(body, "Hex ID:");
+    if (!p) return NULL;
+    p += 7;  /* strlen("Hex ID:") */
+    while (*p == ' ' || *p == '\t') p++;
+    static char id[64];
+    size_t n = 0;
+    while (n < sizeof(id) - 1 && *p && *p != '\n' && *p != '\r' && *p != ' ') {
+        id[n++] = *p++;
+    }
+    id[n] = '\0';
+    return n > 0 ? id : NULL;
+}
+
+/* Repetition tracker. Real distress beacons repeat every ~50 s for
+ * hours; bench tests and one-shot transmissions don't. Confirming a
+ * second sighting of the same Hex ID within REPEAT_WINDOW_SEC
+ * filters out single-burst false positives (e.g. Airbus ground tests
+ * on channel B observed at firmin). */
+#define REPEAT_MAX_SEEN     64
+#define REPEAT_WINDOW_SEC   180   /* 3 minutes */
+
+static struct {
+    char   hex_id[64];
+    time_t last_seen;
+} seen[REPEAT_MAX_SEEN];
+static int seen_n = 0;
+
+int scan_alert_is_repeat(const char *hex_id) {
+    if (!hex_id || !*hex_id) return 0;
+    time_t now = time(NULL);
+
+    for (int i = 0; i < seen_n; i++) {
+        if (strcmp(seen[i].hex_id, hex_id) == 0) {
+            int delta = (int)(now - seen[i].last_seen);
+            seen[i].last_seen = now;
+            return (delta <= REPEAT_WINDOW_SEC) ? 1 : 0;
+        }
+    }
+
+    /* New entry. Evict the oldest if the table is full. */
+    int slot;
+    if (seen_n < REPEAT_MAX_SEEN) {
+        slot = seen_n++;
+    } else {
+        slot = 0;
+        time_t oldest = seen[0].last_seen;
+        for (int i = 1; i < REPEAT_MAX_SEEN; i++) {
+            if (seen[i].last_seen < oldest) {
+                oldest = seen[i].last_seen;
+                slot = i;
+            }
+        }
+    }
+    snprintf(seen[slot].hex_id, sizeof seen[slot].hex_id, "%s", hex_id);
+    seen[slot].last_seen = now;
+    return 0;
+}
+
 int scan_alert_freq_authorised(double freq_mhz) {
     for (size_t i = 0; i < N_AUTH_CHAN; i++) {
         double c = authorised_channels[i];

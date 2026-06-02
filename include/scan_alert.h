@@ -37,4 +37,17 @@ int scan_alert_send(const char *type, double freq_mhz, double snr_db,
                     const uint8_t *bits, size_t n_bits,
                     const char *body_text);
 
+/* Extract the Hex ID from a decode block (matches the "Hex ID:" line
+ * printed by dec406_v1g/dec406_v2g). Returns a pointer into a static
+ * buffer (overwritten on next call), or NULL if no Hex ID line is
+ * found. */
+const char *scan_alert_extract_hex_id(const char *body);
+
+/* Repetition tracker: returns 1 if the given Hex ID was already seen
+ * within the last REPEAT_WINDOW_SEC seconds (confirmed repetition,
+ * caller should send the alert), 0 otherwise (first sighting or stale
+ * entry — record and stay silent). Discriminates real beacons (which
+ * repeat every ~50 s) from one-shot bench tests. */
+int scan_alert_is_repeat(const char *hex_id);
+
 #endif /* SCAN_ALERT_H */
