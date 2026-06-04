@@ -1,57 +1,69 @@
-# Binaires compilés
+# Build artifacts
+build/
+*.o
+*.a
 dec406_iq
 dec406_audio
 dec406_hex
-resample_iq
-test_sample_rate
+dec406_scan
+dec406_dsss_test
 dec406_main
 dec406
-generate_2g_*
+generate_2g_hex
+reset_usb
 code
-*.o
-*.a
 
-# Fichiers de test IQ
+# IQ recordings and audio (never committed)
 *.iq
 *.cfile
-
-# Documentation
-docs/*
-
-# Fichiers audio/données
 *.wav
-*.asc
+*.sigmf-data
+*.sigmf-meta
+*.bin
 
-# Sorties de test
-demod_*.txt
+# Logs and runtime data
 *.log
+demod_*.txt
+logs/
+data/
 
-# Fichiers temporaires
-*.tmp
-*.bak
-*~
+# Diagnostic CSV dumps emitted at runtime by the demod chain
+freq_acq_*.csv
+despread_bits.csv
+fgb_*bits.csv
+c_tracking_epl.csv
+chips_*.bin
+log_power.csv
 
+# Bulk-ignored directories: historical/private content not part of the
+# distributable codebase (already-tracked files in these dirs remain
+# tracked; this only stops new files from being accidentally added).
 archive/*
 Fichiers_IQ/*
-logs/*
 test_matlab_coder/*
 tests/*
 utils/*
 tools/*
+docs/*
 
-# Analyses temporaires
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Ad-hoc Markdown notes
 ANALYSE_*.md
 
-# Node modules (si utilisé)
-node_modules/
-
-# IDE
+# Editors / IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Project-internal Claude assistant memory (per-developer, do not commit)
 CLAUDE.md

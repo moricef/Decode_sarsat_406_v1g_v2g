@@ -13,22 +13,6 @@ INC_DIR = include
 BUILD_DIR = build
 UTILS_DIR = utils
 
-# MATLAB Coder generated files (for DSSS/SGB)
-MATLAB_DIR = test_matlab_coder
-MATLAB_SRCS = \
-	$(MATLAB_DIR)/dsss_receiver.c \
-	$(MATLAB_DIR)/dsss_receiver_emxutil.c \
-	$(MATLAB_DIR)/dsss_receiver_initialize.c \
-	$(MATLAB_DIR)/dsss_receiver_rtwutil.c \
-	$(MATLAB_DIR)/dsss_receiver_terminate.c \
-	$(MATLAB_DIR)/helperPolyphaseCorrelator.c \
-	$(MATLAB_DIR)/minOrMax.c \
-	$(MATLAB_DIR)/pskdemod.c \
-	$(MATLAB_DIR)/rtGetInf.c \
-	$(MATLAB_DIR)/rtGetNaN.c \
-	$(MATLAB_DIR)/rt_nonfinite.c \
-	$(MATLAB_DIR)/sign.c
-
 # Executables
 TARGETS = \
 	$(BUILD_DIR)/dec406_hex \
@@ -70,12 +54,7 @@ $(BUILD_DIR)/dec406_audio: $(SRC_DIR)/main_audio.c $(SRC_DIR)/audio_capture.c $(
 # SGB (2G) DSSS/OQPSK Programs
 # ============================================================================
 
-# Compile MATLAB Coder object files
-$(BUILD_DIR)/matlab_%.o: $(MATLAB_DIR)/%.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -fopenmp -I$(MATLAB_DIR) -c $< -o $@
-
-# Pure-C DSSS demodulator sources (replaces MATLAB Coder wrapper)
+# Pure-C DSSS demodulator sources
 DSSS_SRCS = \
 	$(SRC_DIR)/dsss_demod.c \
 	$(SRC_DIR)/rrc_filter.c \
