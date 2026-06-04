@@ -1,0 +1,11 @@
+# dec406_scan — email alert configuration template.
+# Copy this file to data/config_mail.txt and fill in the four values.
+# Lines starting with # and blank lines are ignored.
+#
+# Without this file the scanner runs normally; the startup banner
+# prints "alerts : disabled" and no email is sent.
+
+smtp_serveur=smtp.gmail.com:587
+utilisateur=your_address@gmail.com
+password=your_app_password
+destinataires=recipient1@example.org,recipient2@example.org

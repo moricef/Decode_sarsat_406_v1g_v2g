@@ -125,6 +125,16 @@ If a `data/config_mail.txt` is present, the scanner emails the decoded
 frame whenever a beacon decodes on a T.012 Table H.2 distress channel
 (B/C/D/F/G/J/K/N/O/R/S, ±2 kHz). The `sendemail` binary must be installed.
 
+To enable alerts, copy the template and fill in the four values:
+
+```bash
+cp data/config_mail.txt.example data/config_mail.txt
+$EDITOR data/config_mail.txt          # set your SMTP creds + recipients
+chmod 600 data/config_mail.txt        # contains an app password
+```
+
+Format (key=value, one per line):
+
 ```
 smtp_serveur=smtp.gmail.com:587
 utilisateur=user@example.org
@@ -132,9 +142,17 @@ password=app_password
 destinataires=a@b.com,c@d.fr
 ```
 
+Without that file the scanner runs normally; the banner prints
+`alerts : disabled` and no email is sent.
+
 Channel A (406.022 — orbitography/calibration) is excluded by design.
-SGB test transmissions (T.018 §3 bit 43 = 1, e.g. CNES test beacons on
-channel K) are filtered out — only operational SGB frames trigger.
+Additional silencing filters layered on the channel whitelist:
+- FGB beacons identified as Orbitography or with `ID-NOT-AVAIL`
+  (factory-fresh / bench tests) never trigger.
+- SGB test transmissions (T.018 §3 bit 43 = 1) never trigger.
+- A second sighting of the same Hex ID within 3 min is required
+  before mailing (filters one-shot bench-test bursts; a real distress
+  beacon repeats every ~50 s and is confirmed at the second burst).
 
 ---
 

@@ -25,7 +25,8 @@ code
 *.log
 demod_*.txt
 logs/
-data/
+data/*
+!data/config_mail.txt.example
 
 # Diagnostic CSV dumps emitted at runtime by the demod chain
 freq_acq_*.csv
