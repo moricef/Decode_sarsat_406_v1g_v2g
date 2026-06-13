@@ -22,8 +22,10 @@ beacons at 406 MHz.
   despread with per-bit Costas PLL → BCH. Multi-rotation BCH oracle tries
   the 4 Costas phases before giving up.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
-  decoder without FM-demod → audio detour. CW preamble detection, frame
-  sync, Manchester slicer, multi-offset FSYNC sweep, Costas loop, CRC.
+  decoder without FM-demod → audio detour. Dual-grid CW end detection,
+  multi-phase Costas search (4 initial phases × 13 offsets), Manchester
+  slicer, BCH1 brute-force error correction (t=3), CRC. 78 % decode rate
+  at 80 km relay.
 
 ### Real-time scanner
 `dec406_scan` ingests RTL-SDR samples directly via librtlsdr (synchronous

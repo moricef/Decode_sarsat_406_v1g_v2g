@@ -1,5 +1,39 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.6 - 2026-06-14 - FGB decode rate 78 %
+
+### FGB IQ demodulator improvements (`src/fgb_iq_demod.c`)
+
+**Dual-grid CW end detection** — `find_cw_end_cmplx()` now scans two
+interleaved grids offset by `half/2`. The all-1s preamble in biphase-L
+is uniquely vulnerable to half-bit misalignment: S1 and S2 each average
+a full ±1.1 cycle → cancel to 0 → detector misses the 15-bit preamble
+and triggers 17-18 bits late at FSYNC. Dual-grid eliminates 100 % of
+these garbage bursts (was 29 % of captures).
+
+**Multi-phase Costas search** — Try 4 initial phases {0°, 45°, 90°, 135°}
+for each bit0 offset candidate (13 offsets × 4 phases = 52 candidates).
+Selects best FSYNC score across all combinations.
+
+**BCH1 brute-force error correction** — `bch1_correct()` flips 1, 2, or 3
+bits in the BCH1 codeword (bits 24..105) and checks syndrome via
+`test_crc1()`. BCH(82,61) t=3 per T.001 specification. Applied before
+polarity fallback; polarity path also gets BCH correction.
+
+**Diagnostic instrumentation** — `dump_costas_diag()` emits per-burst CSV
+with cw_end, cw_mag, cw_expected, cw_thresh, and 4-phase preamble scores.
+`dump_bits()` now includes soft values. Controlled by `FGB_IQ_DIAG` env var.
+
+**Result at firmin relay (80 km)**: 45 % → 78 % FGB decode rate.
+
+### Scanner tuning (`src/main_scan.c`)
+
+- `BW_SPLIT_HZ` 50 kHz → 20 kHz: tighter FGB/SGB classification
+- `CYCLE_SAMPLES` 55 s → 600 s: reduces cycle boundaries that truncate
+  SGB bursts ('buffer too short') by a factor of 11
+
+---
+
 ## Version 10.2.5 - 2026-06-01 - Production scanner wiring
 
 Branche `feature/dsss-flat-chain`.

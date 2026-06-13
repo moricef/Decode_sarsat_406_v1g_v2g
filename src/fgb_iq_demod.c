@@ -39,6 +39,34 @@ static int crc_ok(const uint8_t *bits, int length) {
     return 1;
 }
 
+/* BCH1 brute-force correction: try flipping 1-3 bits in the BCH1
+ * codeword (bits 24..105) and check if syndrome clears.
+ * Returns number of corrected bits (0 = no correction needed/found). */
+static int bch1_correct(uint8_t *bits, int length) {
+    if (length < 106) return 0;
+    char s[200];
+    for (int i = 0; i < length; i++) s[i] = bits[i] ? '1' : '0';
+    s[length] = '\0';
+    if (!test_crc1(s)) return 0;
+
+    for (int a = 24; a < 106; a++) {
+        s[a] ^= 1;
+        if (!test_crc1(s)) { bits[a] ^= 1; return 1; }
+        for (int b = a + 1; b < 106; b++) {
+            s[b] ^= 1;
+            if (!test_crc1(s)) { bits[a] ^= 1; bits[b] ^= 1; return 2; }
+            for (int c = b + 1; c < 106; c++) {
+                s[c] ^= 1;
+                if (!test_crc1(s)) { bits[a] ^= 1; bits[b] ^= 1; bits[c] ^= 1; return 3; }
+                s[c] ^= 1;
+            }
+            s[b] ^= 1;
+        }
+        s[a] ^= 1;
+    }
+    return 0;
+}
+
 /* Manchester integrate-and-dump on complex IQ.
  * S1 = sum of first half, S2 = sum of second half.
  * For biphase-L T.001 (±1.1 rad): during data, |S1-S2| ≈ 2A·sin(1.1) ≈ large.
@@ -79,7 +107,9 @@ static double estimate_cw_freq(const float complex *iq, long cw_start,
  * Threshold = 0.25 × expected data level (estimated from CW amplitude). */
 static long find_cw_end_cmplx(const float complex *iq, long len,
                                int half, double bit_prd,
-                               long search_start, long search_end, int diag) {
+                               long search_start, long search_end, int diag,
+                               float *out_cw_mag, float *out_expected,
+                               float *out_thresh) {
     long n_bits = (long)((search_end - search_start) / bit_prd);
     if (n_bits < 20) return -1;
 
@@ -100,32 +130,47 @@ static long find_cw_end_cmplx(const float complex *iq, long len,
     float expected = 2.0f * cw_mag * (float)half * sinf(1.1f);
     float thresh = expected * 0.2f;
     if (thresh < 0.08f) thresh = 0.08f;
+    if (out_cw_mag) *out_cw_mag = cw_mag;
+    if (out_expected) *out_expected = expected;
+    if (out_thresh) *out_thresh = thresh;
 
     int sustain = 4;
-    int count = 0;
-    long edge = -1;
-    float prev_e = 0.0f;
-    for (long b = 0; b < n_bits; b++) {
-        long pos = search_start + (long)(b * bit_prd + 0.5);
-        if (pos + (int)(bit_prd + 0.5) > len) break;
-        float e = cabsf(manchester_symbol(iq, pos, half));
-        /* Average with previous bit to suppress half-bit oscillation */
-        float e_smooth = (b > 0) ? 0.5f * (e + prev_e) : e;
-        prev_e = e;
-        if (e_smooth > thresh) {
-            if (count == 0) edge = b;
-            count++;
-            if (count >= sustain) {
-                long result = search_start + (long)(edge * bit_prd + 0.5);
-                if (diag)
-                    DIAG("[fgb_iq] CW end at sample %ld "
-                            "(amp=%.3f expect=%.1f thresh=%.1f)\n",
-                            result, cw_mag, expected, thresh);
-                return result;
+    long best_result = -1;
+    int half_step = half / 2;
+    if (half_step < 1) half_step = 1;
+
+    for (int phase = 0; phase < 2; phase++) {
+        long offset = phase * half_step;
+        int count = 0;
+        long edge = -1;
+        float prev_e = 0.0f;
+        for (long b = 0; b < n_bits; b++) {
+            long pos = search_start + offset + (long)(b * bit_prd + 0.5);
+            if (pos + (int)(bit_prd + 0.5) > len) break;
+            float e = cabsf(manchester_symbol(iq, pos, half));
+            float e_smooth = (b > 0) ? 0.5f * (e + prev_e) : e;
+            prev_e = e;
+            if (e_smooth > thresh) {
+                if (count == 0) edge = b;
+                count++;
+                if (count >= sustain) {
+                    long result = search_start + offset + (long)(edge * bit_prd + 0.5);
+                    if (best_result < 0 || result < best_result)
+                        best_result = result;
+                    break;
+                }
+            } else {
+                count = 0;
             }
-        } else {
-            count = 0;
         }
+    }
+
+    if (best_result >= 0) {
+        if (diag)
+            DIAG("[fgb_iq] CW end at sample %ld "
+                    "(amp=%.3f expect=%.1f thresh=%.1f)\n",
+                    best_result, cw_mag, expected, thresh);
+        return best_result;
     }
     if (diag) DIAG("[fgb_iq] CW end not found (amp=%.3f expect=%.1f thresh=%.1f)\n",
                       cw_mag, expected, thresh);
@@ -193,16 +238,79 @@ static float costas_step(float complex sym, float *phase, float *integrator,
     return crealf(rotated);
 }
 
-static void dump_bits(int id, long anchor, int state, const uint8_t *b) {
+static void dump_bits(int id, long anchor, int state, const uint8_t *b,
+                      const float *soft) {
     static FILE *csv = NULL;
     if (!getenv("FGB_IQ_DIAG")) return;
     if (!csv) {
         csv = fopen("fgb_iq_bits.csv", "w");
-        if (csv) fprintf(csv, "burst,anchor,crc_state,bits\n");
+        if (csv) fprintf(csv, "burst,anchor,crc_state,bits,soft\n");
     }
     if (!csv) return;
     fprintf(csv, "%d,%ld,%d,", id, anchor, state);
     for (int i = 0; i < FGB_LONG_BITS; i++) fputc(b[i] ? '1' : '0', csv);
+    if (soft) {
+        fputc(',', csv);
+        for (int i = 0; i < FGB_LONG_BITS; i++)
+            fprintf(csv, "%s%.3f", i ? " " : "", soft[i]);
+    }
+    fputc('\n', csv);
+    fflush(csv);
+}
+
+static void dump_costas_diag(int id, double fq_off, long bit0, int fs_score,
+                             long cw_end_raw, float cw_mag, float cw_expected,
+                             float cw_thresh,
+                             const float complex *wiq, int half_bit,
+                             double bit_prd, long wlen) {
+    static FILE *csv = NULL;
+    if (!getenv("FGB_IQ_DIAG")) return;
+    if (!csv) {
+        csv = fopen("fgb_costas_diag.csv", "w");
+        if (csv) fprintf(csv, "burst,fq_off,bit0,fs_score,"
+                         "cw_end,cw_mag,cw_expected,cw_thresh,"
+                         "ph0_pream,ph0_sat,ph0_phase_end,"
+                         "ph45_pream,ph45_sat,ph45_phase_end,"
+                         "ph90_pream,ph90_sat,ph90_phase_end,"
+                         "ph135_pream,ph135_sat,ph135_phase_end\n");
+    }
+    if (!csv) return;
+
+    float init_phases[4] = {0.0f, 0.785398f, 1.570796f, 2.356194f};
+    int   pream[4];
+    int   sat_count[4];
+    float phase_end[4];
+
+    for (int p = 0; p < 4; p++) {
+        float phase = init_phases[p], integrator = 0.0f;
+        int sat = 0;
+        for (int b = 0; b < FGB_LONG_BITS; b++) {
+            long pos = bit0 + (long)(b * bit_prd + 0.5);
+            if (pos + half_bit * 2 > wlen) break;
+            float complex sym = manchester_symbol(wiq, pos, half_bit);
+            float old_int = integrator;
+            costas_step(sym, &phase, &integrator, 0.10f, 0.0005f);
+            if (fabsf(old_int) >= 0.0499f && fabsf(integrator) >= 0.0499f)
+                sat++;
+        }
+        sat_count[p] = sat;
+        phase_end[p] = phase;
+        int ones = 0;
+        phase = init_phases[p]; integrator = 0.0f;
+        for (int b = 0; b < PREAMBLE_BITS; b++) {
+            long pos = bit0 + (long)(b * bit_prd + 0.5);
+            if (pos + half_bit * 2 > wlen) break;
+            float complex sym = manchester_symbol(wiq, pos, half_bit);
+            float s = costas_step(sym, &phase, &integrator, 0.10f, 0.0005f);
+            if (s > 0.0f) ones++;
+        }
+        pream[p] = ones;
+    }
+
+    fprintf(csv, "%d,%.1f,%ld,%d,%ld,%.4f,%.4f,%.4f", id, fq_off, bit0, fs_score,
+            cw_end_raw, cw_mag, cw_expected, cw_thresh);
+    for (int p = 0; p < 4; p++)
+        fprintf(csv, ",%d,%d,%.3f", pream[p], sat_count[p], phase_end[p]);
     fputc('\n', csv);
     fflush(csv);
 }
@@ -358,8 +466,10 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long cw_search_start = (burst_start - w0) + cw_samp / 4;
     long cw_search_end   = (burst_start - w0) + cw_samp + (long)(30 * bit_prd);
     if (cw_search_end > wlen) cw_search_end = wlen;
+    float cw_mag = 0.0f, cw_expected = 0.0f, cw_thresh = 0.0f;
     long cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
-                                     cw_search_start, cw_search_end, diag);
+                                     cw_search_start, cw_search_end, diag,
+                                     &cw_mag, &cw_expected, &cw_thresh);
     if (cw_end < 0) {
         DIAG("[fgb_iq] burst=%d CW end not found (amp=%.3f fq=%.1f n=%zu sr=%d bs=%ld)\n",
                 burst_id, cabsf(wiq[(burst_start - w0) + cw_samp/2]),
@@ -382,54 +492,63 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     int  best_flip = 0;
     float best_soft[FGB_LONG_BITS];
 
+    float try_phases[4] = {0.0f, 0.785398f, 1.570796f, 2.356194f};
+    float best_init_phase = 0.785398f;
+
     for (int try_off = -3 * half_bit; try_off <= 3 * half_bit; try_off += half_bit / 2) {
         long try_bit0 = cw_end + try_off;
         if (try_bit0 < 0 || try_bit0 + (long)(FGB_LONG_BITS * bit_prd) + half_bit >= wlen)
             continue;
 
-        float phase = 0.785398f, integrator = 0.0f;
-        float costas_alpha = 0.10f, costas_beta = 0.0005f;
-        uint8_t try_bits[FGB_LONG_BITS];
-        for (int b = 0; b < FGB_LONG_BITS; b++) {
-            long pos = try_bit0 + (long)(b * bit_prd + 0.5);
-            float complex sym = manchester_symbol(wiq, pos, half_bit);
-            float s = costas_step(sym, &phase, &integrator, costas_alpha, costas_beta);
-            try_bits[b] = (s > 0.0f) ? 1 : 0;
-        }
-
-        /* Score frame sync (try both polarities) */
-        int mn = 0, ms = 0, mni = 0, msi = 0;
-        for (int i = 0; i < FSYNC_LEN; i++) {
-            if (try_bits[15+i] == FSYNC_NORMAL[i])        mn++;
-            if (try_bits[15+i] == FSYNC_SELFTEST[i])      ms++;
-            if ((try_bits[15+i]^1) == FSYNC_NORMAL[i])    mni++;
-            if ((try_bits[15+i]^1) == FSYNC_SELFTEST[i])  msi++;
-        }
-        int score = mn, flip = 0;
-        if (ms > score) score = ms;
-        if (mni > score) { score = mni; flip = 1; }
-        if (msi > score) { score = msi; flip = 1; }
-
-        if (diag)
-            DIAG("[fgb_iq] off=%+3d bit0=%ld fs=%d/%d\n",
-                    try_off, try_bit0 + w0, score, FSYNC_LEN);
-
-        if (score > best_fs_score) {
-            best_fs_score = score;
-            best_bit0 = try_bit0;
-            best_flip = flip;
-            /* Re-decode with final bit0 for soft values */
-            phase = 0.785398f; integrator = 0.0f;
+        for (int ph = 0; ph < 4; ph++) {
+            float phase = try_phases[ph], integrator = 0.0f;
+            float costas_alpha = 0.10f, costas_beta = 0.0005f;
+            uint8_t try_bits[FGB_LONG_BITS];
             for (int b = 0; b < FGB_LONG_BITS; b++) {
-                long pos = best_bit0 + (long)(b * bit_prd + 0.5);
+                long pos = try_bit0 + (long)(b * bit_prd + 0.5);
                 float complex sym = manchester_symbol(wiq, pos, half_bit);
-                best_soft[b] = costas_step(sym, &phase, &integrator, costas_alpha, costas_beta);
+                float s = costas_step(sym, &phase, &integrator, costas_alpha, costas_beta);
+                try_bits[b] = (s > 0.0f) ? 1 : 0;
+            }
+
+            /* Score frame sync (try both polarities) */
+            int mn = 0, ms = 0, mni = 0, msi = 0;
+            for (int i = 0; i < FSYNC_LEN; i++) {
+                if (try_bits[15+i] == FSYNC_NORMAL[i])        mn++;
+                if (try_bits[15+i] == FSYNC_SELFTEST[i])      ms++;
+                if ((try_bits[15+i]^1) == FSYNC_NORMAL[i])    mni++;
+                if ((try_bits[15+i]^1) == FSYNC_SELFTEST[i])  msi++;
+            }
+            int score = mn, flip = 0;
+            if (ms > score) score = ms;
+            if (mni > score) { score = mni; flip = 1; }
+            if (msi > score) { score = msi; flip = 1; }
+
+            if (diag && score > best_fs_score)
+                DIAG("[fgb_iq] off=%+3d ph=%d° bit0=%ld fs=%d/%d\n",
+                        try_off, ph * 45, try_bit0 + w0, score, FSYNC_LEN);
+
+            if (score > best_fs_score) {
+                best_fs_score = score;
+                best_bit0 = try_bit0;
+                best_flip = flip;
+                best_init_phase = try_phases[ph];
+                phase = try_phases[ph]; integrator = 0.0f;
+                for (int b = 0; b < FGB_LONG_BITS; b++) {
+                    long pos = best_bit0 + (long)(b * bit_prd + 0.5);
+                    float complex sym = manchester_symbol(wiq, pos, half_bit);
+                    best_soft[b] = costas_step(sym, &phase, &integrator, costas_alpha, costas_beta);
+                }
             }
         }
     }
 
     long bit0 = best_bit0;
     int need_flip = best_flip;
+
+    dump_costas_diag(burst_id, fq_off, bit0, best_fs_score,
+                     cw_end, cw_mag, cw_expected, cw_thresh,
+                     wiq, half_bit, bit_prd, wlen);
 
     if (best_fs_score < FSYNC_THRESHOLD) {
         DIAG("[fgb_iq] burst=%d FSYNC FAIL best=%d/%d\n",
@@ -447,27 +566,40 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     /* Step 5: Validate preamble and CRC */
     int pream_ones = 0;
     for (int i = 0; i < PREAMBLE_BITS; i++) pream_ones += out_bits[i];
-    DIAG("[fgb_iq] burst=%d preamble=%d/%d fsync=%d/%d %s\n",
+    DIAG("[fgb_iq] burst=%d preamble=%d/%d fsync=%d/%d ph=%.0f° %s\n",
             burst_id, pream_ones, PREAMBLE_BITS, best_fs_score, FSYNC_LEN,
+            (double)(best_init_phase * 180.0f / (float)M_PI),
             need_flip ? "(flipped)" : "");
 
     int final_rc = -2;
     if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
         DIAG("[fgb_iq] burst=%d CRC OK\n", burst_id);
-        dump_bits(burst_id, bit0 + w0, 1, out_bits);
+        dump_bits(burst_id, bit0 + w0, 1, out_bits, best_soft);
         final_rc = 0;
     } else {
-        /* Try opposite polarity as fallback */
-        for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-        if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-            DIAG("[fgb_iq] burst=%d CRC OK (polarity fallback)\n",
-                    burst_id);
-            dump_bits(burst_id, bit0 + w0, 2, out_bits);
+        int fixed = bch1_correct(out_bits, FGB_LONG_BITS);
+        if (fixed > 0 && (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS))) {
+            DIAG("[fgb_iq] burst=%d CRC OK (BCH1 corrected %d bit%s)\n",
+                    burst_id, fixed, fixed > 1 ? "s" : "");
+            dump_bits(burst_id, bit0 + w0, 1, out_bits, best_soft);
             final_rc = 0;
         } else {
+            if (fixed > 0)
+                for (int i = 24; i < 106; i++) out_bits[i] = (best_soft[i] > 0.0f) ? 1 : 0;
             for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-            DIAG("[fgb_iq] burst=%d CRC FAIL\n", burst_id);
-            dump_bits(burst_id, bit0 + w0, 0, out_bits);
+            fixed = bch1_correct(out_bits, FGB_LONG_BITS);
+            if ((fixed >= 0) && (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS))) {
+                DIAG("[fgb_iq] burst=%d CRC OK (polarity%s)\n",
+                        burst_id, fixed > 0 ? " + BCH1 corrected" : " fallback");
+                dump_bits(burst_id, bit0 + w0, 2, out_bits, best_soft);
+                final_rc = 0;
+            } else {
+                for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
+                if (fixed > 0)
+                    for (int i = 24; i < 106; i++) out_bits[i] = (best_soft[i] > 0.0f) ? 1 : 0;
+                DIAG("[fgb_iq] burst=%d CRC FAIL\n", burst_id);
+                dump_bits(burst_id, bit0 + w0, 0, out_bits, best_soft);
+            }
         }
     }
     free(wiq);

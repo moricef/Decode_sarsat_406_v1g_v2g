@@ -57,7 +57,7 @@
 #define BURST_AVG 24     /* spectra averaged to measure a finished burst */
 #define MIN_BURST_SAMP ((uint64_t)(0.20 * SAMP_RATE))
 #define MAX_BURST_SAMP ((uint64_t)(1.50 * SAMP_RATE))
-#define BW_SPLIT_HZ 50000.0 /* FGB / SGB split (-10 dB bandwidth) */
+#define BW_SPLIT_HZ 20000.0 /* FGB / SGB split (-10 dB bandwidth) */
 #define BURST_BW_MAX 150000.0 /* reject bursts wider than any real beacon */
 #define HEARTBEAT_S 15
 #define FGB_DECIM 128                    /* IQ decimation, FGB path */
@@ -76,11 +76,13 @@ static uint64_t g_wr = 0; /* total samples written */
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t data_avail = PTHREAD_COND_INITIALIZER;
 static rtlsdr_dev_t *rtl_dev = NULL;
-/* Samples per acquisition cycle, matching the historical
- *   rtl_sdr -n (SAMP_RATE * 55)
- * pattern: 55 s of capture, then close/reset/reopen the dongle to clear
- * accumulated libusb state. Cycle ends naturally — no kill/timeout. */
-#define CYCLE_SAMPLES ((uint64_t)SAMP_RATE * 55u)
+/* Samples per acquisition cycle. The historical 55 s restart was a
+ * workaround for rtl_sdr's async-mode libusb state corruption; with
+ * synchronous librtlsdr reads that failure mode is gone, so the cycle
+ * only serves as a periodic dongle refresh. 10 min instead of 55 s
+ * cuts the number of cycle boundaries (each one a window where an
+ * SGB burst gets truncated → 'buffer too short') by a factor of 11. */
+#define CYCLE_SAMPLES ((uint64_t)SAMP_RATE * 600u)
 static unsigned long overruns = 0;
 static double g_center_hz = 0.0;
 static double g_f1 = 0.0, g_f2 = 0.0; /* requested band edges (Hz) */
