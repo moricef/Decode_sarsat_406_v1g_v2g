@@ -85,6 +85,12 @@ $(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr
 	@echo "Built: $@"
 
+# dec406_scan_airspy - Real-time band scanner using Airspy Mini
+$(BUILD_DIR)/dec406_scan_airspy: $(SRC_DIR)/main_scan_airspy.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread -lairspy
+	@echo "Built: $@"
+
 # ============================================================================
 # Utility Programs
 # ============================================================================
