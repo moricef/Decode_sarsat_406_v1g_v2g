@@ -115,21 +115,27 @@ static int berlekamp_massey(const uint8_t syn[12], uint8_t lam[13])
     return L;
 }
 
-/* Chien search: find error positions alpha^-i in 0..249 */
-static int chien_search(const uint8_t lam[13], int L, int pos[6])
+/* Chien search over full GF(2^8): shortened BCH(250,202) from BCH(255,207)
+ * requires searching all 255 positions. Roots at i>=250 are in the virtual
+ * padding and don't produce bit flips, but must be counted for nroots==L. */
+static int chien_search(const uint8_t lam[13], int L, int pos[6],
+                        int *n_valid_out)
 {
-    int cnt = 0;
-    for (int i = 0; i < 250 && cnt < 6; i++) {
+    int cnt = 0, valid = 0;
+    for (int i = 0; i < 255; i++) {
         uint8_t sum = 0;
         for (int j = 0; j <= L; j++)
             if (lam[j])
                 sum ^= gf_mul(lam[j], gf_exp[((255 - i) * j) % 255]);
         if (sum == 0) {
-            int msb = 249 - i;
-            if (msb >= 0 && msb < 250)
-                pos[cnt++] = msb;
+            int bit_pos = 249 - i;
+            if (bit_pos >= 0 && bit_pos < 250 && valid < 6)
+                pos[valid++] = bit_pos;
+            cnt++;
+            if (cnt > 6) break;
         }
     }
+    if (n_valid_out) *n_valid_out = valid;
     return cnt;
 }
 
@@ -160,21 +166,21 @@ int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
         uint8_t lam[13] = {0};
         int L = berlekamp_massey(syn, lam);
         if (L >= 1 && L <= 6) {
-            int pos[6];
-            int npos = chien_search(lam, L, pos);
-            if (npos == L) {
-                for (int i = 0; i < npos; i++)
+            int pos[6], n_valid = 0;
+            int nroots = chien_search(lam, L, pos, &n_valid);
+            if (nroots == L) {
+                for (int i = 0; i < n_valid; i++)
                     cw[pos[i]] ^= 1;
-                /* re-verify */
                 uint8_t syn2[12];
                 compute_syndromes(cw, syn2);
                 int still_errors = 0;
                 for (int i = 0; i < 12; i++) if (syn2[i]) { still_errors = 1; break; }
                 if (still_errors) {
-                    memcpy(cw, msg, 250);  /* miscorrect — restore */
+                    memcpy(cw, msg, 250);
                     rc = -1;
                 } else {
-                    DIAG("BCH: %d errors corrected\n", L);
+                    DIAG("BCH: %d errors corrected (%d in codeword, %d in padding)\n",
+                         L, n_valid, L - n_valid);
                 }
             } else {
                 rc = -1;
@@ -183,10 +189,52 @@ int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
             rc = -1;
         }
     }
-    /* else: no errors, nothing to print */
 
     memcpy(out, cw, 202);
     return rc;
+}
+
+int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out, int *n_errors)
+{
+    gf_init();
+
+    uint8_t cw[250];
+    memcpy(cw, msg, 250);
+
+    uint8_t syn[12];
+    compute_syndromes(cw, syn);
+
+    int has_errors = 0;
+    for (int i = 0; i < 12; i++) if (syn[i]) { has_errors = 1; break; }
+
+    if (!has_errors) {
+        memcpy(out, cw, 202);
+        if (n_errors) *n_errors = 0;
+        return 0;
+    }
+
+    uint8_t lam[13] = {0};
+    int L = berlekamp_massey(syn, lam);
+    if (L >= 1 && L <= 6) {
+        int pos[6], n_valid = 0;
+        int nroots = chien_search(lam, L, pos, &n_valid);
+        if (nroots == L) {
+            for (int i = 0; i < n_valid; i++)
+                cw[pos[i]] ^= 1;
+            uint8_t syn2[12];
+            compute_syndromes(cw, syn2);
+            int still = 0;
+            for (int i = 0; i < 12; i++) if (syn2[i]) { still = 1; break; }
+            if (!still) {
+                memcpy(out, cw, 202);
+                if (n_errors) *n_errors = L;
+                return 0;
+            }
+        }
+    }
+    memcpy(out, cw, 202);
+    if (n_errors) *n_errors = (L >= 1) ? L : -1;
+    return -1;
 }
 
 // ===================================================
@@ -780,7 +828,7 @@ void print_beacon_info(const BeaconInfo *info) {
         format_coordinates(info->lat, info->lon, coord_buf, sizeof(coord_buf));
         printf("\n Position: %s", coord_buf);
         printf("\n Coordinates: %.5f°N, %.5f°E", info->lat, info->lon);
-        printf("\n Resolution: ~3.4 meters maximum");
+        printf("\n Resolution: ~3.4 meters maximum\n");
         open_osm_map(info->lat, info->lon);
     } else {
         printf("\n Status: No position data available");

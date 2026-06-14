@@ -106,6 +106,8 @@ int despread_sync(const float complex *samples, int num_chips,
 
     float best_i_abs = -1e30f, best_i_raw = 0.0f;
     int   best_off_i = 0, best_phase = 0;
+    float second_i_abs = -1e30f, second_i_raw = 0.0f;
+    int   second_off_i = 0;
     float sum_i = 0.0f, sum2_i = 0.0f;
     int   cnt_i = 0;
 
@@ -123,10 +125,20 @@ int despread_sync(const float complex *samples, int num_chips,
             sum2_i += corr * corr;
             cnt_i++;
             if (corr > best_i_abs) {
+                if (abs(off - best_off_i) >= DESPREAD_CHIPS_PER_BIT) {
+                    second_i_abs = best_i_abs;
+                    second_i_raw = best_i_raw;
+                    second_off_i = best_off_i;
+                }
                 best_i_abs = corr;
                 best_i_raw = corr;
                 best_off_i = off;
                 best_phase = p;
+            } else if (corr > second_i_abs &&
+                       abs(off - best_off_i) >= DESPREAD_CHIPS_PER_BIT) {
+                second_i_abs = corr;
+                second_i_raw = corr;
+                second_off_i = off;
             }
         }
     }
@@ -200,18 +212,34 @@ int despread_sync(const float complex *samples, int num_chips,
         return -1;
     }
 
+    float z2_val = 0.0f;
+    if (cnt_i > 50 && second_i_raw > 0.0f) {
+        float mean_i = (sum_i - best_i_raw) / (float)(cnt_i - 1);
+        float var_i = (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
+                      - mean_i * mean_i;
+        if (var_i < 1e-10f) var_i = 1e-10f;
+        z2_val = (second_i_raw - mean_i) / sqrtf(var_i);
+    }
+
     sync->off_i   = best_off_i;
     sync->off_q   = best_off_q;
     sync->phase   = best_phase;
     sync->z_comb  = z_comb;
     sync->score_i = (z_i < 10000.0f) ? (int)(z_i * 10.0f) : 0x7FFF;
     sync->score_q = (z_i < 10000.0f) ? (int)(z_q * 10.0f) : 0x7FFF;
+    sync->z1      = z_i;
+    sync->z2      = z2_val;
+    sync->lag1    = best_off_i;
+    sync->lag2    = second_off_i;
 
+    float ratio = (z2_val > 0.1f) ? z_i / z2_val : 999.0f;
     DIAG("[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
-         "combined=%.1f, phase=%d°\n",
+         "combined=%.1f, phase=%d°, z1/z2=%.1f/%.1f=%.2f lag2=%d\n",
          best_off_i, (double)z_i,
          best_off_q, (double)z_q,
-         (double)z_comb, best_phase * 90);
+         (double)z_comb, best_phase * 90,
+         (double)z_i, (double)z2_val, (double)ratio,
+         second_off_i);
 
     for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
     free(prn_i); free(prn_q); free(npi); free(npq);
@@ -220,6 +248,8 @@ int despread_sync(const float complex *samples, int num_chips,
 
 int despread_bits(const float complex *samples, int num_chips,
                   const despread_sync_t *sync,
+                  const despread_pll_cfg_t *pll_cfg,
+                  despread_metrics_t *metrics,
                   uint8_t *output_bits)
 {
     if (samples == NULL || sync == NULL || output_bits == NULL)
@@ -243,9 +273,11 @@ int despread_bits(const float complex *samples, int num_chips,
      * lags the residual and flips bits mid-message
      * (measured drift ~0.29 Hz -> 0.012 rad/bit). */
     float phase_rad = (float)phase * (float)M_PI / 2.0f;
-    float freq_per_bit = 0.0f;
+    float freq_per_bit = pll_cfg ? pll_cfg->freq_init : 0.0f;
     const float alpha = 0.04f;
-    const float beta  = 0.01f;
+    const float beta  = (pll_cfg && pll_cfg->freq_locked) ? 0.0f : 0.01f;
+
+    float ri_re_pre_sum = 0.0f, ri_re_msg_sum = 0.0f;
 
     /* Diagnostic dump (DSSS_DIAG): one CSV row per bit per burst.
      * Goal: compare phase_rad / freq_per_bit / re·im trajectories of
@@ -253,6 +285,7 @@ int despread_bits(const float complex *samples, int num_chips,
      *   DSSS_DIAG=1 ./build/dec406_scan ...
      * Output: despread_bits.csv */
     static FILE *diag_csv = NULL;
+    static FILE *timing_csv = NULL;
     static int   diag_burst_id = 0;
     int diag_on = (getenv("DSSS_DIAG") != NULL);
     if (diag_on) {
@@ -263,9 +296,17 @@ int despread_bits(const float complex *samples, int num_chips,
                         "burst,bit,phase_rad,freq_per_bit,"
                         "ri_re,ri_im,rq_re,rq_im,d_i,d_q,e\n");
         }
+        if (!timing_csv) {
+            timing_csv = fopen("chip_timing.csv", "w");
+            if (timing_csv)
+                fprintf(timing_csv,
+                        "burst,bit,cm2,cm1,c0,cp1,cp2\n");
+        }
         diag_burst_id++;
         DIAG("[diag] despread burst=%d\n", diag_burst_id);
     }
+
+    float pre_phi[DESPREAD_PREAMBLE_BITS];
 
     int out_idx = 0;
     for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
@@ -288,14 +329,22 @@ int despread_bits(const float complex *samples, int num_chips,
             cq_re += sq_re * eq;  cq_im += sq_im * eq;
         }
 
+        if (k < DESPREAD_PREAMBLE_BITS)
+            pre_phi[k] = atan2f(ci_im, ci_re);
+
         float cp = cosf(phase_rad), sp = sinf(phase_rad);
         float ri_re = ci_re * cp + ci_im * sp;
         float ri_im = ci_im * cp - ci_re * sp;
         float rq_re = cq_re * cp + cq_im * sp;
         float rq_im = cq_im * cp - cq_re * sp;
 
-        uint8_t d_i = (ri_re > 0.0f) ? 1 : 0;
-        uint8_t d_q = (rq_im > 0.0f) ? 1 : 0;
+        uint8_t d_i = (ri_re < 0.0f) ? 1 : 0;
+        uint8_t d_q = (rq_im < 0.0f) ? 1 : 0;
+
+        if (k < DESPREAD_PREAMBLE_BITS)
+            ri_re_pre_sum += fabsf(ri_re);
+        else
+            ri_re_msg_sum += fabsf(ri_re);
 
         if (k >= DESPREAD_PREAMBLE_BITS && out_idx + 2 <= DESPREAD_OUTPUT_BITS) {
             output_bits[out_idx]     = d_i;
@@ -324,9 +373,66 @@ int despread_bits(const float complex *samples, int num_chips,
                     (double)rq_re, (double)rq_im,
                     (unsigned)d_i, (unsigned)d_q, (double)e_val);
         }
+        if (diag_on && timing_csv) {
+            float corr[5];
+            for (int s = -2; s <= 2; s++) {
+                float acc = 0.0f;
+                for (int c = 0; c < DESPREAD_CHIPS_PER_BIT; c++) {
+                    int idx = cs_i + c + s;
+                    int pidx = k * DESPREAD_CHIPS_PER_BIT + c;
+                    if (idx >= 0 && idx < num_chips &&
+                        pidx >= 0 && pidx < DESPREAD_PRN_LEN) {
+                        float ei = 2.0f * (float)prn_i[pidx] - 1.0f;
+                        float re = __real__ samples[idx];
+                        float im = __imag__ samples[idx];
+                        acc += re * ei * cp + im * ei * sp;
+                    }
+                }
+                corr[s + 2] = fabsf(acc);
+            }
+            fprintf(timing_csv,
+                    "%d,%d,%.1f,%.1f,%.1f,%.1f,%.1f\n",
+                    diag_burst_id, k,
+                    (double)corr[0], (double)corr[1],
+                    (double)corr[2], (double)corr[3],
+                    (double)corr[4]);
+        }
         phase_rad += freq_per_bit;        /* apply learned drift each bit */
+
+        if (k == DESPREAD_PREAMBLE_BITS - 1) {
+            for (int i = 1; i < DESPREAD_PREAMBLE_BITS; i++) {
+                float d = pre_phi[i] - pre_phi[i - 1];
+                if (d > (float)M_PI)  pre_phi[i] -= 2.0f * (float)M_PI;
+                if (d < -(float)M_PI) pre_phi[i] += 2.0f * (float)M_PI;
+            }
+            float sx = 0, sy = 0, sxx = 0, sxy = 0;
+            for (int i = 0; i < DESPREAD_PREAMBLE_BITS; i++) {
+                float fi = (float)i;
+                sx += fi; sy += pre_phi[i];
+                sxx += fi * fi; sxy += fi * pre_phi[i];
+            }
+            float fn = (float)DESPREAD_PREAMBLE_BITS;
+            float det = fn * sxx - sx * sx;
+            if (fabsf(det) > 1e-6f) {
+                float slope = (fn * sxy - sx * sy) / det;
+                float intercept = (sy - slope * sx) / fn;
+                freq_per_bit = slope;
+                phase_rad = intercept + slope * (fn - 1.0f);
+                DIAG("[despread] preamble fit: intercept=%.3f slope=%.4f "
+                     "rad/bit (%.2f Hz) phase_rad=%.3f\n",
+                     (double)intercept, (double)slope,
+                     (double)(slope * 38400.0 / (256.0 * 2.0 * M_PI)),
+                     (double)(phase_rad + slope));
+            }
+        }
     }
     if (diag_on && diag_csv) fflush(diag_csv);
+    if (diag_on && timing_csv) fflush(timing_csv);
+
+    if (metrics) {
+        metrics->ri_re_pre_avg = ri_re_pre_sum / (float)DESPREAD_PREAMBLE_BITS;
+        metrics->ri_re_msg_avg = ri_re_msg_sum / (float)DESPREAD_MSG_BITS;
+    }
 
     free(prn_i); free(prn_q);
     return (out_idx == DESPREAD_OUTPUT_BITS) ? 0 : -1;
@@ -341,5 +447,5 @@ int despread_burst(const float complex *samples, int num_chips,
     if (z_score) {
         *z_score = sync.z_comb;
     }
-    return despread_bits(samples, num_chips, &sync, output_bits);
+    return despread_bits(samples, num_chips, &sync, NULL, NULL, output_bits);
 }

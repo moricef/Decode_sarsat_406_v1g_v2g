@@ -86,6 +86,10 @@ typedef struct {
     int score_i; /* peak-to-mean ratio × 10 */
     int score_q; /* peak-to-mean ratio × 10 */
     float z_comb; /* combined z-score (sqrt(z_i² + z_q²)) */
+    float z1;    /* best peak z-score */
+    float z2;    /* second-best peak z-score (>=256 chips from best) */
+    int   lag1;  /* chip offset of best peak */
+    int   lag2;  /* chip offset of second-best peak */
 } despread_sync_t;
 
 /**
@@ -97,13 +101,40 @@ int despread_sync(const float complex *samples, int num_chips,
                   despread_sync_t *sync);
 
 /**
+ * @brief Phase-tracking control for despread_bits.
+ *
+ * freq_init : initial freq_per_bit value (rad/bit).
+ * freq_locked : if true, beta=0 (no adaptation of freq_per_bit).
+ *
+ * Use DESPREAD_PLL_DEFAULT for normal operation.
+ */
+typedef struct {
+    float freq_init;
+    int   freq_locked;
+} despread_pll_cfg_t;
+
+#define DESPREAD_PLL_DEFAULT  ((despread_pll_cfg_t){0.0f, 0})
+
+/**
+ * @brief Despread result metrics (filled by despread_bits).
+ */
+typedef struct {
+    float ri_re_pre_avg;   /* mean |ri_re| over preamble bits */
+    float ri_re_msg_avg;   /* mean |ri_re| over message bits */
+} despread_metrics_t;
+
+/**
  * @brief Despread message bits using pre-computed sync parameters.
  *
- * @param sync   Sync result from despread_sync().
+ * @param sync      Sync result from despread_sync().
+ * @param pll_cfg   Phase-tracking config (NULL = default).
+ * @param metrics   Output metrics (NULL = skip).
  * @return 0 on success (250 bits written), -1 on error.
  */
 int despread_bits(const float complex *samples, int num_chips,
                   const despread_sync_t *sync,
+                  const despread_pll_cfg_t *pll_cfg,
+                  despread_metrics_t *metrics,
                   uint8_t *output_bits);
 
 /**

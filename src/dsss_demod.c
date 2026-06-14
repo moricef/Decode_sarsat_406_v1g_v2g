@@ -27,9 +27,10 @@
 #include "freq_acq.h"
 #include "diag_log.h"
 
-/* Provided by dec406_v2g.c — BCH(250,202) decoder used here as a
- * Costas-phase oracle (try the 4 candidates, keep the one that decodes). */
+/* Provided by dec406_v2g.c */
 extern int bch_decode_250_202(const uint8_t *msg, uint8_t *out);
+extern int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out,
+                                   int *n_errors);
 
 #include <math.h>
 #include <stdio.h>
@@ -66,22 +67,27 @@ static void nco_wipe(float complex *samples, size_t n,
     }
 }
 
-/* Boxcar decimation: integrate isps samples per chip (matched filter for
- * the half-sine pulse shape). Robust to unknown sub-chip phase: worst
- * case -6 dB, no null (vs picking a single sample which can land on a
- * half-sine zero). */
-static void boxcar_decimate(const float complex *in, size_t N,
-                            int isps, float complex *out, size_t n_chips)
+/* Boxcar decimation: integrate isps samples per chip, starting at
+ * sample offset 'offset' within each chip period. */
+static void boxcar_decimate_off(const float complex *in, size_t N,
+                                int isps, int offset,
+                                float complex *out, size_t n_chips)
 {
     for (size_t k = 0; k < n_chips; k++) {
         float complex acc = 0.0f;
-        size_t base = k * (size_t)isps;
+        size_t base = k * (size_t)isps + (size_t)offset;
         for (int j = 0; j < isps; j++) {
             size_t idx = base + (size_t)j;
             if (idx < N) acc += in[idx];
         }
         out[k] = acc;
     }
+}
+
+static void boxcar_decimate(const float complex *in, size_t N,
+                            int isps, float complex *out, size_t n_chips)
+{
+    boxcar_decimate_off(in, N, isps, 0, out, n_chips);
 }
 
 int dsss_receive_burst(const float complex *ota_buffer,
@@ -175,53 +181,166 @@ int dsss_receive_burst(const float complex *ota_buffer,
         }
     }
 
-    /* 5. Final boxcar decimation to chip rate, on the wiped+delayed signal. */
-    boxcar_decimate(work, N, isps, chips, n_chips);
-    free(work);
-    work = NULL;
-
-    /* 6. Despread: sync (4-phase Costas via magnitude) + bits with bit-PLL.
+    /* 5-6. Multi-offset boxcar + despread + BCH oracle.
      *
-     *    Multi-rotation BCH-oracle. despread_sync's 4-phase resolution
-     *    sometimes picks the wrong Costas phase by 90° at marginal SNR
-     *    (re_sum magnitudes for the 4 phases are close enough that
-     *    noise tips the choice). The bit-PLL then needs ~25 bits to
-     *    converge to the true axis, corrupting the early message bits
-     *    beyond BCH(250,202) correction capability.
-     *
-     *    Try all 4 phases through despread_bits + BCH, keep the first
-     *    that BCH-validates. Cost: 4× despread_bits (~50 ms total). */
+     *    The boxcar decimation phase relative to TX chip boundaries is
+     *    unknown.  Try 4 sub-chip offsets (0, isps/4, isps/2, 3isps/4)
+     *    and for each, run 4-phase Costas rotation through BCH.
+     *    Keep the first (offset, phase) pair that BCH-validates.
+     *    Cost: up to 4×4 = 16 despread_bits calls (~200 ms total). */
     {
-        despread_sync_t sync;
-        if (despread_sync(chips, (int)n_chips, &sync) != 0) {
-            rc = -1;
-            goto cleanup;
-        }
-        if (z_score) *z_score = sync.z_comb;
-
-        int original_phase = sync.phase;
         uint8_t bch_tmp[202];
-        int bch_ok_phase = -1;
-        for (int p = 0; p < 4; p++) {
-            sync.phase = p;
-            if (despread_bits(chips, (int)n_chips, &sync, output_bits) != 0)
+        int best_offset = -1, best_phase = -1;
+        float best_z = 0.0f;
+        static const int n_offsets = 4;
+        int offsets[4] = { 0, isps / 4, isps / 2, 3 * isps / 4 };
+
+        int best_nerr = 99;
+        for (int oi = 0; oi < n_offsets; oi++) {
+            size_t n_chips_off = (N - (size_t)offsets[oi]) / (size_t)isps;
+            if (n_chips_off < 6400) continue;
+
+            boxcar_decimate_off(work, N, isps, offsets[oi],
+                                chips, n_chips_off);
+
+            despread_sync_t sync;
+            if (despread_sync(chips, (int)n_chips_off, &sync) != 0)
                 continue;
-            if (bch_decode_250_202(output_bits, bch_tmp) == 0) {
-                bch_ok_phase = p;
-                break;
+
+            if (oi == 0 && z_score)
+                *z_score = sync.z_comb;
+            if (sync.z_comb > best_z)
+                best_z = sync.z_comb;
+
+            int original_phase = sync.phase;
+            for (int p = 0; p < 4; p++) {
+                sync.phase = p;
+                if (despread_bits(chips, (int)n_chips_off, &sync,
+                                 NULL, NULL, output_bits) != 0)
+                    continue;
+                int nerr = -1;
+                int brc = bch_decode_250_202_nerr(output_bits,
+                                                   bch_tmp, &nerr);
+                DIAG("[dsss_demod] offset %d/%d phase %d° "
+                     "z=%.0f nerr=%d\n",
+                     offsets[oi], isps, p * 90,
+                     (double)sync.z_comb, nerr);
+                if (nerr < best_nerr) best_nerr = nerr;
+                if (brc == 0) {
+                    best_offset = oi;
+                    best_phase = p;
+                    break;
+                }
             }
+            if (best_offset >= 0) break;
+
+            sync.phase = original_phase;
         }
-        if (bch_ok_phase >= 0) {
-            DIAG("[dsss_demod] BCH validated on Costas phase %d° "
-                 "(sync chose %d°)\n",
-                 bch_ok_phase * 90, original_phase * 90);
+
+        if (z_score && best_z > *z_score)
+            *z_score = best_z;
+
+        if (best_offset >= 0) {
+            DIAG("[dsss_demod] BCH validated: boxcar offset %d/%d "
+                 "Costas phase %d° nerr=%d\n",
+                 offsets[best_offset], isps, best_phase * 90, best_nerr);
             rc = 0;
         } else {
-            /* None of 4 phases pass BCH. Emit bits from the original
-             * sync.phase so downstream BCH gate produces a clean
-             * 'FRAME REJECTED' on a deterministic candidate. */
-            sync.phase = original_phase;
-            rc = despread_bits(chips, (int)n_chips, &sync, output_bits);
+            DIAG("[dsss_demod] BCH FAIL all 16 combos, best nerr=%d\n",
+                 best_nerr);
+            /* Fallback: re-decimate at offset 0, return best-effort bits. */
+            boxcar_decimate(work, N, isps, chips, n_chips);
+            despread_sync_t sync;
+            if (despread_sync(chips, (int)n_chips, &sync) == 0) {
+                rc = despread_bits(chips, (int)n_chips, &sync,
+                                  NULL, NULL, output_bits);
+                if (z_score) *z_score = sync.z_comb;
+
+                /* E/P/L sub-chip diagnostic on sample-rate buffer.
+                 * For each bit, compute boxcar+PRN correlation at
+                 * 3 sample offsets: Early (-isps/4), Prompt (0),
+                 * Late (+isps/4).  Diagnoses chip timing drift. */
+                {
+                    static FILE *epl_csv = NULL;
+                    static int epl_burst = 0;
+                    if (!epl_csv) {
+                        epl_csv = fopen("epl_diag.csv", "w");
+                        if (epl_csv)
+                            fprintf(epl_csv,
+                                    "burst,bit,cs_i,E,P,L,pwr\n");
+                    }
+                    if (epl_csv) {
+                        epl_burst++;
+                        int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
+                        int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
+                        if (prn_i && prn_q) {
+                            despread_gen_prn(DESPREAD_PRN_SEED_I,
+                                             DESPREAD_PRN_LEN, prn_i);
+                            despread_gen_prn(DESPREAD_PRN_SEED_Q,
+                                             DESPREAD_PRN_LEN, prn_q);
+                            int epl_off[3] = { -isps / 4, 0, isps / 4 };
+                            for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
+                                int cs_i = sync.off_i * isps
+                                           + k * DESPREAD_CHIPS_PER_BIT * isps;
+                                float epl[3];
+                                for (int ei = 0; ei < 3; ei++) {
+                                    float acc_re = 0, acc_im = 0;
+                                    for (int c = 0; c < DESPREAD_CHIPS_PER_BIT; c++) {
+                                        int pidx = k * DESPREAD_CHIPS_PER_BIT + c;
+                                        if (pidx >= DESPREAD_PRN_LEN) break;
+                                        int base = cs_i + c * isps + epl_off[ei];
+                                        float chip_re = 0, chip_im = 0;
+                                        for (int s = 0; s < isps; s++) {
+                                            int idx = base + s;
+                                            if (idx >= 0 && idx < (int)N) {
+                                                chip_re += __real__ work[idx];
+                                                chip_im += __imag__ work[idx];
+                                            }
+                                        }
+                                        float pi = 2.0f * (float)prn_i[pidx] - 1.0f;
+                                        acc_re += chip_re * pi;
+                                        acc_im += chip_im * pi;
+                                    }
+                                    epl[ei] = sqrtf(acc_re * acc_re
+                                                    + acc_im * acc_im);
+                                }
+                                float pwr = 0.0f;
+                                for (int c = 0; c < DESPREAD_CHIPS_PER_BIT; c++) {
+                                    int base = cs_i + c * isps;
+                                    for (int s = 0; s < isps; s++) {
+                                        int idx = base + s;
+                                        if (idx >= 0 && idx < (int)N) {
+                                            float re = __real__ work[idx];
+                                            float im = __imag__ work[idx];
+                                            pwr += re * re + im * im;
+                                        }
+                                    }
+                                }
+                                pwr /= (float)(DESPREAD_CHIPS_PER_BIT * isps);
+                                fprintf(epl_csv,
+                                        "%d,%d,%d,%.1f,%.1f,%.1f,%.4e\n",
+                                        epl_burst, k, cs_i,
+                                        (double)epl[0], (double)epl[1],
+                                        (double)epl[2], (double)pwr);
+                            }
+                            fflush(epl_csv);
+                        }
+                        free(prn_i);
+                        free(prn_q);
+                    }
+                }
+            }
+        }
+        {
+            char hex[64];
+            for (int i = 0; i < 250; i += 4) {
+                int nib = 0;
+                for (int b = 0; b < 4 && (i+b) < 250; b++)
+                    nib |= (output_bits[i+b] & 1) << (3 - b);
+                hex[i/4] = "0123456789ABCDEF"[nib];
+            }
+            hex[63] = '\0';
+            DIAG("[dsss_demod] bits250=%s\n", hex);
         }
     }
 

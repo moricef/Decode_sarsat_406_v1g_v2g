@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <unistd.h>
 #include <time.h>
 
 #ifndef M_PI
@@ -28,8 +29,13 @@
 // 1. open_osm_map() - Affiche un lien cliquable dans le terminal
 // =================================================================
 void open_osm_map(double lat, double lon) {
-    printf("📍 OpenStreetMap: \033]8;;https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\033\\https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\033]8;;\033\\\n",
-           lat, lon, lat, lon, lat, lon, lat, lon);
+    int tty = isatty(fileno(stdout));
+    if (tty)
+        printf("\033]8;;https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\033\\https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\033]8;;\033\\\n",
+               lat, lon, lat, lon, lat, lon, lat, lon);
+    else
+        printf("https://www.openstreetmap.org/?mlat=%.5f&mlon=%.5f#map=18/%.5f/%.5f\n",
+               lat, lon, lat, lon);
 }
 
 // =================================================================
