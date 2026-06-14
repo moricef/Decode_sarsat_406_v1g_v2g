@@ -1,5 +1,45 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.7 - 2026-06-14 - SGB 93 %, FGB 92 %
+
+### SGB decode chain fixes (`src/despread.c`, `src/dec406_v2g.c`, `src/dsss_demod.c`)
+
+Three bugs fixed simultaneously, taking SGB from 29 % to 93 % at firmin (80 km):
+
+1. **Bit polarity inversion** — T.018: data=1 inverts the PRN, so correlation
+   with raw PRN is negative. Decision was `> 0` instead of `< 0`, causing all
+   250 bits to be systematically inverted → BCH always failed.
+
+2. **Preamble frequency estimation** — Linear regression on the 25 known
+   preamble atan2 phases (unwrapped). Initialises `freq_per_bit` and
+   `phase_rad` instead of relying on slow PLL convergence (alpha=0.04,
+   beta=0.01). Measured residual: ~4 Hz (0.18 rad/bit).
+
+3. **Chien search over full GF(2^8)** — BCH(250,202) shortened from
+   BCH(255,207): search must cover 255 positions, not 250. Roots in the
+   virtual padding (250-254) must be counted for `nroots == L` but don't
+   flip bits.
+
+### Multi-offset boxcar oracle (`src/dsss_demod.c`)
+
+4 sub-chip boxcar offsets × 4 Costas phases = 16 combinations tried against
+BCH. First combo that passes BCH wins. `bch_decode_250_202_nerr()` returns
+error count for diagnostics.
+
+### DUMP_FAIL burst capture (`src/main_scan.c`)
+
+`DUMP_FAIL=1` environment variable dumps failed SGB bursts to
+`burst_sgb_HHMMSS_<freq>Hz.cf32` (float32 complex) for offline analysis.
+
+### Decode rates at firmin relay (80 km, evening propagation)
+
+| Type | Before | After |
+|------|--------|-------|
+| SGB  | 29 %   | 93 % (13/14, nerr=0 on all OK) |
+| FGB  | 78 %   | 92 % (no FGB changes, propagation) |
+
+---
+
 ## Version 10.2.6 - 2026-06-14 - FGB decode rate 78 %
 
 ### FGB IQ demodulator improvements (`src/fgb_iq_demod.c`)
