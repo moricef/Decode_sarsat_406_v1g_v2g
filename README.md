@@ -3,7 +3,7 @@
 Decoder for 1st (FGB) and 2nd (SGB) generation COSPAS-SARSAT emergency
 beacons at 406 MHz.
 
-**Branch**: `feature/dsss-flat-chain`
+**Branch**: `main`
 
 ---
 
@@ -17,15 +17,16 @@ beacons at 406 MHz.
 
 ### Demodulators
 - **DSSS OQPSK (2G)** — `dsss_demod.c` flat-chain (no sample-rate tracking
-  loop): DC blocker → boxcar decimation to chip rate → FFT-correlation
-  frequency acquisition (`freq_acq_fft_corr`) → NCO wipeoff → OQPSK delay →
-  despread with per-bit Costas PLL → BCH. Multi-rotation BCH oracle tries
-  the 4 Costas phases before giving up.
+  loop): DC blocker → FFT-correlation frequency acquisition → NCO wipeoff →
+  OQPSK delay → multi-offset boxcar decimation → despread with preamble
+  linear-fit frequency estimation + per-bit Costas PLL → BCH. Oracle tries
+  4 boxcar offsets × 4 Costas phases (16 combos) before giving up.
+  93 % decode rate at 80 km relay.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
-  slicer, BCH1 brute-force error correction (t=3), CRC. 78 % decode rate
-  at 80 km relay.
+  slicer, BCH1 brute-force error correction (t=3), CRC. 92 % decode rate
+  at 80 km relay (evening propagation).
 
 ### Real-time scanner
 `dec406_scan` ingests RTL-SDR samples directly via librtlsdr (synchronous
@@ -163,19 +164,20 @@ Additional silencing filters layered on the channel whitelist:
 ```
 IQ @ 2.4576 MHz
   → DC blocker (IIR α=0.001)
-  → boxcar decimation to chip rate (un-delayed, acquisition only)
+  → boxcar decimation to chip rate (acquisition only)
   → freq_acq_fft_corr (chip-rate FFT-correlation, ~1 Hz precision)
   → NCO wipeoff at sample rate
   → OQPSK delay (Q advanced by SPS/2)
-  → boxcar decimation to chip rate (final chip stream)
-  → despread (2-pass preamble sync, complex 4-phase Costas resolution,
+  → multi-offset boxcar decimation (4 sub-chip offsets)
+  → despread (preamble linear-fit freq/phase estimation,
        per-bit BPSK Costas PLL over 256 chips)
-  → 250 bits → bch_decode_250_202 → decode_beacon
+  → 250 bits → bch_decode_250_202 (nerr) → decode_beacon
 ```
 
-For each acquired burst the chain tries all 4 Costas phases against BCH,
-keeping the one that decodes cleanly. A frame whose codeword BCH cannot
-correct is rejected — no beacon is printed from noise.
+For each acquired burst the chain tries 4 boxcar offsets × 4 Costas phases
+(16 combos) against BCH, keeping the first that decodes cleanly. Preamble
+linear regression initialises carrier frequency/phase, replacing slow PLL
+convergence. A frame whose codeword BCH cannot correct is rejected.
 
 ---
 
@@ -186,11 +188,11 @@ IQ
   → multi-stage moving-average decimation to ~9.6 kHz
   → CW preamble carrier-frequency estimate (sample-level phase diffs)
   → frequency wipeoff
-  → CW end detection (smoothed |S1-S2| crossing)
-  → bit-period phase refinement
-  → multi-offset FSYNC sweep
-  → Costas BPSK loop + Manchester slicer
-  → 144 bits → CRC1/CRC2 validation
+  → dual-grid CW end detection (two grids offset half/2)
+  → multi-phase Costas search (4 phases × 13 offsets)
+  → Manchester slicer (biphase-L ±1.1 rad)
+  → BCH1 brute-force correction (t=3, bits 24..105)
+  → 144 bits → CRC1/CRC2 validation + polarity fallback
 ```
 
 No FM-demod, no audio detour, no biphase-L codec dependency.

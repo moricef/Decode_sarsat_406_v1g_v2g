@@ -296,23 +296,15 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
   float fs = (float)SAMP_RATE;
   int rc =
       dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f, fs, 0, bits, &z);
-  free(win);
 
   if (rc == 0) {
+    free(win);
     printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
     char *body = capture_decode(decode_beacon, bits,
                                 DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     double freq_mhz = (g_center_hz + offset_hz) / 1e6;
-    /* Only alert on a SGB frame that fully decoded AND is operational.
-     * Positive match on "Test Protocol: Normal Operation" (T.018 §3
-     * bit 43 = 0, dec406_v2g.c:775). Any other body — BCH-uncorrectable
-     * ("FRAME REJECTED" with no Test Protocol line), test beacon
-     * ("Test Protocol: Active (Non-operational)" — CNES on channel K,
-     * TAC 65535), or any corruption — is silenced. */
     int is_real_distress =
         (body && strstr(body, "Test Protocol: Normal Operation") != NULL);
-    /* Repetition gate (same as FGB): require a second sighting of the
-     * same Hex ID within 3 min before mailing. */
     const char *hex_id = scan_alert_extract_hex_id(body);
     int is_repeat = scan_alert_is_repeat(hex_id);
     if (is_real_distress && is_repeat &&
@@ -323,6 +315,22 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
     free(body);
   } else {
     printf("  SGB burst — decode failed (z=%.1f)\n", z);
+    if (getenv("DUMP_FAIL")) {
+      time_t now = time(NULL);
+      struct tm *tm = localtime(&now);
+      char path[128];
+      snprintf(path, sizeof path, "burst_sgb_%02d%02d%02d_%.0fHz.cf32",
+               tm->tm_hour, tm->tm_min, tm->tm_sec, offset_hz);
+      FILE *fp = fopen(path, "wb");
+      if (fp) {
+        fwrite(win, sizeof(float complex), (size_t)ext_len, fp);
+        fclose(fp);
+        printf("  dumped %s (%lu samples, %.3f MHz)\n",
+               path, (unsigned long)ext_len,
+               (g_center_hz + offset_hz) / 1e6);
+      }
+    }
+    free(win);
   }
   printf("\n");  /* blank line between frames — separates the firehose */
   fflush(stdout);
