@@ -609,6 +609,19 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     float mean = (n_step > 0) ? (float)(sum_step / (double)n_step) : 1e-10f;
     float conf = (mean > 0.0f) ? peak_pwr / mean : 0.0f;
 
+    /* Early exit: if the coarse conf is well below the acceptance threshold
+     * there is no DSSS signal — skip the fine stage to save CPU. */
+    if (conf < 5.0f) {
+        free(prn_i); free(prn_q); free(ei); free(eq);
+        free(pf_i); free(pf_q); free(rot); free(spec); free(work);
+        result->freq_hz      = best_f;
+        result->confidence   = conf;
+        result->costas_phase = best_phase;
+        DIAG("[freq_acq] fft-corr: coarse reject conf %.1f (need >=5)\n",
+             (double)conf);
+        return 0;
+    }
+
     /* ---- Stage 2: fine frequency at the located chip-lag ----
      * The coarse grid quantises to ~6 Hz; the despread needs ~1 Hz, so
      * refine with a direct correlation of the full preamble segment. */

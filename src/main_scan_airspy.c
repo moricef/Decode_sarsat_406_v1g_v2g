@@ -58,6 +58,11 @@ static uint32_t samp_rate = 3000000u;
 #define BURST_AVG 24
 #define BW_SPLIT_HZ 20000.0
 #define BURST_BW_MAX 150000.0
+/* T.001 §2.2.2: FGB 440/520 ms.  T.018 §2.3: SGB 1000 ms. */
+#define FGB_DUR_MIN 0.35
+#define FGB_DUR_MAX 0.80
+#define SGB_DUR_MIN 0.80
+#define SGB_DUR_MAX 1.25
 #define HEARTBEAT_S 15
 
 static volatile sig_atomic_t running = 1;
@@ -486,20 +491,31 @@ static void *process_thread(void *arg) {
         if (blen >= min_burst && blen <= max_burst &&
             measure_burst(burst_start, blen, &fmeas, &bwmeas)) {
           const char *type = (bwmeas > BW_SPLIT_HZ) ? "SGB" : "FGB";
+          double dur_s = (double)blen / samp_rate;
+          int is_sgb = (bwmeas > BW_SPLIT_HZ);
+          int dur_ok = is_sgb ? (dur_s >= SGB_DUR_MIN && dur_s <= SGB_DUR_MAX)
+                              : (dur_s >= FGB_DUR_MIN && dur_s <= FGB_DUR_MAX);
           static uint64_t prev_burst_start = 0;
           double dt = (prev_burst_start && burst_start >= prev_burst_start)
                           ? (double)(burst_start - prev_burst_start) / samp_rate
                           : 0.0;
           prev_burst_start = burst_start;
-          printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
-                 "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
+          if (!dur_ok) {
+            DIAG("[%s] REJECT %.4f MHz   BW ~%3.0f kHz   %s   "
+                 "dur %.2f s (out of range)\n",
                  timestr_ms(), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
-                 type, bsnr, (double)blen / samp_rate, dt);
-          fflush(stdout);
-          if (bwmeas > BW_SPLIT_HZ)
-            decode_sgb(burst_start, blen, fmeas, bsnr);
-          else
-            decode_fgb(burst_start, blen, fmeas, bsnr);
+                 type, dur_s);
+          } else {
+            printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
+                   "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
+                   timestr_ms(), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
+                   type, bsnr, dur_s, dt);
+            fflush(stdout);
+            if (is_sgb)
+              decode_sgb(burst_start, blen, fmeas, bsnr);
+            else
+              decode_fgb(burst_start, blen, fmeas, bsnr);
+          }
         }
         state = 0; above = 0;
       }
