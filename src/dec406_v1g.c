@@ -174,6 +174,30 @@ int test_crc2(const char *s) {
 // ===================================================
 // Utility functions
 // ===================================================
+
+// COSPAS 15 Hex ID: bits 26-85 with default position values per T.001
+static void compute_hex15(const char *frame, ProtocolType proto, char *out, int out_sz) {
+    uint64_t id = 0;
+    for (int i = 25; i <= 84; i++)
+        id = (id << 1) | (frame[i] == '1' ? 1 : 0);
+
+    uint32_t hi = (uint32_t)(id >> 32);
+    uint32_t lo = (uint32_t)id;
+
+    if (proto == PROTOCOL_STANDARD_LOCATION || proto == PROTOCOL_SHIP_SECURITY) {
+        lo &= 0xFFE00000u;
+        lo |= 0x000FFBFF;
+    } else if (proto == PROTOCOL_NATIONAL_LOCATION) {
+        lo &= 0xF8000000u;
+        lo |= 0x03F81FE0;
+    } else if (proto == PROTOCOL_RLS_LOCATION || proto == PROTOCOL_EMERGENCY_ELT) {
+        lo &= 0xFFF80000u;
+        lo |= 0x0003FDFF;
+    }
+
+    snprintf(out, out_sz, "%07X%08X", hi, lo);
+}
+
 static uint32_t get_bits(const char *s, int start, int len) {
     uint32_t val = 0;
     for (int i = 0; i < len; i++) {
@@ -382,10 +406,6 @@ static void decode_standard_location(const char *s, BeaconInfo1G *info, int fram
         info->has_position = 0;
     }
     
-    // Generate hex ID
-    snprintf(info->hex_id, sizeof(info->hex_id), "%s-STD-%04X-%08X",
-             (frame_length == LONG_FRAME_BITS) ? "LG" : "SH",
-             info->country_code, info->serial);
 }
 
 // ===================================================
@@ -1041,39 +1061,7 @@ switch (info->protocol) {
     // Decode supplementary data (adds activation, altitude, freshness info to vessel_id)
     decode_supplementary_data(frame, info);
     
-    // Generate protocol string for hex ID
-        const char* protocol_str;
-    switch (info->protocol) {
-        case PROTOCOL_STANDARD_LOCATION: protocol_str = "STD"; break;
-        case PROTOCOL_NATIONAL_LOCATION: protocol_str = "NAT"; break;
-        case PROTOCOL_USER_PROTOCOL: protocol_str = "USR"; break;
-        //case PROTOCOL_USER_PROTOCOL: protocol_str = "ULO"; break;  // User-Location
-        case PROTOCOL_TEST: protocol_str = "TST"; break;
-        case PROTOCOL_EMERGENCY_ELT: protocol_str = "ELT"; break;
-        case PROTOCOL_EMERGENCY_EPIRB: protocol_str = "EPB"; break;
-        case PROTOCOL_EMERGENCY_PLB: protocol_str = "PLB"; break;
-        case PROTOCOL_RLS_LOCATION: protocol_str = "RLS"; break;
-        case PROTOCOL_SHIP_SECURITY: protocol_str = "SEC"; break;
-        default: protocol_str = "UNK";
-    }
-    
-    // Extract serial number (different position based on protocol)
-    if (info->protocol == PROTOCOL_EMERGENCY_ELT) {
-        // For ELT-DT, serial might be in a different location
-        info->serial = info->aircraft_address & 0xFFFF;  // Use lower 16 bits of aircraft address
-    } else if (info->protocol == PROTOCOL_NATIONAL_LOCATION) {
-        // For National Location, serial is already set in decode_national_location
-        // It's the 18-bit national ID from bits 41-58
-        // No need to extract again, just use what was set
-    } else {
-        // For other protocols, standard position
-        info->serial = get_bits(frame, 50, 14);  // Standard position for serial protocols
-    }
-    
-    // Generate hex ID
-    snprintf(info->hex_id, sizeof(info->hex_id), "%s-%s-%04X-%08X",
-             (frame_length == LONG_FRAME_BITS) ? "LG" : "SH",
-             protocol_str, info->country_code, info->serial);
+    compute_hex15(frame, info->protocol, info->hex_id, sizeof(info->hex_id));
 }
 // ===================================================
 // Interface function
