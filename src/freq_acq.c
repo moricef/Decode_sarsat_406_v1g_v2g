@@ -491,6 +491,11 @@ int freq_acq_from_alignment(const float complex *chips, int n_chips,
 /*  where the 4th-power FFT collapses.                                 */
 /* ================================================================== */
 
+static int cmp_float_asc(const void *a, const void *b) {
+    float fa = *(const float *)a, fb = *(const float *)b;
+    return (fa > fb) - (fa < fb);
+}
+
 #define FFTC_N          16384  /* FFT size */
 #define FFTC_PRN_LEN    4096   /* preamble chips generated */
 #define FFTC_COARSE_L   1024   /* chips correlated in the coarse FFT stage */
@@ -554,6 +559,13 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     int    best_lag = 0, best_phase = 0;
     double sum_step = 0.0;
     int    n_step = 0;
+    int    max_steps = n_f * 2;
+    float *step_vals = (float *)malloc((size_t)max_steps * sizeof(float));
+    if (!step_vals) {
+        free(prn_i); free(prn_q); free(ei); free(eq);
+        free(pf_i); free(pf_q); free(rot); free(spec); free(work);
+        return -1;
+    }
 
     /* Diagnostic (COARSE_DIAG): dump the coarse marginal — for each test
      * frequency, the best correlation power over all lags and where it
@@ -595,6 +607,8 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
                         coarse_burst, (double)f, pq,
                         (double)step_max, step_lag);
             sum_step += (double)step_max;
+            if (n_step < max_steps)
+                step_vals[n_step] = step_max;
             n_step++;
             if (step_max > peak_pwr) {
                 peak_pwr   = step_max;
@@ -607,7 +621,14 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     if (coarse_diag && coarse_csv) fflush(coarse_csv);
 
     float mean = (n_step > 0) ? (float)(sum_step / (double)n_step) : 1e-10f;
-    float conf = (mean > 0.0f) ? peak_pwr / mean : 0.0f;
+    int ns = (n_step < max_steps) ? n_step : max_steps;
+    float median = mean;
+    if (ns > 0) {
+        qsort(step_vals, (size_t)ns, sizeof(float), cmp_float_asc);
+        median = step_vals[ns / 2];
+    }
+    free(step_vals);
+    float conf = (median > 0.0f) ? peak_pwr / median : 0.0f;
 
     /* Early exit: if the coarse conf is well below the acceptance threshold
      * there is no DSSS signal — skip the fine stage to save CPU. */
@@ -666,10 +687,10 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
 
     DIAG(
             "[freq_acq] fft-corr: offset %.0f Hz  conf %.1f  "
-            "lag %d/%d (n_chips %d remain %d)  peak %.2e  mean %.2e  phase %d\n",
+            "lag %d/%d (n_chips %d remain %d)  peak %.2e  median %.2e  mean %.2e  phase %d\n",
             (double)f_fine, (double)conf, best_lag, last_lag, n_chips,
             n_chips - best_lag,
-            (double)peak_pwr, (double)mean, best_phase);
+            (double)peak_pwr, (double)median, (double)mean, best_phase);
 
     return 0;
 }

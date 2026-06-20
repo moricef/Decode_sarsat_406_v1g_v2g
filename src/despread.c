@@ -203,22 +203,37 @@ int despread_sync(const float complex *samples, int num_chips,
 
     float z_comb = sqrtf(z_i * z_i + z_q * z_q);
     float thr = DESPREAD_SYNC_THRESHOLD;
+
+    float z2_fail = 0.0f;
+    if (cnt_i > 50 && second_i_raw > 0.0f) {
+        float mean_i_f = (sum_i - best_i_raw) / (float)(cnt_i - 1);
+        float var_i_f = (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
+                      - mean_i_f * mean_i_f;
+        if (var_i_f < 1e-10f) var_i_f = 1e-10f;
+        z2_fail = (second_i_raw - mean_i_f) / sqrtf(var_i_f);
+    }
+
     if (z_comb < thr) {
+        /* Expose z even on failure so callers sweeping a parameter (e.g.
+         * wipeoff frequency) can pick the best sub-threshold candidate. */
+        sync->z_comb = z_comb;
+        sync->z1 = z_i;
+        float ratio_f = (z2_fail > 0.1f) ? z_i / z2_fail : 999.0f;
         DIAG("[despread] SYNC FAILED: "
-             "I z=%.1f Q z=%.1f combined=%.1f (need %.1f)\n",
-             (double)z_i, (double)z_q, (double)z_comb, (double)thr);
+             "I z=%.1f Q z=%.1f combined=%.1f (need %.1f) "
+             "peak=%.3e 2nd=%.3e z1/z2=%.1f/%.1f=%.2f "
+             "lag1=%d lag2=%d mean=%.3e std=%.3e\n",
+             (double)z_i, (double)z_q, (double)z_comb, (double)thr,
+             (double)best_i_abs, (double)second_i_abs,
+             (double)z_i, (double)z2_fail, (double)ratio_f,
+             best_off_i, second_off_i,
+             cnt_i > 1 ? (double)(sum_i / (float)cnt_i) : 0.0,
+             cnt_i > 50 ? (double)sqrtf((sum2_i/(float)cnt_i)
+                          - (sum_i/(float)cnt_i)*(sum_i/(float)cnt_i))
+                        : 0.0);
         for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }
         free(prn_i); free(prn_q); free(npi); free(npq);
         return -1;
-    }
-
-    float z2_val = 0.0f;
-    if (cnt_i > 50 && second_i_raw > 0.0f) {
-        float mean_i = (sum_i - best_i_raw) / (float)(cnt_i - 1);
-        float var_i = (sum2_i - best_i_raw * best_i_raw) / (float)(cnt_i - 1)
-                      - mean_i * mean_i;
-        if (var_i < 1e-10f) var_i = 1e-10f;
-        z2_val = (second_i_raw - mean_i) / sqrtf(var_i);
     }
 
     sync->off_i   = best_off_i;
@@ -228,17 +243,17 @@ int despread_sync(const float complex *samples, int num_chips,
     sync->score_i = (z_i < 10000.0f) ? (int)(z_i * 10.0f) : 0x7FFF;
     sync->score_q = (z_i < 10000.0f) ? (int)(z_q * 10.0f) : 0x7FFF;
     sync->z1      = z_i;
-    sync->z2      = z2_val;
+    sync->z2      = z2_fail;
     sync->lag1    = best_off_i;
     sync->lag2    = second_off_i;
 
-    float ratio = (z2_val > 0.1f) ? z_i / z2_val : 999.0f;
+    float ratio = (z2_fail > 0.1f) ? z_i / z2_fail : 999.0f;
     DIAG("[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
          "combined=%.1f, phase=%d°, z1/z2=%.1f/%.1f=%.2f lag2=%d\n",
          best_off_i, (double)z_i,
          best_off_q, (double)z_q,
          (double)z_comb, best_phase * 90,
-         (double)z_i, (double)z2_val, (double)ratio,
+         (double)z_i, (double)z2_fail, (double)ratio,
          second_off_i);
 
     for (int p = 0; p < 4; p++) { free(exp_i[p]); free(exp_q[p]); }

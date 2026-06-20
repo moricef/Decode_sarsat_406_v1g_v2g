@@ -154,23 +154,79 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * Despread below still receives the full chip stream. */
     int n_chips_acq = (n_chips > 12000) ? 12000 : (int)n_chips;
 
+    float acq_conf_min = ACQ_CONF_MIN;
+    { const char *e = getenv("ACQ_CONF_MIN");
+      if (e) acq_conf_min = (float)atof(e); }
+
     freq_acq_result_t acq;
     memset(&acq, 0, sizeof(acq));
     if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
                           -8000.0f, 8000.0f, &acq) != 0 ||
-        acq.confidence < ACQ_CONF_MIN) {
+        acq.confidence < acq_conf_min) {
         DIAG("[dsss_demod] acquisition rejected "
              "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
              (double)acq.freq_hz, (double)acq.confidence,
-             (double)ACQ_CONF_MIN);
+             (double)acq_conf_min);
         goto cleanup;
+    }
+
+    /* 3a. Frequency refinement against despread_sync's narrow preamble response.
+     * freq_acq maximises its own correlation, whose optimum sits 5-7 Hz off
+     * despread_sync's. The preamble response is sharp (~+/-10 Hz to half-max,
+     * zero beyond +/-15 Hz), so that offset can collapse sync (z=0) even with
+     * high freq_acq confidence. The refinement must mirror the real despread
+     * path (wipeoff + OQPSK + decimate), so process the buffer once at
+     * acq.freq, then probe +/-15 Hz by chip-rate derotation (the OQPSK-phase
+     * error across that span is ~1e-3 rad, negligible). */
+    {
+        float complex *tmp = (float complex *)malloc(N * sizeof(float complex));
+        float complex *c0   = (float complex *)malloc(n_chips * sizeof(float complex));
+        float complex *dr   = (float complex *)malloc(n_chips * sizeof(float complex));
+        if (tmp && c0 && dr) {
+            memcpy(tmp, work, N * sizeof(float complex));
+            nco_wipe(tmp, N, acq.freq_hz, fs);
+            if (getenv("NO_OQPSK") == NULL) {
+                int delay = isps / 2;
+                for (size_t t = 0; t < N; t++) {
+                    float r = __real__ tmp[t];
+                    float q = (t + (size_t)delay < N)
+                                ? __imag__ tmp[t + (size_t)delay] : 0.0f;
+                    tmp[t] = r + q * I;
+                }
+            }
+            boxcar_decimate(tmp, N, isps, c0, n_chips);
+
+            float best_f = acq.freq_hz, best_z = -1.0f;
+            for (int df = -15; df <= 15; df += 5) {
+                float dphi = -2.0f * (float)M_PI * (float)df / chip_rate;
+                float pr = 1.0f, pi = 0.0f;
+                float sr = cosf(dphi), si = sinf(dphi);
+                for (size_t k = 0; k < n_chips; k++) {
+                    float re = __real__ c0[k], im = __imag__ c0[k];
+                    dr[k] = (re * pr - im * pi) + (re * pi + im * pr) * I;
+                    float nr = pr * sr - pi * si, ni = pr * si + pi * sr;
+                    pr = nr; pi = ni;
+                }
+                despread_sync_t s;
+                despread_sync(dr, (int)n_chips, &s);
+                if (s.z_comb > best_z) { best_z = s.z_comb;
+                                         best_f = acq.freq_hz + (float)df; }
+            }
+            if (best_f != acq.freq_hz)
+                DIAG("[dsss_demod] freq refined %.0f -> %.0f Hz (z=%.1f)\n",
+                     (double)acq.freq_hz, (double)best_f, (double)best_z);
+            acq.freq_hz = best_f;
+        }
+        free(tmp); free(c0); free(dr);
     }
 
     /* 3. NCO carrier wipeoff at sample rate on the full-rate buffer. */
     nco_wipe(work, N, acq.freq_hz, fs);
 
-    /* 4. OQPSK delay: advance Q by SPS/2 (safe now that the carrier is wiped). */
-    {
+    /* 4. OQPSK delay: advance Q by SPS/2 (safe now that the carrier is wiped).
+     * Diagnostic toggle NO_OQPSK=1 bypasses this to test whether the fixed
+     * half-chip shift mismatches the burst's sub-chip phase. */
+    if (getenv("NO_OQPSK") == NULL) {
         int delay = isps / 2;
         for (size_t t = 0; t < N; t++) {
             float r = __real__ work[t];
