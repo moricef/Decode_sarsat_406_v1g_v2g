@@ -28,7 +28,7 @@
 #include "diag_log.h"
 
 /* Provided by dec406_v2g.c */
-extern int bch_decode_250_202(const uint8_t *msg, uint8_t *out);
+extern int bch_decode_250_202(const uint8_t *msg, uint8_t *out, uint8_t *cw_out);
 extern int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out,
                                    int *n_errors);
 

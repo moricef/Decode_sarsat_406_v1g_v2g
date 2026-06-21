@@ -148,7 +148,7 @@ static int chien_search(const uint8_t lam[13], int L, int pos[6],
  * @return 0 if the codeword is clean or fully corrected, -1 if errors
  *         remain uncorrectable (out still holds the uncorrected copy).
  */
-int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
+int bch_decode_250_202(const uint8_t *msg, uint8_t *out, uint8_t *cw_out)
 {
     gf_init();
 
@@ -191,6 +191,7 @@ int bch_decode_250_202(const uint8_t *msg, uint8_t *out)
     }
 
     memcpy(out, cw, 202);
+    if (cw_out) memcpy(cw_out, cw, 250);
     return rc;
 }
 
@@ -328,6 +329,7 @@ typedef struct {
     } rot;
     
     uint8_t raw_data[202];  // Store raw data for validation
+    char corrected_hex[64]; // Corrected 250-bit codeword as hex (post-BCH)
 } BeaconInfo;
 
 // ===================================================
@@ -745,6 +747,7 @@ static void print_beacon_info(const BeaconInfo *info);
 
 void decode_2g(const uint8_t *rx_bits) {
     uint8_t corrected[BCH_K];  // Corrected information bits
+    uint8_t cw250[250];        // Full corrected codeword (202 data + 48 BCH)
     BeaconInfo info;
     memset(&info, 0, sizeof(info));
 
@@ -756,7 +759,7 @@ void decode_2g(const uint8_t *rx_bits) {
     if (diag_on) diag_bch_id++;
 
     // 1. Apply BCH error correction
-    if (bch_decode_250_202(rx_bits, corrected) != 0) {
+    if (bch_decode_250_202(rx_bits, corrected, cw250) != 0) {
         if (diag_on)
             DIAG("[diag] bch burst=%d status=FAIL\n", diag_bch_id);
         printf("\n=== FRAME REJECTED — BCH uncorrectable, decode aborted ===\n");
@@ -764,6 +767,19 @@ void decode_2g(const uint8_t *rx_bits) {
     }
     if (diag_on)
         DIAG("[diag] bch burst=%d status=OK\n", diag_bch_id);
+
+    // Corrected codeword as 63-hex, T.018 convention: 2 zero bits left-padded
+    // (252 = 2 + 250) so the string is directly decodable by reference tools.
+    for (int k = 0; k < 63; k++) {
+        int nib = 0;
+        for (int b = 0; b < 4; b++) {
+            int j = 4 * k + b - 2;  // shift for the 2-bit left pad
+            int bit = (j >= 0 && j < 250) ? (cw250[j] & 1) : 0;
+            nib |= bit << (3 - b);
+        }
+        info.corrected_hex[k] = "0123456789ABCDEF"[nib];
+    }
+    info.corrected_hex[63] = '\0';
 
     // 2. Decode main field (154 bits)
     decode_main(corrected, &info);
@@ -803,6 +819,7 @@ void print_beacon_info(const BeaconInfo *info) {
     printf("\n=== 406 MHz SECOND GENERATION BEACON (SGB) ===");
     printf("\n[IDENTIFICATION]");
     printf("\n 23 Hex ID: %s", info->hex_id);
+    printf("\n Corrected 250 bits: %s", info->corrected_hex);
     printf("\n TAC Number: %u (0x%04X)", info->tac, info->tac);
     printf("\n Serial Number: %u (0x%04X)", info->serial, info->serial);
     printf("\n Country Code: %u (%s)", info->country, get_country_name(info->country));
