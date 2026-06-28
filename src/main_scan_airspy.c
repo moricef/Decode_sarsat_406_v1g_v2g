@@ -183,7 +183,7 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
   for (uint64_t i = 0; i < ext_len; i++) {
     float complex s = ring[(ext_start + i) & RING_MASK];
     double ph = w * (double)i;
-    float complex lo = cosf(ph) + sinf(ph) * I;
+    float complex lo = cosf(ph) - sinf(ph) * I;
     win[i] = s * lo;
   }
 
@@ -249,7 +249,7 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
   for (uint64_t i = 0; i < ext_len; i++) {
     float complex s = ring[(ext_start + i) & RING_MASK];
     double ph = w * (double)i;
-    float complex lo = cosf(ph) + sinf(ph) * I;
+    float complex lo = cosf(ph) - sinf(ph) * I;
     win[i] = s * lo;
   }
 
@@ -324,6 +324,11 @@ static int measure_burst(uint64_t start, uint64_t len, double *freq_off, double 
       double re = crealf(win[k]), im = cimagf(win[k]);
       spec[k] += re * re + im * im;
     }
+  }
+
+  for (int k = 0; k < FFT_N; k++) {
+    spec[k] -= (double)navg * floor_bin[k];
+    if (spec[k] < 0.0) spec[k] = 0.0;
   }
 
   const double binhz = (double)samp_rate / FFT_N;
@@ -422,8 +427,9 @@ static void *process_thread(void *arg) {
                        (preff[hi + 1] - preff[lo]) * SMOOTH_FACTOR;
       hotb[k] = (raw_hot || smooth_hot) ? 1 : 0;
     }
-    for (int k = 0; k < FFT_N; k++)
-      if (!hotb[k]) floor_bin[k] += NF_ALPHA * (P[k] - floor_bin[k]);
+    if (state == 0)
+      for (int k = 0; k < FFT_N; k++)
+        if (!hotb[k]) floor_bin[k] += NF_ALPHA * (P[k] - floor_bin[k]);
 
     int best_lo = -1, best_hi = -1;
     double best_pwr = 0.0;
@@ -470,6 +476,18 @@ static void *process_thread(void *arg) {
 
     if (state == 1) {
       int near = have && fabs(off - burst_center) < CENTER_TOL * binhz;
+      /* fallback: check integrated energy around burst_center even if no hot cluster */
+      if (!near) {
+        int cbin = (int)(burst_center / binhz + 0.5);
+        if (cbin < 0) cbin += FFT_N;
+        int bw_bins = 20;
+        double sig = 0.0, fl = 0.0;
+        for (int dk = -bw_bins; dk <= bw_bins; dk++) {
+          int k = (cbin + dk + FFT_N) % FFT_N;
+          sig += P[k]; fl += floor_bin[k];
+        }
+        if (fl > 0.0 && sig > fl * 2.0) near = 1;
+      }
       if (near) {
         below = 0;
         bcenter_sum += off; bcenter_n++;
@@ -518,6 +536,8 @@ static void *process_thread(void *arg) {
           }
         }
         state = 0; above = 0;
+        for (int k = 0; k < FFT_N; k++)
+          if (hotb[k]) floor_bin[k] = P[k];
       }
     }
 
@@ -526,7 +546,7 @@ static void *process_thread(void *arg) {
       last_beat = now;
       double fl = 0.0;
       for (int k = 0; k < FFT_N; k++) fl += floor_bin[k];
-      DIAG("[%s] monitoring — mean noise floor %.0f, overruns %lu\n",
+      DIAG("[%s] monitoring — mean noise floor %.2e, overruns %lu\n",
            timestr(now), fl / FFT_N, overruns);
     }
   }

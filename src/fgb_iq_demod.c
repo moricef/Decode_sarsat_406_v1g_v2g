@@ -400,7 +400,7 @@ static int decimate_iq(const float complex *in, size_t n_in,
     *out_ptr = s1;
     *n_out = n1;
     *samp_rate = sr;
-    *burst_start /= total_decim;
+    *burst_start /= (M1 * (M2 ? M2 : 1) * (M3 ? M3 : 1));
     return 0;
 }
 
@@ -427,6 +427,30 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
         if (diag)
             DIAG("[fgb_iq] internal decim -> %d Hz (%zu samples)\n",
                     samp_rate, n);
+    }
+
+    /* Normalize the working buffer to unit RMS so the FGB demod is
+     * scale-invariant: RTL 8-bit, Airspy float, any gain or signal level
+     * decode identically. Absolute thresholds downstream (e.g. the CW-end
+     * floor) then sit at a consistent fraction of the signal. Scaling the
+     * whole buffer leaves every relative decision unchanged. */
+    {
+        double sumsq = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            float complex s = iq[i];
+            sumsq += (double)crealf(s) * crealf(s) + (double)cimagf(s) * cimagf(s);
+        }
+        double rms = (n && sumsq > 0.0) ? sqrt(sumsq / (double)n) : 0.0;
+        if (rms > 0.0) {
+            if (!owned_iq) {
+                float complex *work = malloc(n * sizeof(float complex));
+                if (!work) return -1;
+                memcpy(work, iq, n * sizeof(float complex));
+                iq = work; iq_dec = work; owned_iq = 1;
+            }
+            float g = (float)(1.0 / rms);
+            for (size_t i = 0; i < n; i++) iq_dec[i] *= g;
+        }
     }
 
     double bit_prd  = (double)samp_rate / SYMBOL_RATE_HZ;
@@ -470,6 +494,14 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
     long cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
                                      cw_search_start, cw_search_end, diag,
                                      &cw_mag, &cw_expected, &cw_thresh);
+    long cw_min = (burst_start - w0) + cw_samp * 3 / 5;
+    if (cw_end >= 0 && cw_end < cw_min) {
+        DIAG("[fgb_iq] burst=%d CW end too early %ld < %ld, retrying\n",
+                burst_id, cw_end, cw_min);
+        cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
+                                     cw_min, cw_search_end, diag,
+                                     &cw_mag, &cw_expected, &cw_thresh);
+    }
     if (cw_end < 0) {
         DIAG("[fgb_iq] burst=%d CW end not found (amp=%.3f fq=%.1f n=%zu sr=%d bs=%ld)\n",
                 burst_id, cabsf(wiq[(burst_start - w0) + cw_samp/2]),
