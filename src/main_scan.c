@@ -485,6 +485,11 @@ static int measure_burst(uint64_t start, uint64_t len, double *freq_off,
     }
   }
 
+  for (int k = 0; k < FFT_N; k++) {
+    spec[k] -= (double)navg * floor_bin[k];
+    if (spec[k] < 0.0) spec[k] = 0.0;
+  }
+
   const double binhz = (double)SAMP_RATE / FFT_N;
   double peak = 0.0;
   for (int k = 0; k < FFT_N; k++) {
@@ -738,6 +743,8 @@ static void *process_thread(void *arg) {
         }
         state = 0;
         above = 0;
+        for (int k = 0; k < FFT_N; k++)
+          if (hotb[k]) floor_bin[k] = P[k];
       }
     }
 

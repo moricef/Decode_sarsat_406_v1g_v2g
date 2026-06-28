@@ -70,12 +70,17 @@ static void nco_wipe(float complex *samples, size_t n,
 /* Boxcar decimation: integrate isps samples per chip, starting at
  * sample offset 'offset' within each chip period. */
 static void boxcar_decimate_off(const float complex *in, size_t N,
-                                int isps, int offset,
+                                float sps, int offset,
                                 float complex *out, size_t n_chips)
 {
+    int isps = (int)(sps + 0.5f);
     for (size_t k = 0; k < n_chips; k++) {
         float complex acc = 0.0f;
-        size_t base = k * (size_t)isps + (size_t)offset;
+        /* Fractional chip stride: place each chip at round(k*sps)+offset so
+         * non-integer samples-per-chip (e.g. 78.125 at 3 MSPS) does not drift
+         * across the burst. At an integer sps (64 @ 2.4576 MSPS) this is
+         * identical to the old k*isps. */
+        size_t base = (size_t)((double)k * sps + (double)offset + 0.5);
         for (int j = 0; j < isps; j++) {
             size_t idx = base + (size_t)j;
             if (idx < N) acc += in[idx];
@@ -85,9 +90,9 @@ static void boxcar_decimate_off(const float complex *in, size_t N,
 }
 
 static void boxcar_decimate(const float complex *in, size_t N,
-                            int isps, float complex *out, size_t n_chips)
+                            float sps, float complex *out, size_t n_chips)
 {
-    boxcar_decimate_off(in, N, isps, 0, out, n_chips);
+    boxcar_decimate_off(in, N, sps, 0, out, n_chips);
 }
 
 int dsss_receive_burst(const float complex *ota_buffer,
@@ -117,7 +122,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     int isps = (int)(sps + 0.5f);
     size_t N = buffer_length;
-    size_t n_chips = N / (size_t)isps;
+    size_t n_chips = (size_t)((double)N / sps);
 
     int rc = -1;
     float complex *work  = (float complex *)malloc(N * sizeof(float complex));
@@ -143,7 +148,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     /* 2. Coarse acquisition: boxcar to chip rate on the un-delayed,
      *    still-rotating signal. fft-corr internally rotates the chips at
      *    each test frequency to find the best (freq, lag, phase). */
-    boxcar_decimate(work, N, isps, chips, n_chips);
+    boxcar_decimate(work, N, sps, chips, n_chips);
 
     /* Cap n_chips at 12000 for acquisition: empirically (see archive
      * dsss_demod_20260522.c) freq_acq_fft_corr's last_lag = n_chips -
@@ -194,7 +199,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
                     tmp[t] = r + q * I;
                 }
             }
-            boxcar_decimate(tmp, N, isps, c0, n_chips);
+            boxcar_decimate(tmp, N, sps, c0, n_chips);
 
             float best_f = acq.freq_hz, best_z = -1.0f;
             for (int df = -15; df <= 15; df += 5) {
@@ -253,10 +258,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
         int best_nerr = 99;
         for (int oi = 0; oi < n_offsets; oi++) {
-            size_t n_chips_off = (N - (size_t)offsets[oi]) / (size_t)isps;
+            size_t n_chips_off = (size_t)((double)(N - (size_t)offsets[oi]) / sps);
             if (n_chips_off < 6400) continue;
 
-            boxcar_decimate_off(work, N, isps, offsets[oi],
+            boxcar_decimate_off(work, N, sps, offsets[oi],
                                 chips, n_chips_off);
 
             despread_sync_t sync;
@@ -305,7 +310,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
             DIAG("[dsss_demod] BCH FAIL all 16 combos, best nerr=%d\n",
                  best_nerr);
             /* Fallback: re-decimate at offset 0, return best-effort bits. */
-            boxcar_decimate(work, N, isps, chips, n_chips);
+            boxcar_decimate(work, N, sps, chips, n_chips);
             despread_sync_t sync;
             if (despread_sync(chips, (int)n_chips, &sync) == 0) {
                 rc = despread_bits(chips, (int)n_chips, &sync,
