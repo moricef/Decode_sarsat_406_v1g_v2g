@@ -506,6 +506,7 @@ static int cmp_float_asc(const void *a, const void *b) {
 int freq_acq_fft_corr(const float complex *chips, int n_chips,
                       float chip_rate,
                       float freq_min, float freq_max,
+                      int max_lag,
                       freq_acq_result_t *result)
 {
     if (!chips || !result || chip_rate <= 0.0f)
@@ -554,6 +555,13 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
 
     /* ---- Stage 1: coarse 2D (frequency × chip-lag) search ---- */
     int    last_lag = n_chips - FFTC_COARSE_L;
+    /* The preamble lives inside the window's pre-roll; restrict the lag
+     * search to that region so spurious correlations in the post-preamble
+     * data/noise (observed beating the real peak at lags 9000-11000) cannot
+     * win. n_chips itself is left untouched so the fine-frequency stage
+     * still has the full buffer at the located lag. */
+    if (max_lag > 0 && max_lag < last_lag)
+        last_lag = max_lag;
     int    n_f = (int)((freq_max - freq_min) / FFTC_STEP_HZ) + 1;
     float  peak_pwr = 0.0f, best_f = 0.0f;
     int    best_lag = 0, best_phase = 0;

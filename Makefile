@@ -75,6 +75,12 @@ $(BUILD_DIR)/dec406_dsss_test: $(SRC_DIR)/test_dsss_main.c $(SRC_DIR)/dec406.c $
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "Built: $@"
 
+# test_acq_lag - Monte-Carlo validation of the acquisition lag-search cap
+$(BUILD_DIR)/test_acq_lag: $(UTILS_DIR)/test_acq_lag.c $(SRC_DIR)/freq_acq.c $(SRC_DIR)/despread.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ -lm -lfftw3f
+	@echo "Built: $@"
+
 # ============================================================================
 # Real-time scanner (unified FGB + SGB)
 # ============================================================================

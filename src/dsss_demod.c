@@ -95,6 +95,20 @@ static void boxcar_decimate(const float complex *in, size_t N,
     boxcar_decimate_off(in, N, sps, 0, out, n_chips);
 }
 
+/* A despread that locks onto noise (or onto a wrong boxcar offset) often
+ * collapses to an all-zero or all-one bit vector. The all-zero codeword is
+ * the trivial BCH(250,202) codeword and ALWAYS passes correction with 0
+ * errors, so without this guard such a lock is reported as a perfectly
+ * decoded beacon (TAC 0, country 0, ...). A real frame is never degenerate,
+ * so reject the constant vectors before accepting a BCH "success". */
+static int bits_degenerate(const uint8_t *bits, int n)
+{
+    int ones = 0;
+    for (int i = 0; i < n; i++)
+        ones += (bits[i] & 1);
+    return (ones == 0 || ones == n);
+}
+
 int dsss_receive_burst(const float complex *ota_buffer,
                        size_t buffer_length,
                        float sps,
@@ -156,8 +170,22 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * peaks at high lags beat the true preamble peak (typically lag
      * 600-1900 from historical locks). The 12000 cap matches the
      * 2026-05-19 working version that decoded the Toulouse CNES SGB.
-     * Despread below still receives the full chip stream. */
+     * Despread below still receives the full chip stream.
+     *
+     * n_chips_acq stays at 12000 so the fine-frequency stage (which needs
+     * preamble_lag + FFTC_PRN_LEN ~= 11800 chips) still works, but the
+     * COARSE chip-lag search is restricted to ACQ_MAX_LAG: the preamble can
+     * only sit inside the burst window's pre-roll (decode_sgb prepends
+     * ~0.2 s = 7680 chips of head), so anything beyond that is post-preamble
+     * data or noise. Real OTA failures showed the coarse search latching
+     * onto spurious peaks at lag 9000-11000 (conf ~2) while the true
+     * preamble peak sits at ~6000-7680; capping the lag forces the search
+     * back onto the real peak and raises confidence. */
     int n_chips_acq = (n_chips > 12000) ? 12000 : (int)n_chips;
+    /* 0.21 s of pre-roll worth of chips + margin (decode_sgb head = 0.20 s). */
+    int acq_max_lag = (int)(0.21f * chip_rate);
+    if (acq_max_lag > n_chips_acq - 1024)
+        acq_max_lag = n_chips_acq - 1024;
 
     float acq_conf_min = ACQ_CONF_MIN;
     { const char *e = getenv("ACQ_CONF_MIN");
@@ -166,7 +194,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     freq_acq_result_t acq;
     memset(&acq, 0, sizeof(acq));
     if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
-                          -8000.0f, 8000.0f, &acq) != 0 ||
+                          -8000.0f, 8000.0f, acq_max_lag, &acq) != 0 ||
         acq.confidence < acq_conf_min) {
         DIAG("[dsss_demod] acquisition rejected "
              "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
@@ -287,7 +315,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                      offsets[oi], isps, p * 90,
                      (double)sync.z_comb, nerr);
                 if (nerr < best_nerr) best_nerr = nerr;
-                if (brc == 0) {
+                if (brc == 0 && !bits_degenerate(output_bits,
+                                  DESPREAD_OUTPUT_BITS)) {
                     best_offset = oi;
                     best_phase = p;
                     break;

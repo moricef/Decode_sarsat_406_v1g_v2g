@@ -91,12 +91,20 @@ int freq_acq_from_alignment(const float complex *chips, int n_chips,
  * @param chip_rate   Chip rate in Hz.
  * @param freq_min    Carrier-offset search range, low bound (Hz).
  * @param freq_max    Carrier-offset search range, high bound (Hz).
+ * @param max_lag     Highest chip-lag to consider for the preamble peak
+ *                    (0 = search the whole buffer). The preamble can only
+ *                    sit inside the burst window's pre-roll, so capping the
+ *                    lag search to that region stops spurious noise/data
+ *                    correlations at higher lags from beating the true
+ *                    preamble peak. The full n_chips buffer is still used
+ *                    for the fine-frequency refinement.
  * @param result      Output: freq offset, confidence, phase.
  * @return 0 on success, -1 on error.
  */
 int freq_acq_fft_corr(const float complex *chips, int n_chips,
                       float chip_rate,
                       float freq_min, float freq_max,
+                      int max_lag,
                       freq_acq_result_t *result);
 
 #endif /* FREQ_ACQ_H */

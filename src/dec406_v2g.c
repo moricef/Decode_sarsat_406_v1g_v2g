@@ -758,6 +758,24 @@ void decode_2g(const uint8_t *rx_bits) {
     int diag_on = (getenv("DSSS_DIAG") != NULL);
     if (diag_on) diag_bch_id++;
 
+    /* Reject degenerate codewords. The all-zero (and all-one) vector is a
+     * valid BCH(250,202) codeword, so a despread that collapsed to a
+     * constant — a noise/wrong-offset lock — would otherwise be reported as
+     * a flawless beacon (TAC 0, country 0, ...). A real frame is never
+     * constant. This also guards the despread fallback path that returns
+     * best-effort bits without its own BCH gate. */
+    {
+        int ones = 0;
+        for (int i = 0; i < 250; i++) ones += (rx_bits[i] & 1);
+        if (ones == 0 || ones == 250) {
+            if (diag_on)
+                DIAG("[diag] bch burst=%d status=DEGENERATE\n", diag_bch_id);
+            printf("\n=== FRAME REJECTED — degenerate (all-%s) codeword ===\n",
+                   ones == 0 ? "zero" : "one");
+            return;
+        }
+    }
+
     // 1. Apply BCH error correction
     if (bch_decode_250_202(rx_bits, corrected, cw250) != 0) {
         if (diag_on)
