@@ -271,8 +271,13 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     freq_acq_result_t acq;
     memset(&acq, 0, sizeof(acq));
+    /* +/-16 kHz: the scanner's burst centroid was measured off by up to
+     * 9.5 kHz (a spectral mean pulled by in-band noise/interference), which
+     * pushed the post-mix residual outside the former +/-8 kHz window and
+     * made healthy bursts unacquirable (conf ~2). Upper bound is the
+     * chip-rate boxcar fold-over at +/-19.2 kHz. */
     if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
-                          -8000.0f, 8000.0f, acq_max_lag, &acq) != 0 ||
+                          -16000.0f, 16000.0f, acq_max_lag, &acq) != 0 ||
         acq.confidence < acq_conf_min) {
         DIAG("[dsss_demod] acquisition rejected "
              "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",

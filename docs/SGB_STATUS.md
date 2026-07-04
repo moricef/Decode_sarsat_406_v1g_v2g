@@ -289,3 +289,40 @@ La même paire a été mesurée indépendamment avec `prn_blocks.m` (Octave) : m
 1. **Granularité** : la cohérence des FAIL est détruite en dessous de 6,7 ms (un bloc de 256 chips), sur tout le préambule — pas de rupture progressive ni de zones survivantes.
 2. **Cause physique (fait brut, non tranché)** : une décorrélation sous 6,7 ms est inhabituelle pour un fading de trajet fixe 80 km (normalement lent, échelle de secondes). « Émission dégradée par intermittence côté source CNES » monte au même rang que « canal » parmi les candidates.
 3. **⚠️ Piège d'application `prn_blocks.m` sur les dumps scanner** : le résiduel post-NCO peut atteindre ±8 kHz (ex. OK 173027 = +7075 Hz). Une plage de recherche trop étroite fait sortir même un burst décodable au niveau bruit (1er essai invalide sur ce piège). Contrôle positif obligatoire avant toute conclusion sur un FAIL. Le FAIL 173255 a été balayé sur tout ±8 kHz au pas de 10 Hz : aucun pic nulle part, pas même à +7075 Hz où la même balise émettait 150 s plus tôt.
+
+## ⮕ RENVERSEMENT — les « FAIL » firmin étaient des bursts SAINS hors fenêtre d'acquisition — 4 juillet 2026 (soir)
+
+**Corrige les sections « cohérence par blocs » et « tracking offline » ci-dessus pour les dumps firmin du 4/07 : leurs conclusions (« structure PRN détruite », « profil 0619 », « rien à tracker ») étaient des artefacts d'une recherche de fréquence trop étroite — dans les scripts ET dans le décodeur lui-même.**
+
+### Découverte
+
+Incohérence relevée dans les noms de dumps : la balise calibration est fixe à ~+1047 Hz du centre (établi via l'OK : mixé −6028, résiduel retrouvé +7075). Or les FAIL étaient mixés à −7478 et −8449 → résiduels attendus **+8525 et +9496 Hz, hors de la fenêtre ±8 kHz de `freq_acq`** (et hors du balayage ±8 kHz des scripts d'analyse, qui héritaient du même angle mort).
+
+Vérification ciblée (`prn_blocks.m`, plages 8200-8900 et 9100-9900) :
+
+- `burst_sgb_173255` à **f0=+8525** : z=53,9, préambule au lag exact (7670), cohérence **0,48-0,55 uniforme** ;
+- `burst_sgb_173525` à **f0=+9495** : z=71,5, cohérence **0,61-0,69**.
+
+Bursts parfaitement sains. Le « basculement binaire » = résiduel dans la fenêtre (décode, les OK étaient à +7075, près du bord) ou hors fenêtre (conf ~2 garanti).
+
+### Cause amont
+
+Le **centroïde de `measure_burst()` dérape de 7 à 9,5 kHz** (moyenne spectrale seuillée à −10 dB, tirée par bruit/interférence in-band). Ce biais n'est pas borné par nature. Pourquoi il est systématiquement négatif ce soir-là : non élucidé, mais rendu inoffensif par le fix.
+
+### Fix appliqué (une ligne + commentaire)
+
+`src/dsss_demod.c` : fenêtre `freq_acq_fft_corr` élargie de ±8 kHz à **±16 kHz**. Dimensionnement : pire dérive mesurée 9,5 kHz (non bornée, 4 échantillons) + garde ; plafond physique = repli du boxcar chip-rate à ±19,2 kHz. Le coût est ~2× le temps d'acquisition coarse ; les faux pics restent contenus par le seuil de conf (vrais pics 40-70 vs seuil 8), le cap de lag et le BCH.
+
+### Validation offline
+
+- Synthétique : conf 68,5, BCH nerr=0 (pas de régression).
+- `burst_sgb_173255` : **BCH validated nerr=1**, +8524 Hz, conf 43,3, calibration 65535.
+- `burst_sgb_173525` : **BCH validated nerr=0**, +9495 Hz, conf 41,0.
+
+### Conséquences à retenir
+
+1. Les conclusions « famille 0619 » appliquées aux échecs firmin du 4/07 sont **retirées** — ces bursts étaient sains. Le VERDICT 0619 originel (fichier gqrx du 19/06, capture centrée sur la balise, pas de pré-mix scanner) reste valide tel quel : son analyse cherchait à la bonne fréquence.
+2. Le bucket « jamais-synchro » historique de firmin (ex. 1375 bursts la nuit du 21/06) contient une part inconnue de **hors-fenêtre récupérables** — le taux bout-en-bout historique est sous-estimé. À re-mesurer avec la fenêtre ±16 kHz.
+3. Leçon méthodo (3e occurrence du même piège, désormais à trois niveaux : script d'analyse, outil EPL, décodeur) : **toute recherche de fréquence doit couvrir l'incertitude réelle de son a priori, et tout « pas de signal » vaut seulement dans la plage cherchée.** Contrôle positif obligatoire, et vérifier les bornes AVANT de conclure à la destruction du signal.
+
+Reste à faire : test firmin live (grille 150 s attendue en forte hausse vs 62 %/24 %), puis commit après validation terrain.
