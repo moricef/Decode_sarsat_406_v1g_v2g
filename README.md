@@ -20,19 +20,38 @@ beacons at 406 MHz.
   loop): DC blocker → FFT-correlation frequency acquisition → NCO wipeoff →
   OQPSK delay → multi-offset boxcar decimation → despread with preamble
   linear-fit frequency estimation + per-bit Costas PLL → BCH. Oracle tries
-  4 boxcar offsets × 4 Costas phases (16 combos) before giving up.
-  93 % decode rate at 80 km relay.
+  4 boxcar offsets × 4 Costas phases (16 combos) before giving up. The
+  acquisition lag search is capped to the burst pre-roll to avoid late
+  noise/data peaks beating the true preamble.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
-  slicer, BCH1 brute-force error correction (t=3), CRC. 92 % decode rate
-  at 80 km relay (evening propagation).
+  slicer, BCH1 brute-force error correction (t=3), CRC.
 
 ### Real-time scanner
-`dec406_scan` ingests RTL-SDR samples directly via librtlsdr (synchronous
-mode), runs a spectral burst detector over the 100 kHz band, classifies
-each burst as FGB or SGB by bandwidth, and decodes accordingly. Designed
-to run as a systemd service; see "Real-time scanner" below.
+`dec406_scan` is a unified real-time scanner with automatic SDR backend
+selection (Airspy Mini, RTL-SDR, PlutoSDR). The RTL-SDR backend uses
+`rtlsdr_read_async()` with large buffers; the previous synchronous path could
+silently underfeed the scanner and corrupt long FGB/SGB bursts. The scanner
+runs a spectral burst detector over the 100 kHz band, classifies each burst as
+FGB or SGB by bandwidth, and decodes accordingly. Designed to run as a systemd
+service; see "Real-time scanner" below.
+
+### Current validation status
+
+Rates depend strongly on propagation, time of day, local noise, and which CNES
+system beacons are active. Track three SGB buckets separately:
+
+| Metric | Definition |
+|--------|------------|
+| SGB acquisition/sync | `(BCH OK + FRAME REJECTED) / detected SGB bursts` |
+| SGB decoder purity | `BCH OK / (BCH OK + FRAME REJECTED)` |
+| SGB end-to-end | `BCH OK / detected SGB bursts` |
+
+Recent local RTL/Yagi validation after the async RTL fix and fredzo SGB
+corrections showed no "strong preamble sync then random data" failures: SGBs
+that synchronize validate BCH cleanly; remaining SGB misses are acquisition
+rejects (`coarse reject conf ...`) and should be counted as a separate bucket.
 
 ---
 
@@ -51,7 +70,7 @@ Binaries produced in `build/`:
 | `dec406_iq` | SGB DSSS/OQPSK demodulator from IQ file |
 | `dec406_hex` | 1G/2G decoder from hex string |
 | `dec406_audio` | 1G decoder from WAV file (legacy FM-demod pipeline) |
-| `dec406_scan` | Real-time FGB+SGB band scanner (rtl-sdr) |
+| `dec406_scan` | Real-time FGB+SGB band scanner (Airspy/RTL-SDR/PlutoSDR) |
 | `dec406_dsss_test` | DSSS demodulator unit test driver |
 | `generate_2g_hex` | 2G test frame generator |
 | `reset_usb` | USB device reset utility |
@@ -91,9 +110,16 @@ interleaved, `-I` int32 SDRangel ci32_le.
 ```
 
 The scanner reads samples at 2.4576 Msps, detects bursts on a power
-spectrogram, classifies them by bandwidth (≥ 40 kHz → SGB), and runs the
-appropriate decoder. Each cycle is 55 s; the dongle is then closed,
-USB-reset, and reopened to clear accumulated libusb state.
+spectrogram, classifies them by bandwidth (`BW_SPLIT_HZ = 20 kHz`; wider
+bursts are SGB), and runs the appropriate decoder. On RTL-SDR it resets the
+USB device at startup, then captures continuously through the asynchronous
+librtlsdr API.
+
+Set `RTL_DIAG=1` to log effective RTL throughput every few seconds:
+
+```bash
+RTL_DIAG=1 ./build/dec406_scan 406.0M 406.1M
+```
 
 #### As a systemd service
 
