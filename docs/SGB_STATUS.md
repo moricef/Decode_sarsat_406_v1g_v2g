@@ -258,3 +258,34 @@ Analyse burst par burst de `scan406_butterworth_diag_20260704_1632.log` (41 burs
 Taux calibration sur cette fenêtre : 4/17 créneaux = 24 %, contre 62 % à 13-14 h le même jour, récepteur identique, FGB stable à ~91 % pendant toute la période → la variabilité est côté trajet/émission, pas côté récepteur.
 
 Rapprochement : ce profil (énergie présente, structure PRN détruite, z/conf plafonnés bas, famille entière) est la signature du dossier 0619 (voir VERDICT 21 juin). Le goulot d'acquisition firmin sur vraies SGB isolées = vraisemblablement le même phénomène, cause physique toujours ouverte. Les dumps `DUMP_OK`/`DUMP_FAIL` + cohérence par blocs (scripts `prn_*.m` validés sur 0614/0619) sont l'outil prévu pour trancher.
+
+## Branche tracking offline — 4 juillet 2026
+
+Branche : `experiment/sgb-tracking-offline`.
+
+Objectif validé : ne pas réintégrer directement la tentative historique FLL/PLL/DLL/Kalman. Avant tout tracking sample-rate, mesurer offline si les bursts FAIL contiennent des mesures Prompt/Early/Late exploitables. Si le Prompt bloc est au niveau bruit, une boucle FLL/DLL/Kalman ne peut pas verrouiller proprement.
+
+Outil ajouté : `utils/sgb_epl_diag.c`, cible `make build/sgb_epl_diag`. L'outil lit une fenêtre `cf32`, reproduit le front-end SGB actuel jusqu'au chip-rate (DC blocker, acquisition FFT-corr, wipeoff sample-rate, délai OQPSK, boxcar), cherche le meilleur préambule même sous seuil, puis sort un CSV par bloc de 256 chips :
+
+- `prompt_mag`, `prompt_coh`, `prompt_phase_rad` ;
+- fréquence bloc à bloc dérivée de la phase Prompt ;
+- Early/Late à +/-1 chip et discriminateur DLL approximatif.
+
+Résultat sur les dumps firmin déjà analysés :
+
+| Dump | freq_acq conf | sync_z | Prompt cohérence min/mean/max | blocs > 0.25 | freq RMS bloc |
+|---|---:|---:|---:|---:|---:|
+| `sgb_ok_173027_-6028Hz.cf32` | 60.5 | 84.9 | 0.768 / 0.794 / 0.822 | 25/25 | 0.9 Hz |
+| `sgb_ok_172757_-6084Hz.cf32` | 64.6 | 91.8 | 0.845 / 0.867 / 0.884 | 25/25 | 0.8 Hz |
+| `burst_sgb_173255_-7478Hz.cf32` | 2.0 | 6.0 | 0.024 / 0.072 / 0.135 | 0/25 | 42.6 Hz |
+| `burst_sgb_173525_-8449Hz.cf32` | 1.9 | 5.6 | 0.003 / 0.061 / 0.129 | 0/25 | 38.2 Hz |
+
+Interprétation : les OK offrent un Prompt fort, uniforme, et une phase bloc stable. Les FAIL n'ont aucun bloc localement exploitable ; le meilleur pic et le second pic sont quasi égaux et la phase bloc saute comme du bruit. À ce stade, un tracking FLL/DLL/Kalman classique n'a pas de mesure fiable à verrouiller sur ces FAIL. Le tracking peut rester une piste pour des captures "faibles mais cohérentes", mais les FAIL firmin mesurés appartiennent au bucket "préambule PRN incohérent", pas au bucket "tracking insuffisant".
+
+### Compléments cross-validation (2e chaîne, Octave) — 4 juillet 2026 soir
+
+La même paire a été mesurée indépendamment avec `prn_blocks.m` (Octave) : mêmes conclusions que `sgb_epl_diag` (OK z=57.8 coh 0.50-0.57 uniforme ; FAIL au null 0.07 sur 25/25 blocs). Trois points supplémentaires :
+
+1. **Granularité** : la cohérence des FAIL est détruite en dessous de 6,7 ms (un bloc de 256 chips), sur tout le préambule — pas de rupture progressive ni de zones survivantes.
+2. **Cause physique (fait brut, non tranché)** : une décorrélation sous 6,7 ms est inhabituelle pour un fading de trajet fixe 80 km (normalement lent, échelle de secondes). « Émission dégradée par intermittence côté source CNES » monte au même rang que « canal » parmi les candidates.
+3. **⚠️ Piège d'application `prn_blocks.m` sur les dumps scanner** : le résiduel post-NCO peut atteindre ±8 kHz (ex. OK 173027 = +7075 Hz). Une plage de recherche trop étroite fait sortir même un burst décodable au niveau bruit (1er essai invalide sur ce piège). Contrôle positif obligatoire avant toute conclusion sur un FAIL. Le FAIL 173255 a été balayé sur tout ±8 kHz au pas de 10 Hz : aucun pic nulle part, pas même à +7075 Hz où la même balise émettait 150 s plus tôt.

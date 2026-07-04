@@ -81,6 +81,12 @@ $(BUILD_DIR)/test_acq_lag: $(UTILS_DIR)/test_acq_lag.c $(SRC_DIR)/freq_acq.c $(S
 	$(CC) $(CFLAGS) -o $@ $^ -lm -lfftw3f
 	@echo "Built: $@"
 
+# sgb_epl_diag - Offline SGB preamble EPL/Prompt diagnostics for cf32 windows
+$(BUILD_DIR)/sgb_epl_diag: $(UTILS_DIR)/sgb_epl_diag.c $(SRC_DIR)/freq_acq.c $(SRC_DIR)/despread.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ -lm -lfftw3f
+	@echo "Built: $@"
+
 # ============================================================================
 # Real-time scanner (unified FGB + SGB)
 # ============================================================================
