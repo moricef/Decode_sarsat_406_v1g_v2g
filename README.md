@@ -22,7 +22,9 @@ beacons at 406 MHz.
   linear-fit frequency estimation + per-bit Costas PLL → BCH. Oracle tries
   4 boxcar offsets × 4 Costas phases (16 combos) before giving up. The
   acquisition lag search is capped to the burst pre-roll to avoid late
-  noise/data peaks beating the true preamble.
+  noise/data peaks beating the true preamble. The FFT-correlation frequency
+  search spans ±16 kHz, which covers scanner centroid errors observed on
+  real CNES SGB bursts.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
@@ -48,10 +50,15 @@ system beacons are active. Track three SGB buckets separately:
 | SGB decoder purity | `BCH OK / (BCH OK + FRAME REJECTED)` |
 | SGB end-to-end | `BCH OK / detected SGB bursts` |
 
-Recent local RTL/Yagi validation after the async RTL fix and fredzo SGB
-corrections showed no "strong preamble sync then random data" failures: SGBs
-that synchronize validate BCH cleanly; remaining SGB misses are acquisition
-rejects (`coarse reject conf ...`) and should be counted as a separate bucket.
+Recent validation after the async RTL fix, fredzo SGB corrections, and the
+±16 kHz acquisition search showed no "strong preamble sync then random data"
+failures: SGBs that synchronize validate BCH cleanly. On 2026-07-04 the firmin
+relay recovered calibration SGB bursts whose residual offsets were around
++8.6 to +11.1 kHz, outside the previous ±8 kHz search window; the same run
+showed roughly 93 % SGB calibration-slot success on the 150 s grid. Local
+RTL/Yagi validation remained in the same range, and FGB stayed around its
+pre-existing 90 % class. Treat these as run-specific field checks, not fixed
+global rates.
 
 ---
 
@@ -120,6 +127,19 @@ Set `RTL_DIAG=1` to log effective RTL throughput every few seconds:
 ```bash
 RTL_DIAG=1 ./build/dec406_scan 406.0M 406.1M
 ```
+
+Useful SGB diagnostics:
+
+```bash
+DSSS_DIAG=1 ./build/dec406_scan 406.0M 406.1M
+DUMP_FAIL=1 ./build/dec406_scan 406.0M 406.1M
+make build/sgb_epl_diag
+```
+
+`DUMP_FAIL=1` writes failed SGB burst windows as `burst_sgb_*.cf32` for
+offline replay. `build/sgb_epl_diag` probes those dumps with EPL
+correlators at wider residual-frequency ranges. `ACQ_BANDPASS_HZ` is kept as
+a diagnostic acquisition-only filter; default `0` leaves it disabled.
 
 #### As a systemd service
 
@@ -191,7 +211,7 @@ Additional silencing filters layered on the channel whitelist:
 IQ @ 2.4576 MHz
   → DC blocker (IIR α=0.001)
   → boxcar decimation to chip rate (acquisition only)
-  → freq_acq_fft_corr (chip-rate FFT-correlation, ~1 Hz precision)
+  → freq_acq_fft_corr (chip-rate FFT-correlation, ±16 kHz, ~1 Hz precision)
   → NCO wipeoff at sample rate
   → OQPSK delay (Q advanced by SPS/2)
   → multi-offset boxcar decimation (4 sub-chip offsets)
@@ -233,8 +253,9 @@ src/         C sources (dsss_demod, despread, freq_acq, fgb_iq_demod,
 include/     Headers
 build/       Compiled binaries
 tests/       SGB codec unit tests, BCH reject tests
+utils/       Offline diagnostic tools
 scripts/     Analysis / debug scripts
-docs/        T.018 specifications, architecture (not on GitHub)
+docs/        Specifications, deployment notes, SGB status notes
 data/        Runtime data (config_mail.txt, etc.)
 ```
 

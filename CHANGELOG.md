@@ -1,5 +1,42 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.9 - 2026-07-04 - Wider SGB acquisition search
+
+### SGB acquisition search widened to ±16 kHz (`src/dsss_demod.c`)
+
+`freq_acq_fft_corr()` is now called with a ±16 kHz residual-frequency search
+window instead of ±8 kHz. Field dumps from firmin showed valid CNES SGB
+calibration bursts with correlation peaks at roughly +8.6 to +11.1 kHz from
+the scanner burst centroid; the previous search range rejected those bursts
+before despreading even though the signal was usable.
+
+This is an acquisition-only change. The post-sync SGB path remains unchanged:
+NCO wipeoff, OQPSK delay, despread, per-bit Costas, and BCH validation are the
+same as in 10.2.8.
+
+### Offline SGB EPL diagnostic tool (`utils/sgb_epl_diag.c`)
+
+Added `build/sgb_epl_diag` to analyze dumped SGB bursts offline with
+Early/Prompt/Late PRN correlators. The tool was used to separate true
+structure loss from an acquisition search-window miss, and to verify that the
+rejected firmin bursts still had strong prompt correlation outside ±8 kHz.
+
+### Validation update
+
+2026-07-04 local and firmin logs were rechecked on the 150 s CNES calibration
+grid after the wider acquisition search:
+
+- firmin: about 93 % SGB calibration-slot success in the checked post-fix
+  window; recovered bursts had residual offsets outside the old ±8 kHz range;
+- local RTL/Yagi: remained in the same high-success range, with no regression
+  from the acquisition change;
+- FGB: no regression observed; still in the pre-existing ~90 % field class;
+- BCH/frame rejects: no return of the earlier "strong preamble, random data"
+  failure mode.
+
+The acquisition-only Butterworth filter remains available through
+`ACQ_BANDPASS_HZ` for experiments, but the default is disabled (`0`).
+
 ## Version 10.2.8 - 2026-07-04 - Unified scanner, RTL async, cautious rate accounting
 
 ### Real-time scanner unified on `main`
