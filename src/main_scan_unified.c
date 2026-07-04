@@ -105,6 +105,12 @@ int main(int argc, char **argv) {
 
     printf("  rate    : %.4f MSPS   (SPS=%.1f for SGB)\n",
            samp_rate / 1e6, (double)samp_rate / 38400.0);
+    if (gain < 0)
+        printf("  gain    : auto\n");
+    else
+        printf("  gain    : %d\n", gain);
+    printf("  %-8s: %d\n", (strcmp(ops->name, "RTL-SDR") == 0) ? "ppm" : "extra",
+           extra);
 
     if (span > samp_rate)
         DWARN("WARNING: band span %.0f Hz > sample rate %u Hz\n", span, samp_rate);
