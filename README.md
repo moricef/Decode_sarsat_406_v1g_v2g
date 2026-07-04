@@ -250,6 +250,12 @@ data/        Runtime data (config_mail.txt, etc.)
 
 ---
 
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.
+
+---
+
 ## References
 
 - **C/S T.001** — 1st Generation Beacon Specification (FGB)
