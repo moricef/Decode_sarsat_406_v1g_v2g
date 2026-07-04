@@ -326,3 +326,19 @@ Le **centroïde de `measure_burst()` dérape de 7 à 9,5 kHz** (moyenne spectral
 3. Leçon méthodo (3e occurrence du même piège, désormais à trois niveaux : script d'analyse, outil EPL, décodeur) : **toute recherche de fréquence doit couvrir l'incertitude réelle de son a priori, et tout « pas de signal » vaut seulement dans la plage cherchée.** Contrôle positif obligatoire, et vérifier les bornes AVANT de conclure à la destruction du signal.
 
 Reste à faire : test firmin live (grille 150 s attendue en forte hausse vs 62 %/24 %), puis commit après validation terrain.
+
+### Validation terrain de la fenêtre ±16 kHz — 4 juillet 2026, 21:20→21:58
+
+Déploiement sur firmin (branche `experiment/sgb-tracking-offline`, commit `ad52646`) via le nouveau workflow git (`docs/DEPLOY_FIRMIN.md`), service redémarré vers 21:19. Logs suivis en parallèle : `scan406_butterworth_diag_20260704_2120.log` (firmin) et `CNES_local_async_Butterworth_20260704_212211.log` (local).
+
+Résultats sur ~37 min (comparer à 62 % l'après-midi et 24 % en début de soirée, même méthode grille) :
+
+- **SGB firmin : 14/15 créneaux de 150 s = 93 %.**
+- **Les 14 décodées ont TOUTES un résiduel entre +8,9 et +11,0 kHz** — chacune aurait été rejetée par l'ancienne fenêtre ±8 kHz. Avec l'ancien code, la soirée serait à 0 %. Preuve directe et individuelle de l'effet du fix.
+- Le dérapage du centroïde atteint désormais ~11 kHz (vs 9,5 kHz mesuré l'après-midi) : le dimensionnement ±16 kHz (plutôt que ±12) était justifié — confirme que l'erreur du centroïde n'est pas bornée par les observations passées.
+- SGB local : 14/28, rien de cassé (résiduels locaux < 8 kHz : le centroïde local ne dérape pas comme firmin).
+- **FGB : ~90 % des deux côtés.** Creux transitoire 21:33→21:40 observé simultanément sur les DEUX sites (récepteurs et antennes indépendants, 80 km d'écart) → balise/propagation, sans lien avec le code ; refermé de lui-même. 0 fenêtre écrasée, 0-1 overrun.
+
+Note de comptage : ces 62 %/24 %/93 % sont la grille 150 s de la calibration seule (rafales exclues par construction). Ne pas confondre avec le « ~32 % bout-en-bout » qui divise par tous les bursts détectés, rafales comprises.
+
+Statut : fix validé terrain. Prochaine étape : merge `experiment/sgb-tracking-offline` → `main`, remettre firmin en checkout `main`, et re-mesurer sur une longue durée (les taux historiques « jamais-synchro » sont à réévaluer avec la nouvelle fenêtre).
