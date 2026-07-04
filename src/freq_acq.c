@@ -646,8 +646,13 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
         result->freq_hz      = best_f;
         result->confidence   = conf;
         result->costas_phase = best_phase;
-        DIAG("[freq_acq] fft-corr: coarse reject conf %.1f (need >=5)\n",
-             (double)conf);
+        DIAG(
+                "[freq_acq] fft-corr: coarse reject conf %.1f (need >=5)  "
+                "offset %.0f Hz  lag %d/%d (n_chips %d remain %d)  "
+                "peak %.2e  median %.2e  mean %.2e  phase %d\n",
+                (double)conf, (double)best_f, best_lag, last_lag, n_chips,
+                n_chips - best_lag,
+                (double)peak_pwr, (double)median, (double)mean, best_phase);
         return 0;
     }
 

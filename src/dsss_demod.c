@@ -10,6 +10,7 @@
  * Chain:
  *   ota_buffer
  *     → DC blocker (IIR α=0.001)
+ *     → optional acquisition-only low-pass at sample rate
  *     → boxcar decimation to chip rate (un-delayed, for acquisition only)
  *     → freq_acq_fft_corr (chip-rate FFT-correlation)
  *     → NCO wipeoff at sample rate
@@ -44,6 +45,62 @@ extern int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out,
 /* Minimum confidence from freq_acq_fft_corr to accept the acquisition.
  * Empirically: real OTA locks give 40+, pure-noise picks give 2-4. */
 #define ACQ_CONF_MIN 8.0f
+
+/* Acquisition-only low-pass cutoff before chip-rate boxcar decimation.
+ * Disabled by default; set ACQ_BANDPASS_HZ=45000 for A/B diagnostics. */
+#define ACQ_BANDPASS_HZ 0.0f
+
+typedef struct {
+    float b0, b1, b2;
+    float a1, a2;
+    float z1_i, z2_i;
+    float z1_q, z2_q;
+} biquad_t;
+
+static void biquad_init_lowpass(biquad_t *bq, float cutoff_hz,
+                                float fs, float q)
+{
+    float k = tanf((float)M_PI * cutoff_hz / fs);
+    float k2 = k * k;
+    float norm = 1.0f / (1.0f + k / q + k2);
+
+    bq->b0 = k2 * norm;
+    bq->b1 = 2.0f * bq->b0;
+    bq->b2 = bq->b0;
+    bq->a1 = 2.0f * (k2 - 1.0f) * norm;
+    bq->a2 = (1.0f - k / q + k2) * norm;
+    bq->z1_i = bq->z2_i = 0.0f;
+    bq->z1_q = bq->z2_q = 0.0f;
+}
+
+static float biquad_process_real(biquad_t *bq, float x,
+                                 float *z1, float *z2)
+{
+    float y = bq->b0 * x + *z1;
+    *z1 = bq->b1 * x - bq->a1 * y + *z2;
+    *z2 = bq->b2 * x - bq->a2 * y;
+    return y;
+}
+
+static void acq_lowpass(float complex *samples, size_t n,
+                        float cutoff_hz, float fs)
+{
+    biquad_t s1, s2;
+    biquad_init_lowpass(&s1, cutoff_hz, fs, 0.5411961f);
+    biquad_init_lowpass(&s2, cutoff_hz, fs, 1.3065630f);
+
+    for (size_t k = 0; k < n; k++) {
+        float i = __real__ samples[k];
+        float q = __imag__ samples[k];
+
+        i = biquad_process_real(&s1, i, &s1.z1_i, &s1.z2_i);
+        q = biquad_process_real(&s1, q, &s1.z1_q, &s1.z2_q);
+        i = biquad_process_real(&s2, i, &s2.z1_i, &s2.z2_i);
+        q = biquad_process_real(&s2, q, &s2.z1_q, &s2.z2_q);
+
+        samples[k] = i + q * I;
+    }
+}
 
 /* In-place NCO carrier wipeoff at sample rate. */
 static void nco_wipe(float complex *samples, size_t n,
@@ -139,7 +196,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
     size_t n_chips = (size_t)((double)N / sps);
 
     int rc = -1;
-    float complex *work  = (float complex *)malloc(N * sizeof(float complex));
+    float complex *work = (float complex *)malloc(N * sizeof(float complex));
+    float complex *acq_work = NULL;
     float complex *chips = (float complex *)calloc(n_chips, sizeof(float complex));
     if (!work || !chips) {
         DIAG("[dsss_demod] allocation failure\n");
@@ -159,10 +217,30 @@ int dsss_receive_burst(const float complex *ota_buffer,
         }
     }
 
+    float acq_bandpass_hz = ACQ_BANDPASS_HZ;
+    { const char *e = getenv("ACQ_BANDPASS_HZ");
+      if (e) acq_bandpass_hz = (float)atof(e); }
+    if (acq_bandpass_hz > 0.0f) {
+        float nyq = 0.5f * fs;
+        if (acq_bandpass_hz >= nyq)
+            acq_bandpass_hz = 0.0f;
+    }
+    if (acq_bandpass_hz > 0.0f) {
+        acq_work = (float complex *)malloc(N * sizeof(float complex));
+        if (!acq_work) {
+            DIAG("[dsss_demod] acquisition filter allocation failure\n");
+            goto cleanup;
+        }
+        memcpy(acq_work, work, N * sizeof(float complex));
+        acq_lowpass(acq_work, N, acq_bandpass_hz, fs);
+        DIAG("[dsss_demod] acquisition bandpass %.0f Hz\n",
+             (double)acq_bandpass_hz);
+    }
+
     /* 2. Coarse acquisition: boxcar to chip rate on the un-delayed,
      *    still-rotating signal. fft-corr internally rotates the chips at
      *    each test frequency to find the best (freq, lag, phase). */
-    boxcar_decimate(work, N, sps, chips, n_chips);
+    boxcar_decimate(acq_work ? acq_work : work, N, sps, chips, n_chips);
 
     /* Cap n_chips at 12000 for acquisition: empirically (see archive
      * dsss_demod_20260522.c) freq_acq_fft_corr's last_lag = n_chips -
@@ -435,6 +513,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     }
 
 cleanup:
+    free(acq_work);
     free(work);
     free(chips);
     return rc;

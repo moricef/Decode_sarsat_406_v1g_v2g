@@ -138,6 +138,19 @@ static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
     int rc = dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f, fs, 0, bits, &z);
 
     if (rc == 0) {
+        if (getenv("DUMP_OK")) {
+            time_t now = time(NULL);
+            struct tm *tm = localtime(&now);
+            char path[128];
+            snprintf(path, sizeof path, "sgb_ok_%02d%02d%02d_%.0fHz.cf32",
+                     tm->tm_hour, tm->tm_min, tm->tm_sec, offset_hz);
+            FILE *fp = fopen(path, "wb");
+            if (fp) {
+                fwrite(win, sizeof(float complex), (size_t)ext_len, fp);
+                fclose(fp);
+                printf("  dumped %s\n", path);
+            }
+        }
         free(win);
         printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
         char *body = capture_decode(decode_beacon, bits,
