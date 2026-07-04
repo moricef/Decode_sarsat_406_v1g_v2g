@@ -8,11 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 #include <rtl-sdr.h>
 
 #define SAMP_RATE 2457600u
-#define CAP_CHUNK (1u << 17)
+#define RTL_ASYNC_BUF_NUM 32u
+#define RTL_ASYNC_BUF_LEN (1u << 18)
 
 struct backend {
     rtlsdr_dev_t *dev;
@@ -21,6 +23,12 @@ struct backend {
     int running;
     int gain;
     int ppm;
+    float complex *tmp;
+    size_t tmp_cap;
+    int diag;
+    uint64_t diag_total;
+    struct timespec diag_t0;
+    struct timespec diag_last;
 };
 
 static int silence_stderr_begin(void) {
@@ -84,6 +92,7 @@ static backend_t *rtlsdr_open_dev(uint32_t freq_hz, uint32_t *samp_rate,
     if (!b) return NULL;
     b->gain = gain;
     b->ppm = ppm;
+    b->diag = getenv("RTL_DIAG") != NULL;
 
     int saved = silence_stderr_begin();
     int rc = rtlsdr_open(&b->dev, 0);
@@ -107,24 +116,64 @@ static backend_t *rtlsdr_open_dev(uint32_t freq_hz, uint32_t *samp_rate,
     return b;
 }
 
+static void rtlsdr_async_cb(unsigned char *buf, uint32_t len, void *ctx) {
+    backend_t *b = (backend_t *)ctx;
+    if (!b->running || !buf || len < 2) return;
+
+    size_t ns = (size_t)len / 2;
+    if (ns > b->tmp_cap) {
+        float complex *tmp = realloc(b->tmp, ns * sizeof(float complex));
+        if (!tmp) {
+            b->running = 0;
+            rtlsdr_cancel_async(b->dev);
+            scanner_stop(b->scanner);
+            return;
+        }
+        b->tmp = tmp;
+        b->tmp_cap = ns;
+    }
+
+    if (b->diag) {
+        b->diag_total += ns;
+        struct timespec tn;
+        clock_gettime(CLOCK_MONOTONIC, &tn);
+        if (tn.tv_sec - b->diag_last.tv_sec >= 5) {
+            double el = (tn.tv_sec - b->diag_t0.tv_sec)
+                      + (tn.tv_nsec - b->diag_t0.tv_nsec) / 1e9;
+            DIAG("[rtl] throughput %.0f S/s (nominal %u, elapsed %.1fs)\n",
+                 (double)b->diag_total / el, SAMP_RATE, el);
+            b->diag_last = tn;
+        }
+    }
+
+    for (size_t i = 0; i < ns; i++) {
+        float si = ((float)buf[2*i] - 127.5f) / 127.5f;
+        float sq = ((float)buf[2*i+1] - 127.5f) / 127.5f;
+        b->tmp[i] = si + sq * I;
+    }
+    scanner_push(b->scanner, b->tmp, ns);
+}
+
 static void *capture_loop(void *arg) {
     backend_t *b = (backend_t *)arg;
-    uint8_t buf[CAP_CHUNK];
+    b->tmp_cap = RTL_ASYNC_BUF_LEN / 2;
+    b->tmp = malloc(b->tmp_cap * sizeof(float complex));
+    if (!b->tmp) { b->running = 0; scanner_stop(b->scanner); return NULL; }
 
-    while (b->running) {
-        int n_read = 0;
-        int rc = rtlsdr_read_sync(b->dev, buf, (int)CAP_CHUNK, &n_read);
-        if (rc < 0 || n_read <= 0) break;
-
-        size_t ns = (size_t)n_read / 2;
-        float complex tmp[ns];
-        for (size_t i = 0; i < ns; i++) {
-            float si = ((float)buf[2*i] - 127.5f) / 127.5f;
-            float sq = ((float)buf[2*i+1] - 127.5f) / 127.5f;
-            tmp[i] = si + sq * I;
-        }
-        scanner_push(b->scanner, tmp, ns);
+    if (b->diag) {
+        clock_gettime(CLOCK_MONOTONIC, &b->diag_t0);
+        b->diag_last = b->diag_t0;
+        b->diag_total = 0;
     }
+
+    int rc = rtlsdr_read_async(b->dev, rtlsdr_async_cb, b,
+                               RTL_ASYNC_BUF_NUM, RTL_ASYNC_BUF_LEN);
+    if (rc < 0 && b->running)
+        DWARN("WARNING: RTL async read failed (%d)\n", rc);
+
+    free(b->tmp);
+    b->tmp = NULL;
+    b->tmp_cap = 0;
     b->running = 0;
     scanner_stop(b->scanner);
     return NULL;
@@ -138,6 +187,7 @@ static int rtlsdr_start_dev(backend_t *b, scanner_t *s) {
 
 static void rtlsdr_stop_dev(backend_t *b) {
     b->running = 0;
+    rtlsdr_cancel_async(b->dev);
     pthread_join(b->cap_thread, NULL);
 }
 
