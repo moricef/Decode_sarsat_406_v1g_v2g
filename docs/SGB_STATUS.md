@@ -342,3 +342,30 @@ Résultats sur ~37 min (comparer à 62 % l'après-midi et 24 % en début de soir
 Note de comptage : ces 62 %/24 %/93 % sont la grille 150 s de la calibration seule (rafales exclues par construction). Ne pas confondre avec le « ~32 % bout-en-bout » qui divise par tous les bursts détectés, rafales comprises.
 
 Statut : fix validé terrain. Prochaine étape : merge `experiment/sgb-tracking-offline` → `main`, remettre firmin en checkout `main`, et re-mesurer sur une longue durée (les taux historiques « jamais-synchro » sont à réévaluer avec la nouvelle fenêtre).
+
+### Validation longue après merge main — nuit/matin 5 juillet 2026
+
+Logs de référence :
+
+- firmin : `logs/scan406_butterworth_diag_20260705_0000.log`
+- local RTL/Yagi recalé : `logs/CNES_local_async_Butterworth_20260705_084647.log`
+
+Résultats firmin 00:00→09:05 :
+
+- FGB : **1495/1542 = 97,0 %**.
+- SGB brute : 202 OK / 451 détectées = 44,8 % — chiffre volontairement non retenu comme taux utile, car il mélange la calibration et les salves non décodables.
+- SGB calibration sur grille 150 s : **202/219 = 92,2 %**.
+- `FRAME REJECTED` SGB : **0**.
+- Les 17 créneaux manqués tombent tous dans les salves périodiques `xx:10` / `xx:40`, avec deux rejets détectés au voisinage du créneau.
+- Résiduels des SGB OK : **−3245 à +11088 Hz** → confirme que la fenêtre ±16 kHz reste nécessaire sur firmin.
+
+Résultats local 08:47→11:27 :
+
+- FGB : **413/446 = 92,6 %**.
+- SGB brute : 59 OK / 129 détectées = 45,7 % — même piège de comptage que firmin.
+- SGB calibration sur grille 150 s : **59/64 = 92,2 %**.
+- `FRAME REJECTED` SGB : **0**.
+- Les 5 créneaux manqués tombent tous dans les salves périodiques `xx:10` / `xx:40`.
+- Résiduels des SGB OK : **−3752 à +825 Hz** → localement l'ancienne fenêtre ±8 kHz suffisait, mais le fix ne coûte rien.
+
+Conclusion consolidée : après async RTL + correctifs fredzo + fenêtre `freq_acq` ±16 kHz, le taux utile de la **calibration SGB 65535** est stable autour de **92 % sur les deux sites**. Les taux bruts autour de 45 % ne décrivent pas le décodeur SGB : ils comptent les salves périodiques non-calibration comme des échecs. Le chemin post-sync reste propre (`FRAME REJECTED=0`) ; les pertes restantes sont des collisions temporelles avec ces salves ou de la détection RF, pas du BCH/data après synchro.
