@@ -27,6 +27,23 @@ void despread_gen_prn(uint32_t seed, int length, int8_t *out)
     }
 }
 
+const char *despread_prn_mode_name(despread_prn_mode_t mode)
+{
+    return (mode == DESPREAD_PRN_SELF_TEST) ? "SELF-TEST" : "NORMAL";
+}
+
+void despread_prn_seeds(despread_prn_mode_t mode, uint32_t *seed_i,
+                        uint32_t *seed_q)
+{
+    if (mode == DESPREAD_PRN_SELF_TEST) {
+        if (seed_i) *seed_i = DESPREAD_PRN_SELFTEST_SEED_I;
+        if (seed_q) *seed_q = DESPREAD_PRN_SELFTEST_SEED_Q;
+    } else {
+        if (seed_i) *seed_i = DESPREAD_PRN_SEED_I;
+        if (seed_q) *seed_q = DESPREAD_PRN_SEED_Q;
+    }
+}
+
 void despread_get_preamble_chips(int *out, int n)
 {
     int8_t *raw = (int8_t *)malloc((size_t)n);
@@ -53,8 +70,9 @@ static void build_expected(const int8_t *pred_i, const int8_t *pred_q,
     }
 }
 
-int despread_sync(const float complex *samples, int num_chips,
-                  despread_sync_t *sync)
+int despread_sync_mode(const float complex *samples, int num_chips,
+                       despread_prn_mode_t mode,
+                       despread_sync_t *sync)
 {
     if (samples == NULL || sync == NULL ||
         num_chips < DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE)
@@ -70,8 +88,10 @@ int despread_sync(const float complex *samples, int num_chips,
         free(prn_i); free(prn_q); free(npi); free(npq);
         return -1;
     }
-    despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PREAMBLE_CHIPS, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PREAMBLE_CHIPS, prn_q);
+    uint32_t seed_i, seed_q;
+    despread_prn_seeds(mode, &seed_i, &seed_q);
+    despread_gen_prn(seed_i, DESPREAD_PREAMBLE_CHIPS, prn_i);
+    despread_gen_prn(seed_q, DESPREAD_PREAMBLE_CHIPS, prn_q);
     chip_not(prn_i, DESPREAD_PREAMBLE_CHIPS, npi);
     chip_not(prn_q, DESPREAD_PREAMBLE_CHIPS, npq);
 
@@ -219,10 +239,11 @@ int despread_sync(const float complex *samples, int num_chips,
         sync->z_comb = z_comb;
         sync->z1 = z_i;
         float ratio_f = (z2_fail > 0.1f) ? z_i / z2_fail : 999.0f;
-        DIAG("[despread] SYNC FAILED: "
+        DIAG("[despread] SYNC FAILED (%s PRN): "
              "I z=%.1f Q z=%.1f combined=%.1f (need %.1f) "
              "peak=%.3e 2nd=%.3e z1/z2=%.1f/%.1f=%.2f "
              "lag1=%d lag2=%d mean=%.3e std=%.3e\n",
+             despread_prn_mode_name(mode),
              (double)z_i, (double)z_q, (double)z_comb, (double)thr,
              (double)best_i_abs, (double)second_i_abs,
              (double)z_i, (double)z2_fail, (double)ratio_f,
@@ -248,8 +269,9 @@ int despread_sync(const float complex *samples, int num_chips,
     sync->lag2    = second_off_i;
 
     float ratio = (z2_fail > 0.1f) ? z_i / z2_fail : 999.0f;
-    DIAG("[despread] Synced: off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
+    DIAG("[despread] Synced (%s PRN): off_I=%d (z=%.1f), off_Q=%d (z=%.1f), "
          "combined=%.1f, phase=%d°, z1/z2=%.1f/%.1f=%.2f lag2=%d\n",
+         despread_prn_mode_name(mode),
          best_off_i, (double)z_i,
          best_off_q, (double)z_q,
          (double)z_comb, best_phase * 90,
@@ -261,11 +283,18 @@ int despread_sync(const float complex *samples, int num_chips,
     return 0;
 }
 
-int despread_bits(const float complex *samples, int num_chips,
-                  const despread_sync_t *sync,
-                  const despread_pll_cfg_t *pll_cfg,
-                  despread_metrics_t *metrics,
-                  uint8_t *output_bits)
+int despread_sync(const float complex *samples, int num_chips,
+                  despread_sync_t *sync)
+{
+    return despread_sync_mode(samples, num_chips, DESPREAD_PRN_NORMAL, sync);
+}
+
+int despread_bits_mode(const float complex *samples, int num_chips,
+                       const despread_sync_t *sync,
+                       despread_prn_mode_t mode,
+                       const despread_pll_cfg_t *pll_cfg,
+                       despread_metrics_t *metrics,
+                       uint8_t *output_bits)
 {
     if (samples == NULL || sync == NULL || output_bits == NULL)
         return -1;
@@ -278,8 +307,10 @@ int despread_bits(const float complex *samples, int num_chips,
     int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
     int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
     if (!prn_i || !prn_q) { free(prn_i); free(prn_q); return -1; }
-    despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, prn_q);
+    uint32_t seed_i, seed_q;
+    despread_prn_seeds(mode, &seed_i, &seed_q);
+    despread_gen_prn(seed_i, DESPREAD_PRN_LEN, prn_i);
+    despread_gen_prn(seed_q, DESPREAD_PRN_LEN, prn_q);
 
     /* Phase tracking: 2nd-order (proportional + integral).
      * alpha corrects phase; beta accumulates the per-bit phase drift
@@ -318,7 +349,8 @@ int despread_bits(const float complex *samples, int num_chips,
                         "burst,bit,cm2,cm1,c0,cp1,cp2\n");
         }
         diag_burst_id++;
-        DIAG("[diag] despread burst=%d\n", diag_burst_id);
+        DIAG("[diag] despread burst=%d prn=%s\n",
+             diag_burst_id, despread_prn_mode_name(mode));
     }
 
     float pre_phi[DESPREAD_PREAMBLE_BITS];
@@ -453,14 +485,33 @@ int despread_bits(const float complex *samples, int num_chips,
     return (out_idx == DESPREAD_OUTPUT_BITS) ? 0 : -1;
 }
 
-int despread_burst(const float complex *samples, int num_chips,
-                   uint8_t *output_bits, float *z_score)
+int despread_bits(const float complex *samples, int num_chips,
+                  const despread_sync_t *sync,
+                  const despread_pll_cfg_t *pll_cfg,
+                  despread_metrics_t *metrics,
+                  uint8_t *output_bits)
+{
+    return despread_bits_mode(samples, num_chips, sync, DESPREAD_PRN_NORMAL,
+                              pll_cfg, metrics, output_bits);
+}
+
+int despread_burst_mode(const float complex *samples, int num_chips,
+                        despread_prn_mode_t mode,
+                        uint8_t *output_bits, float *z_score)
 {
     despread_sync_t sync;
-    if (despread_sync(samples, num_chips, &sync) != 0)
+    if (despread_sync_mode(samples, num_chips, mode, &sync) != 0)
         return -1;
     if (z_score) {
         *z_score = sync.z_comb;
     }
-    return despread_bits(samples, num_chips, &sync, NULL, NULL, output_bits);
+    return despread_bits_mode(samples, num_chips, &sync, mode,
+                              NULL, NULL, output_bits);
+}
+
+int despread_burst(const float complex *samples, int num_chips,
+                   uint8_t *output_bits, float *z_score)
+{
+    return despread_burst_mode(samples, num_chips, DESPREAD_PRN_NORMAL,
+                               output_bits, z_score);
 }

@@ -135,7 +135,9 @@ static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
     memset(bits, 0, sizeof bits);
     float z = 0.0f;
     float fs = (float)s->samp_rate;
-    int rc = dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f, fs, 0, bits, &z);
+    despread_prn_mode_t prn_mode = DESPREAD_PRN_NORMAL;
+    int rc = dsss_receive_burst_ex(win, (size_t)ext_len, fs / 38400.0f, fs,
+                                   0, bits, &z, &prn_mode);
 
     if (rc == 0) {
         if (getenv("DUMP_OK")) {
@@ -152,11 +154,13 @@ static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
             }
         }
         free(win);
-        printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
+        printf("  --- SGB frame decoded (z=%.1f, PRN=%s) ---\n",
+               z, despread_prn_mode_name(prn_mode));
         char *body = capture_decode(decode_beacon, bits,
                                     DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
         double freq_mhz = (s->center_hz + offset_hz) / 1e6;
-        int is_real = (body && strstr(body, "Test Protocol: Normal Operation"));
+        int is_real = (prn_mode == DESPREAD_PRN_NORMAL &&
+                       body && strstr(body, "Test Protocol: Normal Operation"));
         const char *hex_id = scan_alert_extract_hex_id(body);
         int is_repeat = scan_alert_is_repeat(hex_id);
         if (is_real && is_repeat && scan_alert_freq_authorised(freq_mhz))

@@ -17,6 +17,7 @@ typedef struct {
     float freq_hz;       /* estimated carrier offset */
     float confidence;    /* peak-to-mean correlation ratio */
     int   costas_phase;  /* best Costas phase (0..3 → 0°,90°,180°,270°) */
+    despread_prn_mode_t prn_mode; /* PRN mode that produced the best lock */
 } freq_acq_result_t;
 
 /**

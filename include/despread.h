@@ -30,6 +30,8 @@
 #define DESPREAD_PRN_LEN          38400
 #define DESPREAD_PRN_SEED_I       0x000001UL
 #define DESPREAD_PRN_SEED_Q       0x1AC1FCUL
+#define DESPREAD_PRN_SELFTEST_SEED_I 0x52C9F0UL
+#define DESPREAD_PRN_SELFTEST_SEED_Q 0x3CE928UL
 #define DESPREAD_CHIPS_PER_BIT    256
 #define DESPREAD_PREAMBLE_BITS    25       /* per channel */
 #define DESPREAD_MSG_BITS         125      /* per channel */
@@ -46,6 +48,15 @@
  * correlates strongly or collapses into noise — nothing lands in (16,33). */
 #define DESPREAD_SYNC_THRESHOLD   20.0f
 #define DESPREAD_OUTPUT_BITS      250      /* 125 I + 125 Q interleaved */
+
+typedef enum {
+    DESPREAD_PRN_NORMAL = 0,
+    DESPREAD_PRN_SELF_TEST = 1
+} despread_prn_mode_t;
+
+const char *despread_prn_mode_name(despread_prn_mode_t mode);
+void despread_prn_seeds(despread_prn_mode_t mode, uint32_t *seed_i,
+                        uint32_t *seed_q);
 
 /**
  * @brief Generate a 23-bit LFSR PRN sequence (T.018, polynomial x^23 + x^18 + 1).
@@ -100,6 +111,10 @@ typedef struct {
 int despread_sync(const float complex *samples, int num_chips,
                   despread_sync_t *sync);
 
+int despread_sync_mode(const float complex *samples, int num_chips,
+                       despread_prn_mode_t mode,
+                       despread_sync_t *sync);
+
 /**
  * @brief Phase-tracking control for despread_bits.
  *
@@ -137,6 +152,13 @@ int despread_bits(const float complex *samples, int num_chips,
                   despread_metrics_t *metrics,
                   uint8_t *output_bits);
 
+int despread_bits_mode(const float complex *samples, int num_chips,
+                       const despread_sync_t *sync,
+                       despread_prn_mode_t mode,
+                       const despread_pll_cfg_t *pll_cfg,
+                       despread_metrics_t *metrics,
+                       uint8_t *output_bits);
+
 /**
  * @brief Despread a chip-rate complex stream into 250 message bits.
  *
@@ -149,5 +171,9 @@ int despread_bits(const float complex *samples, int num_chips,
  */
 int despread_burst(const float complex *samples, int num_chips,
                    uint8_t *output_bits, float *z_score);
+
+int despread_burst_mode(const float complex *samples, int num_chips,
+                        despread_prn_mode_t mode,
+                        uint8_t *output_bits, float *z_score);
 
 #endif /* DESPREAD_H */

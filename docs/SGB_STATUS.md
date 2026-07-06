@@ -16,6 +16,23 @@ Après async RTL + correctifs fredzo + fenêtre d'acquisition `freq_acq` élargi
 
 ## Correctifs intégrés
 
+### Support SGB self-test PRN (en cours)
+
+Diagnostic validé depuis les specs locales C/S T.018 Issue 1 Rev.13 :
+une transmission SGB self-test n'est pas seulement signalée par le bit 43
+du champ principal. Elle utilise aussi des séquences PRN spécifiques
+définies par T.018 Table 2.2. Le code contient déjà les constantes
+self-test dans `include/prn_generator.h`, mais la chaîne active
+`freq_acq.c` / `despread.c` utilise actuellement les seeds normales
+`DESPREAD_PRN_SEED_I/Q`.
+
+Hypothèse de correction : tester les deux modes PRN pendant
+`freq_acq_fft_corr()` (normal puis self-test), conserver le meilleur mode,
+puis utiliser le même mode dans `despread_sync()` et `despread_bits()`.
+Critères de validation : le synthétique SGB normal reste OK, les bursts CNES
+normaux restent décodés avec PRN normal, et un futur burst self-test SGB doit
+être affiché explicitement `SELF-TEST` sans déclencher d'alerte.
+
 ### Backend RTL asynchrone
 
 Le chemin RTL synchrone perdait ou espaçait des échantillons sans ring overrun visible. Mesure locale avant correction : environ 2.449-2.451 MS/s au lieu de 2.4576 MS/s, avec FGB CRC FAIL systématiques et SGB sync fort / data bruit.

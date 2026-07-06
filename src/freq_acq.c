@@ -221,6 +221,7 @@ int freq_acq_sweep(const float complex *chips, int n_chips,
     result->freq_hz     = best_f;
     result->confidence  = best_conf;
     result->costas_phase = best_p;
+    result->prn_mode = DESPREAD_PRN_NORMAL;
 
     DIAG(
             "[freq_acq] sweep: offset %.0f Hz  conf %.1f  "
@@ -344,6 +345,7 @@ int freq_acq_coarse_fft(const float complex *samples, int n_samples,
     result->freq_hz     = fo_corr;
     result->confidence  = ratio;
     result->costas_phase = 0;
+    result->prn_mode = DESPREAD_PRN_NORMAL;
 
     DIAG(
             "[freq_acq] coarse fft: raw=%.0f Hz  corr=%.0f Hz  "
@@ -472,6 +474,7 @@ int freq_acq_from_alignment(const float complex *chips, int n_chips,
     result->freq_hz     = est_hz;
     result->confidence  = ratio;
     result->costas_phase = p;
+    result->prn_mode = DESPREAD_PRN_NORMAL;
 
     DIAG(
             "[freq_acq] align fft: offset %.0f Hz  conf %.1f  "
@@ -503,11 +506,12 @@ static int cmp_float_asc(const void *a, const void *b) {
 #define FFTC_FINE_HZ    1.0f   /* fine freq step */
 #define FFTC_FINE_RANGE 18.0f  /* fine search half-range around the coarse peak */
 
-int freq_acq_fft_corr(const float complex *chips, int n_chips,
-                      float chip_rate,
-                      float freq_min, float freq_max,
-                      int max_lag,
-                      freq_acq_result_t *result)
+static int freq_acq_fft_corr_one_mode(const float complex *chips, int n_chips,
+                                      float chip_rate,
+                                      float freq_min, float freq_max,
+                                      int max_lag,
+                                      despread_prn_mode_t mode,
+                                      freq_acq_result_t *result)
 {
     if (!chips || !result || chip_rate <= 0.0f)
         return -1;
@@ -535,8 +539,10 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     }
 
     /* Reference: preamble PRN → expected I/Q chip values (±1). */
-    despread_gen_prn(DESPREAD_PRN_SEED_I, FFTC_PRN_LEN, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, FFTC_PRN_LEN, prn_q);
+    uint32_t seed_i, seed_q;
+    despread_prn_seeds(mode, &seed_i, &seed_q);
+    despread_gen_prn(seed_i, FFTC_PRN_LEN, prn_i);
+    despread_gen_prn(seed_q, FFTC_PRN_LEN, prn_q);
     for (int k = 0; k < FFTC_PRN_LEN; k++) {
         ei[k] = 1.0f - 2.0f * (float)prn_i[k];
         eq[k] = 1.0f - 2.0f * (float)prn_q[k];
@@ -646,10 +652,12 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
         result->freq_hz      = best_f;
         result->confidence   = conf;
         result->costas_phase = best_phase;
+        result->prn_mode     = mode;
         DIAG(
-                "[freq_acq] fft-corr: coarse reject conf %.1f (need >=5)  "
+                "[freq_acq] fft-corr %s PRN: coarse reject conf %.1f (need >=5)  "
                 "offset %.0f Hz  lag %d/%d (n_chips %d remain %d)  "
                 "peak %.2e  median %.2e  mean %.2e  phase %d\n",
+                despread_prn_mode_name(mode),
                 (double)conf, (double)best_f, best_lag, last_lag, n_chips,
                 n_chips - best_lag,
                 (double)peak_pwr, (double)median, (double)mean, best_phase);
@@ -697,13 +705,48 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     result->freq_hz      = f_fine;
     result->confidence   = conf;
     result->costas_phase = best_phase;
+    result->prn_mode     = mode;
 
     DIAG(
-            "[freq_acq] fft-corr: offset %.0f Hz  conf %.1f  "
+            "[freq_acq] fft-corr %s PRN: offset %.0f Hz  conf %.1f  "
             "lag %d/%d (n_chips %d remain %d)  peak %.2e  median %.2e  mean %.2e  phase %d\n",
+            despread_prn_mode_name(mode),
             (double)f_fine, (double)conf, best_lag, last_lag, n_chips,
             n_chips - best_lag,
             (double)peak_pwr, (double)median, (double)mean, best_phase);
 
+    return 0;
+}
+
+int freq_acq_fft_corr(const float complex *chips, int n_chips,
+                      float chip_rate,
+                      float freq_min, float freq_max,
+                      int max_lag,
+                      freq_acq_result_t *result)
+{
+    if (!result)
+        return -1;
+
+    freq_acq_result_t normal, self_test;
+    int rc_normal = freq_acq_fft_corr_one_mode(chips, n_chips, chip_rate,
+                                               freq_min, freq_max, max_lag,
+                                               DESPREAD_PRN_NORMAL, &normal);
+    int rc_self = freq_acq_fft_corr_one_mode(chips, n_chips, chip_rate,
+                                             freq_min, freq_max, max_lag,
+                                             DESPREAD_PRN_SELF_TEST,
+                                             &self_test);
+
+    if (rc_normal != 0 && rc_self != 0)
+        return -1;
+    if (rc_normal == 0 && (rc_self != 0 ||
+                           normal.confidence >= self_test.confidence)) {
+        *result = normal;
+    } else {
+        *result = self_test;
+    }
+
+    DIAG("[freq_acq] fft-corr selected %s PRN (conf %.1f)\n",
+         despread_prn_mode_name(result->prn_mode),
+         (double)result->confidence);
     return 0;
 }

@@ -166,13 +166,14 @@ static int bits_degenerate(const uint8_t *bits, int n)
     return (ones == 0 || ones == n);
 }
 
-int dsss_receive_burst(const float complex *ota_buffer,
-                       size_t buffer_length,
-                       float sps,
-                       float fs,
-                       int max_doppler,
-                       uint8_t *output_bits,
-                       float *z_score)
+int dsss_receive_burst_ex(const float complex *ota_buffer,
+                          size_t buffer_length,
+                          float sps,
+                          float fs,
+                          int max_doppler,
+                          uint8_t *output_bits,
+                          float *z_score,
+                          despread_prn_mode_t *prn_mode)
 {
     (void)max_doppler;
 
@@ -271,6 +272,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     freq_acq_result_t acq;
     memset(&acq, 0, sizeof(acq));
+    acq.prn_mode = DESPREAD_PRN_NORMAL;
     /* +/-16 kHz: the scanner's burst centroid was measured off by up to
      * 9.5 kHz (a spectral mean pulled by in-band noise/interference), which
      * pushed the post-mix residual outside the former +/-8 kHz window and
@@ -280,11 +282,16 @@ int dsss_receive_burst(const float complex *ota_buffer,
                           -16000.0f, 16000.0f, acq_max_lag, &acq) != 0 ||
         acq.confidence < acq_conf_min) {
         DIAG("[dsss_demod] acquisition rejected "
-             "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
+             "(freq=%.0f Hz conf=%.1f, prn=%s, need >=%.1f)\n",
              (double)acq.freq_hz, (double)acq.confidence,
+             despread_prn_mode_name(acq.prn_mode),
              (double)acq_conf_min);
         goto cleanup;
     }
+    if (prn_mode)
+        *prn_mode = acq.prn_mode;
+    DIAG("[dsss_demod] selected SGB PRN %s\n",
+         despread_prn_mode_name(acq.prn_mode));
 
     /* 3a. Frequency refinement against despread_sync's narrow preamble response.
      * freq_acq maximises its own correlation, whose optimum sits 5-7 Hz off
@@ -324,7 +331,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
                     pr = nr; pi = ni;
                 }
                 despread_sync_t s;
-                despread_sync(dr, (int)n_chips, &s);
+                despread_sync_mode(dr, (int)n_chips, acq.prn_mode, &s);
                 if (s.z_comb > best_z) { best_z = s.z_comb;
                                          best_f = acq.freq_hz + (float)df; }
             }
@@ -376,7 +383,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                                 chips, n_chips_off);
 
             despread_sync_t sync;
-            if (despread_sync(chips, (int)n_chips_off, &sync) != 0)
+            if (despread_sync_mode(chips, (int)n_chips_off,
+                                   acq.prn_mode, &sync) != 0)
                 continue;
 
             if (oi == 0 && z_score)
@@ -387,8 +395,9 @@ int dsss_receive_burst(const float complex *ota_buffer,
             int original_phase = sync.phase;
             for (int p = 0; p < 4; p++) {
                 sync.phase = p;
-                if (despread_bits(chips, (int)n_chips_off, &sync,
-                                 NULL, NULL, output_bits) != 0)
+                if (despread_bits_mode(chips, (int)n_chips_off, &sync,
+                                       acq.prn_mode,
+                                       NULL, NULL, output_bits) != 0)
                     continue;
                 int nerr = -1;
                 int brc = bch_decode_250_202_nerr(output_bits,
@@ -424,9 +433,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
             /* Fallback: re-decimate at offset 0, return best-effort bits. */
             boxcar_decimate(work, N, sps, chips, n_chips);
             despread_sync_t sync;
-            if (despread_sync(chips, (int)n_chips, &sync) == 0) {
-                rc = despread_bits(chips, (int)n_chips, &sync,
-                                  NULL, NULL, output_bits);
+            if (despread_sync_mode(chips, (int)n_chips,
+                                   acq.prn_mode, &sync) == 0) {
+                rc = despread_bits_mode(chips, (int)n_chips, &sync,
+                                        acq.prn_mode,
+                                        NULL, NULL, output_bits);
                 if (z_score) *z_score = sync.z_comb;
 
                 /* E/P/L sub-chip diagnostic on sample-rate buffer.
@@ -447,10 +458,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
                         int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
                         int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
                         if (prn_i && prn_q) {
-                            despread_gen_prn(DESPREAD_PRN_SEED_I,
-                                             DESPREAD_PRN_LEN, prn_i);
-                            despread_gen_prn(DESPREAD_PRN_SEED_Q,
-                                             DESPREAD_PRN_LEN, prn_q);
+                            uint32_t seed_i, seed_q;
+                            despread_prn_seeds(acq.prn_mode,
+                                               &seed_i, &seed_q);
+                            despread_gen_prn(seed_i, DESPREAD_PRN_LEN, prn_i);
+                            despread_gen_prn(seed_q, DESPREAD_PRN_LEN, prn_q);
                             int epl_off[3] = { -isps / 4, 0, isps / 4 };
                             for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
                                 int cs_i = sync.off_i * isps
@@ -522,4 +534,16 @@ cleanup:
     free(work);
     free(chips);
     return rc;
+}
+
+int dsss_receive_burst(const float complex *ota_buffer,
+                       size_t buffer_length,
+                       float sps,
+                       float fs,
+                       int max_doppler,
+                       uint8_t *output_bits,
+                       float *z_score)
+{
+    return dsss_receive_burst_ex(ota_buffer, buffer_length, sps, fs,
+                                 max_doppler, output_bits, z_score, NULL);
 }

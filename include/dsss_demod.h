@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <complex.h>
+#include "despread.h"
 
 /* T.018 SGB receive parameters (must match the modulator). */
 #define DSSS_CHIP_RATE          38400      /* 38.4 kchips/s */
@@ -54,5 +55,14 @@ int dsss_receive_burst(const float complex *ota_buffer,
                        int max_doppler,
                        uint8_t *output_bits,
                        float *z_score);
+
+int dsss_receive_burst_ex(const float complex *ota_buffer,
+                          size_t buffer_length,
+                          float sps,
+                          float fs,
+                          int max_doppler,
+                          uint8_t *output_bits,
+                          float *z_score,
+                          despread_prn_mode_t *prn_mode);
 
 #endif /* DSSS_DEMOD_H */
