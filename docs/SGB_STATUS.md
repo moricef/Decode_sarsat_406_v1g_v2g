@@ -142,3 +142,19 @@ contient `Test Protocol: Active`.
 Validation locale : `dec406_hex FFFED090FD15E0059FEFFC28BEB861F0FABE`
 affiche `Test Protocol: Active` et `Position (PDF-1): Default - no location`
 avec CRC1/CRC2 OK.
+
+## Temps réel firmin après self-test PRN
+
+Le support SGB self-test PRN double le coût d'acquisition car les deux codes
+d'étalement normal et self-test sont testés. L'élargissement permanent de la
+fenêtre fréquentielle de +/-8 kHz à +/-16 kHz double aussi le nombre de pas de
+fréquence du coarse search. Sur firmin, les logs du 7 juillet 2026 montrent un
+décodage SGB autour de 11 s par burst alors que le ring scanner couvre environ
+6,8 s : les `ring overrun` observés sont donc des débordements de calcul, pas
+des pertes USB.
+
+Correctif appliqué : tenter d'abord l'acquisition sur +/-8 kHz et n'élargir à
++/-16 kHz que si la confiance reste sous le seuil. Le chemin après acquisition
+reste inchangé. Objectif : revenir au coût normal pour les bursts dont le
+résiduel fréquence est déjà dans +/-8 kHz, tout en conservant le secours
++/-16 kHz pour les cas de centroïde décalé observés le soir.

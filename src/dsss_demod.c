@@ -46,6 +46,12 @@ extern int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out,
  * Empirically: real OTA locks give 40+, pure-noise picks give 2-4. */
 #define ACQ_CONF_MIN 8.0f
 
+/* Normal acquisition is tried first at +/-8 kHz. The wider +/-16 kHz
+ * fallback is only needed when the scanner centroid is pulled far from the
+ * true SGB carrier; running it for every burst doubles CPU on slow hosts. */
+#define ACQ_FAST_RANGE_HZ 8000.0f
+#define ACQ_WIDE_RANGE_HZ 16000.0f
+
 /* Acquisition-only low-pass cutoff before chip-rate boxcar decimation.
  * Disabled by default; set ACQ_BANDPASS_HZ=45000 for A/B diagnostics. */
 #define ACQ_BANDPASS_HZ 0.0f
@@ -100,6 +106,38 @@ static void acq_lowpass(float complex *samples, size_t n,
 
         samples[k] = i + q * I;
     }
+}
+
+static int acquire_sgb_prn(const float complex *chips, int n_chips,
+                           float chip_rate, int max_lag,
+                           float conf_min, freq_acq_result_t *acq)
+{
+    int rc = freq_acq_fft_corr(chips, n_chips, chip_rate,
+                               -ACQ_FAST_RANGE_HZ, ACQ_FAST_RANGE_HZ,
+                               max_lag, acq);
+    if (rc == 0 && acq->confidence >= conf_min) {
+        DIAG("[dsss_demod] acquisition accepted in +/-%.0f Hz window\n",
+             (double)ACQ_FAST_RANGE_HZ);
+        return 0;
+    }
+
+    DIAG("[dsss_demod] acquisition widening to +/-%.0f Hz "
+         "(first freq=%.0f Hz conf=%.1f, prn=%s, need >=%.1f)\n",
+         (double)ACQ_WIDE_RANGE_HZ,
+         (double)acq->freq_hz, (double)acq->confidence,
+         despread_prn_mode_name(acq->prn_mode),
+         (double)conf_min);
+
+    rc = freq_acq_fft_corr(chips, n_chips, chip_rate,
+                           -ACQ_WIDE_RANGE_HZ, ACQ_WIDE_RANGE_HZ,
+                           max_lag, acq);
+    if (rc == 0 && acq->confidence >= conf_min) {
+        DIAG("[dsss_demod] acquisition accepted in +/-%.0f Hz window\n",
+             (double)ACQ_WIDE_RANGE_HZ);
+        return 0;
+    }
+
+    return -1;
 }
 
 /* In-place NCO carrier wipeoff at sample rate. */
@@ -273,14 +311,8 @@ int dsss_receive_burst_ex(const float complex *ota_buffer,
     freq_acq_result_t acq;
     memset(&acq, 0, sizeof(acq));
     acq.prn_mode = DESPREAD_PRN_NORMAL;
-    /* +/-16 kHz: the scanner's burst centroid was measured off by up to
-     * 9.5 kHz (a spectral mean pulled by in-band noise/interference), which
-     * pushed the post-mix residual outside the former +/-8 kHz window and
-     * made healthy bursts unacquirable (conf ~2). Upper bound is the
-     * chip-rate boxcar fold-over at +/-19.2 kHz. */
-    if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
-                          -16000.0f, 16000.0f, acq_max_lag, &acq) != 0 ||
-        acq.confidence < acq_conf_min) {
+    if (acquire_sgb_prn(chips, n_chips_acq, chip_rate,
+                        acq_max_lag, acq_conf_min, &acq) != 0) {
         DIAG("[dsss_demod] acquisition rejected "
              "(freq=%.0f Hz conf=%.1f, prn=%s, need >=%.1f)\n",
              (double)acq.freq_hz, (double)acq.confidence,
