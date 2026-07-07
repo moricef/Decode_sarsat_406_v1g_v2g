@@ -3,24 +3,19 @@
 Decoder for 1st (FGB) and 2nd (SGB) generation COSPAS-SARSAT emergency
 beacons at 406 MHz.
 
-Décodeur pour les balises COSPAS-SARSAT d’urgence de première génération
-(FGB) et de seconde génération (SGB) à 406 MHz.
-
 **Branch**: `main`
-
-**Branche** : `main`
 
 ---
 
-## What works / Ce qui fonctionne
+## What works
 
-### Decoders (bit-perfect) / Décodeurs (bit-perfect)
+### Decoders (bit-perfect)
 - **1G (FGB)**: T.001 biphase-L PSK ±1.1 rad, 400 bps, all Location/User
   protocols — `dec406_v1g.c`
 - **2G (SGB)**: BCH(250,202) with full Berlekamp-Massey + Chien error
   correction, all T.018 fields — `dec406_v2g.c`
 
-### Demodulators / Démodulateurs
+### Demodulators
 - **DSSS OQPSK (2G)** — `dsss_demod.c` flat-chain (no sample-rate tracking
   loop): DC blocker → FFT-correlation frequency acquisition → NCO wipeoff →
   OQPSK delay → multi-offset boxcar decimation → despread with preamble
@@ -35,7 +30,7 @@ Décodeur pour les balises COSPAS-SARSAT d’urgence de première génération
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
   slicer, BCH1 brute-force error correction (t=3), CRC.
 
-### Real-time scanner / Scanner temps réel
+### Real-time scanner
 `dec406_scan` is a unified real-time scanner with automatic SDR backend
 selection for interactive use (Airspy Mini, RTL-SDR, PlutoSDR, HackRF).
 The RTL-SDR backend uses `rtlsdr_read_async()` with large buffers; the
@@ -45,13 +40,10 @@ long FGB/SGB bursts. The scanner runs a spectral burst detector over the
 accordingly. For services, the backend can be forced explicitly with
 `DEC406_BACKEND=rtl|airspy|pluto|hackrf` so there is no startup probing.
 
-### Current validation status / État actuel de validation
+### Current validation status
 
 Rates depend strongly on propagation, time of day, local noise, and which CNES
 system beacons are active. Track three SGB buckets separately:
-
-Les taux dépendent fortement de la propagation, de l’heure, du bruit local et
-des balises CNES actives. Il faut suivre séparément trois métriques SGB :
 
 | Metric | Definition |
 |--------|------------|
@@ -71,7 +63,7 @@ global rates.
 
 ---
 
-## Build / Compilation
+## Build
 
 ```bash
 make build/dec406_iq        # SGB decoder from IQ file
@@ -93,9 +85,9 @@ Binaries produced in `build/`:
 
 ---
 
-## Usage / Utilisation
+## Usage
 
-### Offline IQ files / Fichiers IQ hors ligne
+### Offline IQ files
 
 ```bash
 # SGB from IQ file (float32 complex, default)
@@ -111,14 +103,14 @@ Binaries produced in `build/`:
 Input formats: float32 complex (default), `-u` RTL-SDR uint8, `-i` int16
 interleaved, `-I` int32 SDRangel ci32_le.
 
-### Hex frames / Trames hexadécimales
+### Hex frames
 
 ```bash
 ./build/dec406_hex 09C4745638D95999A02B33326C3EC4400003FFF00C02832000002B774C24FE4
 ./build/dec406_hex 8E3301E2402B002BBA863609670908
 ```
 
-### Real-time scanner / Scanner temps réel
+### Real-time scanner
 
 ```bash
 ./build/dec406_scan 406.0M 406.1M             # AGC, ppm=0
@@ -131,19 +123,13 @@ bursts are SGB), and runs the appropriate decoder. On RTL-SDR it resets the
 USB device at startup, then captures continuously through the asynchronous
 librtlsdr API.
 
-Le scanner lit les échantillons à 2,4576 Msps, détecte les bursts sur un
-spectrogramme de puissance, les classe par largeur de bande
-(`BW_SPLIT_HZ = 20 kHz` ; les bursts plus larges sont des SGB), puis lance le
-décodeur adéquat. Avec un RTL-SDR, il réinitialise le périphérique USB au
-démarrage puis capture en continu via l’API asynchrone de librtlsdr.
-
 Set `RTL_DIAG=1` to log effective RTL throughput every few seconds:
 
 ```bash
 RTL_DIAG=1 ./build/dec406_scan 406.0M 406.1M
 ```
 
-Useful SGB diagnostics / Diagnostics SGB utiles :
+Useful SGB diagnostics:
 
 ```bash
 DSSS_DIAG=1 ./build/dec406_scan 406.0M 406.1M
@@ -156,7 +142,7 @@ offline replay. `build/sgb_epl_diag` probes those dumps with EPL
 correlators at wider residual-frequency ranges. `ACQ_BANDPASS_HZ` is kept as
 a diagnostic acquisition-only filter; default `0` leaves it disabled.
 
-#### 1544 MHz downlink service / Service de descente 1544 MHz
+#### 1544 MHz downlink service
 
 `systemd/scan1544.service` is the dedicated downlink unit. It keeps the
 backend explicit and switches the alert path to geographic filtering instead
@@ -172,12 +158,7 @@ Environment=DEC406_ALERT_RADIUS_KM=80
 If Pluto is used instead of HackRF on a given station, only
 `DEC406_BACKEND` changes. In downlink mode, an email is sent only when the
 decoded beacon position is valid and inside the configured radius.
-
-Si une station utilise le Pluto à la place du HackRF, seul `DEC406_BACKEND`
-change. En mode downlink, un mail n’est envoyé que si la position décodée est
-valide et à l’intérieur du rayon configuré.
-
-#### As a systemd service / En tant que service systemd
+#### As a systemd service
 
 ```ini
 [Unit]
@@ -204,7 +185,7 @@ journalctl -u scan406 -p info      # clean trace (decoded frames only)
 journalctl -u scan406 -p debug     # full diagnostic stream
 ```
 
-#### Email alerts on T.012 distress channels / Alertes mail sur les canaux de détresse T.012
+#### Email alerts on T.012 distress channels
 
 If a `data/config_mail.txt` is present, the scanner emails the decoded
 frame whenever a beacon decodes on a T.012 Table H.2 distress channel
@@ -239,9 +220,6 @@ destinataires=a@b.com,c@d.fr
 Without that file the scanner runs normally; the banner prints
 `alerts : disabled` and no email is sent.
 
-Sans ce fichier, le scanner fonctionne normalement ; le bandeau affiche
-`alerts : disabled` et aucun mail n’est envoyé.
-
 Channel A (406.022 — orbitography/calibration) is excluded by design.
 Additional silencing filters layered on the channel whitelist:
 - FGB beacons identified as Orbitography or with `ID-NOT-AVAIL`
@@ -253,7 +231,7 @@ Additional silencing filters layered on the channel whitelist:
 
 ---
 
-## 2G Demodulation Chain / Chaîne de démodulation 2G
+## 2G Demodulation Chain
 
 ```
 IQ @ 2.4576 MHz
@@ -291,12 +269,9 @@ IQ
 
 No FM-demod, no audio detour, no biphase-L codec dependency.
 
-Pas de démodulation FM, pas de détour par l’audio, pas de dépendance à un
-codec biphase-L.
-
 ---
 
-## Project Structure / Arborescence du projet
+## Project Structure
 
 ```
 src/         C sources (dsss_demod, despread, freq_acq, fgb_iq_demod,
@@ -312,7 +287,7 @@ data/        Runtime data (config_mail.txt, etc.)
 
 ---
 
-## Documentation / Documentation
+## Documentation
 
 - `CHANGELOG.md` — Version history
 - `CLAUDE.md` — Project conventions, debug methodology
@@ -322,13 +297,13 @@ data/        Runtime data (config_mail.txt, etc.)
 
 ---
 
-## License / Licence
+## License
 
 This project is licensed under the MIT License. See `LICENSE`.
 
 ---
 
-## References / Références
+## References
 
 - **C/S T.001** — 1st Generation Beacon Specification (FGB)
 - **C/S T.012** — Beacon Type Approval (channel list, Table H.2)
