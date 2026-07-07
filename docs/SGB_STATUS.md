@@ -96,3 +96,21 @@ La famille historique 0619 reste un sujet séparé : le fichier du 19 juin montr
 - Journal complet : [SGB_INVESTIGATION_LOG.md](SGB_INVESTIGATION_LOG.md)
 - Outil diagnostic EPL : `utils/sgb_epl_diag.c`
 - Commandes de base : `make build/dec406_iq`, `make build/dec406_scan`
+
+## À part — filtre alertes FGB ELT-DT bench
+
+Deux alertes mail FGB du 6 juillet 2026 à 15:04:34 UTC et 15:06:15 UTC
+ont le même Hex ID `1C720000003FDFF`, le protocole `9 (ELT-DT Location
+Protocol)` et l'identification `Aircraft 000000`. Rejeu local via
+`dec406_hex` :
+
+- `FFFE2F8E390000000AE018A81700EDA84498` : CRC1/CRC2 OK, ELT-DT, aircraft
+  `000000`, position composite valide.
+- `FFFE2F8E390000003F5FD2B4ED8F1E0F01EE` : CRC1/CRC2 OK, ELT-DT, aircraft
+  `000000`, coordonnées invalides.
+
+Conclusion : ce n'est pas une erreur de décodage. C'est une trame ELT-DT
+non programmée / bench-test qui passe les filtres actuels parce qu'elle est
+répétée, sur fréquence autorisée, et ne contient pas `ID-NOT-AVAIL`.
+Correctif validé : ne pas envoyer d'alerte FGB si le body contient à la fois
+`Protocol: 9 (ELT-DT Location Protocol)` et `Identification: Aircraft 000000`.

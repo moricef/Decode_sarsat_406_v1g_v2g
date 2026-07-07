@@ -160,6 +160,12 @@ static char *capture_decode(decode_print_fn fn, const uint8_t *bits, int n) {
   return buf;
 }
 
+static int is_fgb_bench_test(const char *body) {
+  return body &&
+         strstr(body, "Protocol: 9 (ELT-DT Location Protocol)") &&
+         strstr(body, "Identification: Aircraft 000000");
+}
+
 static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double snr_db) {
   uint64_t head = (uint64_t)(0.20 * samp_rate);
   uint64_t tail = (uint64_t)(0.20 * samp_rate);
@@ -264,7 +270,9 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
     const char *hex_id = scan_alert_extract_hex_id(body);
     int is_repeat = scan_alert_is_repeat(hex_id);
     int is_id_not_avail = (body && strstr(body, "ID-NOT-AVAIL") != NULL);
-    if (body && !is_orbitography && !is_id_not_avail && is_repeat &&
+    int is_bench_test = is_fgb_bench_test(body);
+    if (body && !is_orbitography && !is_id_not_avail && !is_bench_test &&
+        is_repeat &&
         scan_alert_freq_authorised(freq_mhz))
       scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
     free(body);
