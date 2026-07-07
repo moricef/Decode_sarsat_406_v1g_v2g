@@ -67,6 +67,8 @@ typedef struct {
     uint8_t crc_error;
     uint8_t activation_method;
     uint8_t location_freshness;
+    uint8_t is_test_message;
+    uint8_t position_default;
     // Fields for position offsets
     int lat_offset_sign;     // Latitude offset sign (1 = positive, -1 = negative)
     int lon_offset_sign;     // Longitude offset sign (1 = positive, -1 = negative)
@@ -208,6 +210,10 @@ static uint32_t get_bits(const char *s, int start, int len) {
 
 static int validate_coordinates(double lat, double lon) {
     return (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0);
+}
+
+static int is_frame_sync_test(const char *frame) {
+    return get_bits(frame, 15, 9) == 0b011010000;
 }
 
 // ===================================================
@@ -735,6 +741,16 @@ static void decode_rls_location(const char *s, BeaconInfo1G *info, int frame_len
     
     // Position data (30 minute resolution)
     // Bits 67-75: Latitude (9 bits)
+    uint16_t lat_raw = get_bits(s, 66, 9);
+    uint16_t lon_raw = get_bits(s, 75, 10);
+    if (lat_raw == 0x0FF && lon_raw == 0x1FF) {
+        info->position_default = 1;
+        info->has_position = 0;
+        info->base_lat = info->base_lon = 0.0;
+        info->lat = info->lon = 0.0;
+        return;
+    }
+
     uint8_t ns_flag = (s[66] == '1');  // Bit 67: N/S flag
     uint8_t lat_half_deg = get_bits(s, 67, 8);  // 0.5 degree increments
     info->base_lat = lat_half_deg * 0.5;
@@ -917,6 +933,7 @@ static void decode_1g_frame(const char *frame, int frame_length, BeaconInfo1G *i
     
     // Decode country code (bits 27-36, positions 26-35 in 0-indexed)
     info->country_code = get_bits(frame, 26, 10);
+    info->is_test_message = is_frame_sync_test(frame);
     
     // Decode protocol code (bits 37-40, positions 36-39 in 0-indexed)
     int protocol_bits = get_bits(frame, 36, 4);
@@ -1014,7 +1031,8 @@ switch (info->protocol) {
         
     case PROTOCOL_RLS_LOCATION:
         decode_rls_location(frame, info, frame_length);
-        info->has_position = 1;
+        if (!info->position_default)
+            info->has_position = 1;
         break;
         
     case PROTOCOL_USER_PROTOCOL:
@@ -1176,10 +1194,14 @@ void decode_1g(const uint8_t *bits, int length) {
     printf("\nCountry: %u", info.country_code);
     printf("\nHex ID: %s", info.hex_id);
     printf("\nIdentification: %s", info.vessel_id);
+    if (info.is_test_message)
+      printf("\nTest Protocol: Active");
     
    // Display coordinates
   // Display base position (PDF-1) if we have position data
-  if (info.has_position) {
+  if (info.position_default) {
+    printf("\nPosition (PDF-1): Default - no location");
+  } else if (info.has_position) {
     printf("\nPosition (PDF-1): %.5f %c, %.5f %c",
            fabs(info.base_lat), (info.base_lat >= 0) ? 'N' : 'S',
            fabs(info.base_lon), (info.base_lon >= 0) ? 'E' : 'W');

@@ -268,6 +268,10 @@ static int is_fgb_bench_test(const char *body) {
          strstr(body, "Identification: Aircraft 000000");
 }
 
+static int is_fgb_test_message(const char *body) {
+  return body && strstr(body, "Test Protocol: Active");
+}
+
 static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double snr_db) {
   uint64_t head = (uint64_t)(0.20 * SAMP_RATE); /* slack before onset */
   uint64_t tail = (uint64_t)(0.20 * SAMP_RATE); /* slack after burst */
@@ -409,8 +413,9 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
      * distress beacon has a configured identity. */
     int is_id_not_avail = (body && strstr(body, "ID-NOT-AVAIL") != NULL);
     int is_bench_test = is_fgb_bench_test(body);
+    int is_test_message = is_fgb_test_message(body);
     if (body && !is_orbitography && !is_id_not_avail && !is_bench_test &&
-        is_repeat &&
+        !is_test_message && is_repeat &&
         scan_alert_freq_authorised(freq_mhz)) {
       scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
     }

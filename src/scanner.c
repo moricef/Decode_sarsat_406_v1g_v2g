@@ -109,6 +109,10 @@ static int is_fgb_bench_test(const char *body) {
            strstr(body, "Identification: Aircraft 000000");
 }
 
+static int is_fgb_test_message(const char *body) {
+    return body && strstr(body, "Test Protocol: Active");
+}
+
 static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
                        double offset_hz, double snr_db) {
     uint64_t head = (uint64_t)(0.20 * s->samp_rate);
@@ -234,7 +238,8 @@ static void decode_fgb(scanner_t *s, uint64_t start, uint64_t len,
         int is_repeat = scan_alert_is_repeat(hex_id);
         int is_id_na = (body && strstr(body, "ID-NOT-AVAIL"));
         int is_bench = is_fgb_bench_test(body);
-        if (body && !is_orb && !is_id_na && !is_bench && is_repeat &&
+        int is_test = is_fgb_test_message(body);
+        if (body && !is_orb && !is_id_na && !is_bench && !is_test && is_repeat &&
             scan_alert_freq_authorised(freq_mhz))
             scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
         free(body);

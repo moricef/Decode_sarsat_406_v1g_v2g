@@ -114,3 +114,31 @@ non programmée / bench-test qui passe les filtres actuels parce qu'elle est
 répétée, sur fréquence autorisée, et ne contient pas `ID-NOT-AVAIL`.
 Correctif validé : ne pas envoyer d'alerte FGB si le body contient à la fois
 `Protocol: 9 (ELT-DT Location Protocol)` et `Identification: Aircraft 000000`.
+
+## À part — filtre alertes FGB frame-sync test RLS
+
+Deux alertes mail FGB du 7 juillet 2026 à 08:00:36 UTC et 08:01:14 UTC
+portent le Hex ID `21FA2BC00B3FDFF`, le pays `271`, le protocole
+`13 (RLS Location Protocol)` et l'identification `RLS ELT TAC:2350 Serial:22`.
+Le validateur Cospas-Sarsat indique pour la trame propre :
+
+- `FFFED090FD15E0059FEFFC28BEB861F0FABE`
+- frame sync `011010000` : test protocol message / non-operational use ;
+- latitude PDF-1 `011111111` : default / no location ;
+- longitude PDF-1 `0111111111` : default / no location ;
+- BCH1 et BCH2 valides.
+
+Diagnostic : la démodulation et les BCH sont corrects, mais le décodeur FGB
+n'affiche pas encore le caractère test/non-opérationnel du frame sync, et le
+décodeur RLS transforme les valeurs PDF-1 par défaut en coordonnées invalides
+`127.50000 N, 255.50000 E`. Le filtre mail ne peut donc pas écarter cette
+trame de test.
+
+Correctif appliqué : exposer le frame sync test dans le décodage texte
+(`Test Protocol: Active`), afficher `Position (PDF-1): Default - no location`
+pour les valeurs RLS par défaut, et bloquer les alertes FGB dont le body
+contient `Test Protocol: Active`.
+
+Validation locale : `dec406_hex FFFED090FD15E0059FEFFC28BEB861F0FABE`
+affiche `Test Protocol: Active` et `Position (PDF-1): Default - no location`
+avec CRC1/CRC2 OK.
