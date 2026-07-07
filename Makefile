@@ -7,6 +7,22 @@ CFLAGS = -Wall -Wextra -O2 -march=native -g -Iinclude
 LDFLAGS = -lm
 LDFLAGS_DSSS = -lm -fopenmp -lgomp -lfftw3f
 
+HACKRF_HEADER := $(firstword $(wildcard /usr/include/libhackrf/hackrf.h /usr/local/include/libhackrf/hackrf.h))
+ifeq ($(HACKRF_HEADER),)
+HAVE_HACKRF := 0
+else
+HAVE_HACKRF := 1
+endif
+
+HACKRF_SRCS =
+HACKRF_DEFS =
+HACKRF_LIBS =
+ifeq ($(HAVE_HACKRF),1)
+HACKRF_SRCS = $(SRC_DIR)/backend_hackrf.c
+HACKRF_DEFS = -DHAVE_HACKRF
+HACKRF_LIBS = -lhackrf
+endif
+
 # Directories
 SRC_DIR = src
 INC_DIR = include
@@ -103,10 +119,10 @@ SCANNER_SRCS = \
 	$(DSSS_SRCS)
 
 # dec406_scan - Unified scanner with auto hardware detection (Airspy → RTL-SDR → PlutoSDR)
-$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan_unified.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(SRC_DIR)/backend_hackrf.c $(SCANNER_SRCS)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan_unified.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(HACKRF_SRCS) $(SCANNER_SRCS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DHAVE_RTLSDR -DHAVE_AIRSPY -DHAVE_PLUTO -DHAVE_HACKRF -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr -lairspy -liio -lhackrf
-	@echo "Built: $@ (Airspy + RTL-SDR + PlutoSDR + HackRF)"
+	$(CC) $(CFLAGS) -DHAVE_RTLSDR -DHAVE_AIRSPY -DHAVE_PLUTO $(HACKRF_DEFS) -o $@ $(SRC_DIR)/main_scan_unified.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(HACKRF_SRCS) $(SCANNER_SRCS) $(LDFLAGS) -lpthread -lrtlsdr -lairspy -liio $(HACKRF_LIBS)
+	@echo "Built: $@ (Airspy + RTL-SDR + PlutoSDR$(if $(filter 1,$(HAVE_HACKRF)), + HackRF))"
 
 # dec406_scan_rtlsdr - RTL-SDR only (legacy standalone)
 $(BUILD_DIR)/dec406_scan_rtlsdr: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
