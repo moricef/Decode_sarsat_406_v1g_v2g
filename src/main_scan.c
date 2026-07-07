@@ -323,7 +323,7 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
     const char *hex_id = scan_alert_extract_hex_id(body);
     int is_repeat = scan_alert_is_repeat(hex_id);
     if (is_real_distress && is_repeat &&
-        scan_alert_freq_authorised(freq_mhz)) {
+        scan_alert_channel_allows(freq_mhz, body)) {
       scan_alert_send("SGB", freq_mhz, snr_db, bits,
                       DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, body);
     }
@@ -416,7 +416,7 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
     int is_test_message = is_fgb_test_message(body);
     if (body && !is_orbitography && !is_id_not_avail && !is_bench_test &&
         !is_test_message && is_repeat &&
-        scan_alert_freq_authorised(freq_mhz)) {
+        scan_alert_channel_allows(freq_mhz, body)) {
       scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
     }
     free(body);

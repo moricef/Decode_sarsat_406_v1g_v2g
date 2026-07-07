@@ -1,0 +1,25 @@
+[Unit]
+Description=Scan406 Service
+After=network.target
+StartLimitBurst=10
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+SyslogIdentifier=scan406
+WorkingDirectory=/home/firmin/balise_406MHz/dec406_scan/
+Environment=DEC406_BACKEND=rtl
+Environment=DSSS_DIAG=0
+Environment=RTL_DIAG=0
+Environment=ACQ_BANDPASS_HZ=0
+Environment=DUMP_FAIL=0
+Environment=DUMP_OK=0
+ExecStart=/home/firmin/balise_406MHz/dec406_scan/build/dec406_scan 406.0M 406.1M
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=25
+RuntimeMaxSec=41400
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@
  * @file main_scan_unified.c
  * @brief dec406_scan — unified real-time FGB+SGB scanner with auto hardware detection.
  *
- * Detects connected SDR hardware (RTL-SDR, Airspy Mini) and uses the first
+ * Detects connected SDR hardware (Airspy Mini, RTL-SDR, PlutoSDR, HackRF One) and uses the first
  * available backend. The spectral burst detector and FGB/SGB decoders are
  * shared across all backends via the scanner module.
  *
@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t running = 1;
@@ -47,8 +48,32 @@ static const backend_ops_t *backends[] = {
 #ifdef HAVE_PLUTO
     &backend_pluto,
 #endif
+#ifdef HAVE_HACKRF
+    &backend_hackrf,
+#endif
     NULL
 };
+
+const backend_ops_t *backend_find_by_name(const char *name) {
+    if (!name || !*name) return NULL;
+    for (int i = 0; backends[i]; i++) {
+        if (strcasecmp(name, backends[i]->name) == 0)
+            return backends[i];
+        if ((strcasecmp(name, "rtl") == 0) &&
+            strcmp(backends[i]->name, "RTL-SDR") == 0)
+            return backends[i];
+        if ((strcasecmp(name, "airspy") == 0) &&
+            strcmp(backends[i]->name, "Airspy Mini") == 0)
+            return backends[i];
+        if ((strcasecmp(name, "pluto") == 0) &&
+            strcmp(backends[i]->name, "PlutoSDR") == 0)
+            return backends[i];
+        if ((strcasecmp(name, "hackrf") == 0 || strcasecmp(name, "hackrf one") == 0) &&
+            strcmp(backends[i]->name, "HackRF One") == 0)
+            return backends[i];
+    }
+    return NULL;
+}
 
 int main(int argc, char **argv) {
     if (argc < 3) {
@@ -57,7 +82,7 @@ int main(int argc, char **argv) {
                 "  e.g. %s 406.0M 406.1M\n"
                 "       %s 431.9M 432.0M 15\n"
                 "\n"
-                "Auto-detects: RTL-SDR, Airspy Mini\n",
+        "Set DEC406_BACKEND=rtl|airspy|pluto|hackrf to force a device.\n",
                 argv[0], argv[0], argv[0]);
         return 1;
     }
@@ -77,16 +102,27 @@ int main(int argc, char **argv) {
     printf("  center  : %.3f MHz\n", center_hz / 1e6);
     fflush(stdout);
 
+    const char *forced = getenv("DEC406_BACKEND");
     const backend_ops_t *ops = NULL;
-    for (int i = 0; backends[i]; i++) {
-        printf("  probing : %s ... ", backends[i]->name);
-        fflush(stdout);
-        if (backends[i]->probe()) {
-            printf("found\n");
-            ops = backends[i];
-            break;
+
+    if (forced && *forced) {
+        ops = backend_find_by_name(forced);
+        if (!ops) {
+            fprintf(stderr, "ERROR: unsupported DEC406_BACKEND=%s\n", forced);
+            return 1;
         }
-        printf("not found\n");
+        printf("  backend : forced by DEC406_BACKEND=%s\n", forced);
+    } else {
+        for (int i = 0; backends[i]; i++) {
+            printf("  probing : %s ... ", backends[i]->name);
+            fflush(stdout);
+            if (backends[i]->probe()) {
+                printf("found\n");
+                ops = backends[i];
+                break;
+            }
+            printf("not found\n");
+        }
     }
 
     if (!ops) {
@@ -109,8 +145,12 @@ int main(int argc, char **argv) {
         printf("  gain    : auto\n");
     else
         printf("  gain    : %d\n", gain);
-    printf("  %-8s: %d\n", (strcmp(ops->name, "RTL-SDR") == 0) ? "ppm" : "extra",
-           extra);
+    if (strcmp(ops->name, "RTL-SDR") == 0)
+        printf("  %-8s: %d\n", "ppm", extra);
+    else if (strcmp(ops->name, "HackRF One") == 0)
+        printf("  %-8s: %d\n", "amp", extra);
+    else
+        printf("  %-8s: %d\n", "extra", extra);
 
     if (span > samp_rate)
         DWARN("WARNING: band span %.0f Hz > sample rate %u Hz\n", span, samp_rate);

@@ -173,7 +173,7 @@ static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
                        body && strstr(body, "Test Protocol: Normal Operation"));
         const char *hex_id = scan_alert_extract_hex_id(body);
         int is_repeat = scan_alert_is_repeat(hex_id);
-        if (is_real && is_repeat && scan_alert_freq_authorised(freq_mhz))
+        if (is_real && is_repeat && scan_alert_channel_allows(freq_mhz, body))
             scan_alert_send("SGB", freq_mhz, snr_db, bits,
                             DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, body);
         free(body);
@@ -240,7 +240,7 @@ static void decode_fgb(scanner_t *s, uint64_t start, uint64_t len,
         int is_bench = is_fgb_bench_test(body);
         int is_test = is_fgb_test_message(body);
         if (body && !is_orb && !is_id_na && !is_bench && !is_test && is_repeat &&
-            scan_alert_freq_authorised(freq_mhz))
+            scan_alert_channel_allows(freq_mhz, body))
             scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
         free(body);
     } else if (rc == -2) {

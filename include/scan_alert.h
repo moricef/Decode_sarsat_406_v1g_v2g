@@ -34,6 +34,13 @@ void scan_alert_print_config_summary(void);
  * (±2 kHz tolerance), 0 otherwise. */
 int scan_alert_freq_authorised(double freq_mhz);
 
+/* Alert routing policy.
+ * Default mode: direct 406 MHz, require a whitelisted T.012 channel.
+ * Downlink mode: set DEC406_ALERT_MODE=downlink and require a decoded
+ * position inside DEC406_ALERT_CENTER=lat,lon and DEC406_ALERT_RADIUS_KM.
+ * Returns 1 if an otherwise valid alert may be mailed. */
+int scan_alert_channel_allows(double freq_mhz, const char *body_text);
+
 /* Send an alert email. body_text is the full human-readable decode
  * (multi-line). type is "FGB" or "SGB". A summary header (timestamp,
  * type, freq, snr, hex frame) is prepended automatically.

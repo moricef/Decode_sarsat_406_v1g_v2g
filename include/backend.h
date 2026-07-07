@@ -28,4 +28,10 @@ extern const backend_ops_t backend_airspy;
 extern const backend_ops_t backend_pluto;
 #endif
 
+#ifdef HAVE_HACKRF
+extern const backend_ops_t backend_hackrf;
+#endif
+
+const backend_ops_t *backend_find_by_name(const char *name);
+
 #endif

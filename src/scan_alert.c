@@ -9,8 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* SMTP / recipient settings, populated by scan_alert_load_config().
  * If load failed, alerts_enabled stays 0. */
@@ -36,6 +41,10 @@ static const double authorised_channels[] = {
 };
 #define N_AUTH_CHAN (sizeof(authorised_channels) / sizeof(authorised_channels[0]))
 #define CHAN_TOL_MHZ 0.002  /* ±2 kHz */
+
+static int alert_mode_downlink(void);
+static int parse_alert_center(double *lat, double *lon);
+static double alert_radius_km(void);
 
 static void rstrip(char *s) {
     size_t n = strlen(s);
@@ -79,6 +88,16 @@ void scan_alert_print_config_summary(void) {
     printf("  mail smtp : %s\n", smtp_server);
     printf("  mail user : %s\n", smtp_user);
     printf("  mail to   : %s\n", recipients);
+    printf("  alert mode: %s\n", alert_mode_downlink() ? "downlink" : "direct");
+    if (alert_mode_downlink()) {
+        double lat = 0.0, lon = 0.0;
+        double radius = alert_radius_km();
+        if (parse_alert_center(&lat, &lon) && radius > 0.0) {
+            printf("  alert area: %.5f,%.5f radius %.0f km\n", lat, lon, radius);
+        } else {
+            printf("  alert area: invalid\n");
+        }
+    }
 }
 
 const char *scan_alert_extract_hex_id(const char *body) {
@@ -148,6 +167,137 @@ int scan_alert_freq_authorised(double freq_mhz) {
             return 1;
     }
     return 0;
+}
+
+static int alert_mode_downlink(void) {
+    const char *mode = getenv("DEC406_ALERT_MODE");
+    return mode && strcmp(mode, "downlink") == 0;
+}
+
+static int parse_alert_center(double *lat, double *lon) {
+    const char *e = getenv("DEC406_ALERT_CENTER");
+    if (!e || !*e) return 0;
+    char *end = NULL;
+    double a = strtod(e, &end);
+    if (end == e || *end != ',') return 0;
+    const char *lon_start = end + 1;
+    double b = strtod(lon_start, &end);
+    if (end == lon_start || (end && *end != '\0')) return 0;
+    if (a < -90.0 || a > 90.0 || b < -180.0 || b > 180.0) return 0;
+    *lat = a;
+    *lon = b;
+    return 1;
+}
+
+static double alert_radius_km(void) {
+    const char *e = getenv("DEC406_ALERT_RADIUS_KM");
+    if (!e || !*e) return -1.0;
+    char *end = NULL;
+    double r = strtod(e, &end);
+    if (end == e || (end && *end != '\0') || r <= 0.0) return -1.0;
+    return r;
+}
+
+static int parse_position_line(const char *line, double *lat, double *lon) {
+    const char *p = strchr(line, ':');
+    if (!p) return 0;
+    p++;
+
+    char *end = NULL;
+    double a = strtod(p, &end);
+    if (end == p) return 0;
+    p = end;
+    while (*p && *p != 'N' && *p != 'S') p++;
+    if (*p != 'N' && *p != 'S') return 0;
+    char ns = *p++;
+
+    while (*p && *p != ',') p++;
+    if (*p != ',') return 0;
+    p++;
+
+    double b = strtod(p, &end);
+    if (end == p) return 0;
+    p = end;
+    while (*p && *p != 'E' && *p != 'W') p++;
+    if (*p != 'E' && *p != 'W') return 0;
+    char ew = *p;
+
+    if (ns == 'S') a = -a;
+    if (ew == 'W') b = -b;
+    if (a < -90.0 || a > 90.0 || b < -180.0 || b > 180.0) return 0;
+    *lat = a;
+    *lon = b;
+    return 1;
+}
+
+static int scan_alert_extract_position(const char *body, double *lat, double *lon) {
+    if (!body) return 0;
+    const char *keys[] = {
+        "Composite position:",
+        "Position:",
+        "Coordinates:",
+        "Position (PDF-1):",
+        NULL
+    };
+
+    for (int k = 0; keys[k]; k++) {
+        const char *p = body;
+        while ((p = strstr(p, keys[k])) != NULL) {
+            const char *end = strchr(p, '\n');
+            size_t n = end ? (size_t)(end - p) : strlen(p);
+            char line[160];
+            if (n >= sizeof line) n = sizeof line - 1;
+            memcpy(line, p, n);
+            line[n] = '\0';
+            if (parse_position_line(line, lat, lon))
+                return 1;
+            p += strlen(keys[k]);
+        }
+    }
+    return 0;
+}
+
+static double haversine_km(double lat1, double lon1, double lat2, double lon2) {
+    const double r = 6371.0;
+    double p1 = lat1 * M_PI / 180.0;
+    double p2 = lat2 * M_PI / 180.0;
+    double dp = (lat2 - lat1) * M_PI / 180.0;
+    double dl = (lon2 - lon1) * M_PI / 180.0;
+    double a = sin(dp / 2.0) * sin(dp / 2.0) +
+               cos(p1) * cos(p2) * sin(dl / 2.0) * sin(dl / 2.0);
+    return 2.0 * r * atan2(sqrt(a), sqrt(1.0 - a));
+}
+
+int scan_alert_channel_allows(double freq_mhz, const char *body_text) {
+    if (!alert_mode_downlink())
+        return scan_alert_freq_authorised(freq_mhz);
+
+    double center_lat = 0.0, center_lon = 0.0;
+    double radius = alert_radius_km();
+    if (!parse_alert_center(&center_lat, &center_lon) || radius <= 0.0) {
+        DWARN("scan_alert: downlink mode needs DEC406_ALERT_CENTER=lat,lon "
+              "and DEC406_ALERT_RADIUS_KM\n");
+        return 0;
+    }
+
+    double lat = 0.0, lon = 0.0;
+    if (!scan_alert_extract_position(body_text, &lat, &lon)) {
+        DIAG("scan_alert: downlink alert skipped (no valid decoded position)\n");
+        return 0;
+    }
+
+    double d = haversine_km(center_lat, center_lon, lat, lon);
+    if (d > radius) {
+        DIAG("scan_alert: downlink alert skipped "
+             "(position %.5f,%.5f is %.0f km from center, radius %.0f km)\n",
+             lat, lon, d, radius);
+        return 0;
+    }
+
+    DIAG("scan_alert: downlink alert allowed "
+         "(position %.5f,%.5f is %.0f km from center, radius %.0f km)\n",
+         lat, lon, d, radius);
+    return 1;
 }
 
 /* MSB-first hex of n_bits bits. Buffer must hold (n_bits+3)/4 + 1 bytes.

@@ -158,3 +158,32 @@ Correctif appliqué : tenter d'abord l'acquisition sur +/-8 kHz et n'élargir à
 reste inchangé. Objectif : revenir au coût normal pour les bursts dont le
 résiduel fréquence est déjà dans +/-8 kHz, tout en conservant le secours
 +/-16 kHz pour les cas de centroïde décalé observés le soir.
+
+## Alertes downlink 1544 MHz
+
+Le filtrage mail par code pays n'est pas adapté au downlink satellite : le MID
+décrit l'enregistrement administratif de la balise, pas le lieu de l'accident.
+Une balise étrangère peut être en Ariège ou dans les départements limitrophes,
+et une balise française peut être n'importe où.
+
+Règle retenue pour un service `1544 MHz` séparé : ne pas utiliser la whitelist
+des canaux 406, mais exiger une position décodée valide dans une zone
+géographique configurée par l'environnement. Le mode 406 direct reste inchangé.
+
+Configuration prévue :
+
+- `DEC406_ALERT_MODE=downlink`
+- `DEC406_ALERT_CENTER=<latitude>,<longitude>`
+- `DEC406_ALERT_RADIUS_KM=<rayon>`
+
+Si le mode `downlink` est actif mais que la position est absente, invalide ou
+hors rayon, aucun mail n'est envoyé. Les filtres test/bench existants restent
+appliqués avant ce critère.
+
+## Backend forcé pour services séparés
+
+Le binaire unifié garde le probing automatique par défaut pour les usages
+interactifs, mais les services doivent pouvoir fixer leur SDR sans ambiguïté.
+La sélection explicite du backend se fait via `DEC406_BACKEND=rtl|airspy|pluto|hackrf`
+et permet de couper l'autoprobing au démarrage du service. HackRF est
+désormais supporté dans l'arbre courant.

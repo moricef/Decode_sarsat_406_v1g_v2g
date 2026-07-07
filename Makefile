@@ -103,10 +103,10 @@ SCANNER_SRCS = \
 	$(DSSS_SRCS)
 
 # dec406_scan - Unified scanner with auto hardware detection (Airspy → RTL-SDR → PlutoSDR)
-$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan_unified.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(SCANNER_SRCS)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan_unified.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(SRC_DIR)/backend_hackrf.c $(SCANNER_SRCS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DHAVE_RTLSDR -DHAVE_AIRSPY -DHAVE_PLUTO -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr -lairspy -liio
-	@echo "Built: $@ (Airspy + RTL-SDR + PlutoSDR)"
+	$(CC) $(CFLAGS) -DHAVE_RTLSDR -DHAVE_AIRSPY -DHAVE_PLUTO -DHAVE_HACKRF -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr -lairspy -liio -lhackrf
+	@echo "Built: $@ (Airspy + RTL-SDR + PlutoSDR + HackRF)"
 
 # dec406_scan_rtlsdr - RTL-SDR only (legacy standalone)
 $(BUILD_DIR)/dec406_scan_rtlsdr: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
