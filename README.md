@@ -32,12 +32,13 @@ beacons at 406 MHz.
 
 ### Real-time scanner
 `dec406_scan` is a unified real-time scanner with automatic SDR backend
-selection (Airspy Mini, RTL-SDR, PlutoSDR). The RTL-SDR backend uses
-`rtlsdr_read_async()` with large buffers; the previous synchronous path could
-silently underfeed the scanner and corrupt long FGB/SGB bursts. The scanner
-runs a spectral burst detector over the 100 kHz band, classifies each burst as
-FGB or SGB by bandwidth, and decodes accordingly. Designed to run as a systemd
-service; see "Real-time scanner" below.
+selection for interactive use (Airspy Mini, RTL-SDR, PlutoSDR, HackRF).
+The RTL-SDR backend uses `rtlsdr_read_async()` with large buffers; the
+previous synchronous path could silently underfeed the scanner and corrupt
+long FGB/SGB bursts. The scanner runs a spectral burst detector over the
+100 kHz band, classifies each burst as FGB or SGB by bandwidth, and decodes
+accordingly. For services, the backend can be forced explicitly with
+`DEC406_BACKEND=rtl|airspy|pluto|hackrf` so there is no startup probing.
 
 ### Current validation status
 
@@ -141,6 +142,23 @@ offline replay. `build/sgb_epl_diag` probes those dumps with EPL
 correlators at wider residual-frequency ranges. `ACQ_BANDPASS_HZ` is kept as
 a diagnostic acquisition-only filter; default `0` leaves it disabled.
 
+#### 1544 MHz downlink service
+
+`systemd/scan1544.service` is the dedicated downlink unit. It keeps the
+backend explicit and switches the alert path to geographic filtering instead
+of the 406 MHz distress-channel whitelist:
+
+```ini
+Environment=DEC406_BACKEND=hackrf
+Environment=DEC406_ALERT_MODE=downlink
+Environment=DEC406_ALERT_CENTER=43.0,1.5
+Environment=DEC406_ALERT_RADIUS_KM=80
+```
+
+If Pluto is used instead of HackRF on a given station, only
+`DEC406_BACKEND` changes. In downlink mode, an email is sent only when the
+decoded beacon position is valid and inside the configured radius.
+
 #### As a systemd service
 
 ```ini
@@ -173,6 +191,15 @@ journalctl -u scan406 -p debug     # full diagnostic stream
 If a `data/config_mail.txt` is present, the scanner emails the decoded
 frame whenever a beacon decodes on a T.012 Table H.2 distress channel
 (B/C/D/F/G/J/K/N/O/R/S, ±2 kHz). The `sendemail` binary must be installed.
+
+At startup the banner prints the mail settings that matter for operation:
+
+```text
+alerts  : enabled
+mail smtp : smtp.gmail.com:587
+mail user : xxxx@gmail.com
+mail to   : a@b.fr,c@d.fr
+```
 
 To enable alerts, copy the template and fill in the four values:
 

@@ -11,7 +11,7 @@ WorkingDirectory=/home/firmin/balise_406MHz/dec406_scan/
 Environment=DEC406_BACKEND=hackrf
 Environment=DEC406_ALERT_MODE=downlink
 Environment=DEC406_ALERT_CENTER=43.0,1.5
-Environment=DEC406_ALERT_RADIUS_KM=250
+Environment=DEC406_ALERT_RADIUS_KM=80
 Environment=RTL_DIAG=0
 Environment=DSSS_DIAG=0
 Environment=ACQ_BANDPASS_HZ=0
