@@ -36,8 +36,11 @@ TARGETS = \
 	$(BUILD_DIR)/dec406_iq \
 	$(BUILD_DIR)/dec406_dsss_test \
 	$(BUILD_DIR)/dec406_scan \
-	$(BUILD_DIR)/generate_2g_hex \
 	$(BUILD_DIR)/reset_usb
+
+ifneq ($(wildcard $(UTILS_DIR)/generate_2g_hex.c),)
+TARGETS += $(BUILD_DIR)/generate_2g_hex
+endif
 
 .PHONY: all clean check_deps help
 
