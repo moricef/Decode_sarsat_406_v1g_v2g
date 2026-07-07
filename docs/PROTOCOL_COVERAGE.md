@@ -6,10 +6,8 @@ because its protocol-specific fields are incomplete.
 
 Reference documents used for this audit:
 
-- C/S T.001 Issue 4 Rev.13, October 2025:
-  `/home/fab2/Developpement/COSPAS-SARSAT/Docs/docs_COSPAS-SARSAT/T001-OCT-23-2025.pdf`
-- C/S T.018 Issue 1 Rev.13, October 2025:
-  `/home/fab2/Developpement/COSPAS-SARSAT/Docs/docs_COSPAS-SARSAT/T018-OCT-23-2025.pdf`
+- C/S T.001 Issue 4 Rev.13, October 2025.
+- C/S T.018 Issue 1 Rev.13, October 2025.
 
 Status meanings:
 
