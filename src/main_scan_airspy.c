@@ -639,7 +639,9 @@ int main(int argc, char **argv) {
          (double)RING_SAMPLES / samp_rate);
 
   int alerts_ok = (scan_alert_load_config("data/config_mail.txt") == 0);
-  printf("  alerts  : %s\n\n", alerts_ok ? "enabled" : "disabled");
+  printf("  alerts  : %s\n", alerts_ok ? "enabled" : "disabled");
+  if (alerts_ok) scan_alert_print_config_summary();
+  printf("\n");
   fflush(stdout);
 
   /* Init */

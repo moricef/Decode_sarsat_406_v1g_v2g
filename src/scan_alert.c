@@ -75,6 +75,12 @@ int scan_alert_load_config(const char *path) {
     return 0;
 }
 
+void scan_alert_print_config_summary(void) {
+    printf("  mail smtp : %s\n", smtp_server);
+    printf("  mail user : %s\n", smtp_user);
+    printf("  mail to   : %s\n", recipients);
+}
+
 const char *scan_alert_extract_hex_id(const char *body) {
     if (!body) return NULL;
     const char *p = strstr(body, "Hex ID:");

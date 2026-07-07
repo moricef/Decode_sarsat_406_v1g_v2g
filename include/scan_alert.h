@@ -25,6 +25,11 @@
  * (alerts are then disabled). Safe to call once at startup. */
 int scan_alert_load_config(const char *path);
 
+/* Print the loaded SMTP/user/recipient settings without the password.
+ * Intended for scanner startup logs, after scan_alert_load_config()
+ * returned success. */
+void scan_alert_print_config_summary(void);
+
 /* 1 if the frequency falls in a T.012 Table H.2 distress channel
  * (±2 kHz tolerance), 0 otherwise. */
 int scan_alert_freq_authorised(double freq_mhz);
