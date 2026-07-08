@@ -189,6 +189,43 @@ Validation locale : `make -B build/dec406_scan`, `make -B build/dec406_iq`,
 synthétique SGB OK. Validation terrain firmin encore à faire avant commit de
 fix confirmé.
 
+Validation terrain du 8 juillet 2026 : 14 trames SGB self-test et 2 trames
+normales ont toutes validé le BCH sur firmin pendant des trains espacés parfois
+d'une seconde. Les compteurs sont restés à `overruns 0, decode drops 0`.
+Un second essai matériel a décodé 4 trames en 5 secondes sans perte. Le
+découplage du worker est donc confirmé.
+
+## Investigation — correction BCH-2 FGB
+
+T.001, section 3.2 et annexe B, définit BCH-2 comme un BCH(38,26) raccourci
+capable de corriger deux erreurs sur les bits 107 à 144. Il existe uniquement
+pour les messages longs, indiqués par le bit de format 25. Les messages courts
+s'arrêtent au bit 112 et leurs bits 107 à 112 ne sont pas protégés.
+
+Le démodulateur corrige déjà jusqu'à trois erreurs BCH-1, mais accepte
+actuellement une trame dès qu'elle valide comme longue ou comme courte, sans
+tenir compte du bit 25. Il transmet ensuite systématiquement 144 bits à
+`decode_1g()`. Une erreur BCH-2 peut donc provoquer un rejet avant le décodeur,
+et une trame courte acceptée est affichée à tort comme longue.
+
+Correctif validé pour implémentation : corriger d'abord BCH-1 (qui protège le
+bit 25), déterminer ensuite la longueur avec le bit 25 corrigé, puis
+corriger/valider BCH-2 uniquement pour une trame longue. Le démodulateur doit
+retourner la longueur réelle au scanner. Les deux corrections doivent partager
+le même essai de polarité afin de couvrir une trame ayant des erreurs dans les
+deux champs protégés.
+
+Test sur le corpus `logs/fgb_iq_bits.csv` : 120 trames acceptées sont des
+messages longs d'orbitographie (`protocol flag=1`, protocole utilisateur
+`000`), mais 94 ne valident pas BCH-2. L'application stricte du gate au seul
+bit 25 provoque également des `CRC FAIL` reproductibles sur les orbitographies
+CNES reçues à 406.0221 MHz, malgré un frame sync 9/9. T.001 réserve ce protocole
+aux opérateurs LUT et n'en décrit pas le contenu.
+
+Décision après validation matérielle : conserver ces orbitographies à 144 bits
+et ne pas leur appliquer BCH-2. La correction BCH-2 reste limitée aux autres
+messages longs. Les messages courts sont transmis au décodeur avec 112 bits.
+
 ## Alertes downlink 1544 MHz
 
 Le filtrage mail par code pays n'est pas adapté au downlink satellite : le MID

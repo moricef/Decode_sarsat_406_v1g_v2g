@@ -39,6 +39,15 @@ static int crc_ok(const uint8_t *bits, int length) {
     return 1;
 }
 
+static int frame_crc_ok(const uint8_t *bits) {
+    int length = bits[24] ? FGB_LONG_BITS : FGB_SHORT_BITS;
+    return crc_ok(bits, length);
+}
+
+static int is_orbitography(const uint8_t *bits) {
+    return bits[25] && !bits[36] && !bits[37] && !bits[38];
+}
+
 /* BCH1 brute-force correction: try flipping 1-3 bits in the BCH1
  * codeword (bits 24..105) and check if syndrome clears.
  * Returns number of corrected bits (0 = no correction needed/found). */
@@ -65,6 +74,51 @@ static int bch1_correct(uint8_t *bits, int length) {
         s[a] ^= 1;
     }
     return 0;
+}
+
+/* BCH2 protects bits 106..143 (zero-based) of long frames and corrects
+ * up to two errors. */
+static int bch2_correct(uint8_t *bits) {
+    char s[FGB_LONG_BITS + 1];
+    for (int i = 0; i < FGB_LONG_BITS; i++) s[i] = bits[i] ? '1' : '0';
+    s[FGB_LONG_BITS] = '\0';
+    if (!test_crc2(s)) return 0;
+
+    for (int a = 106; a < 144; a++) {
+        s[a] ^= 1;
+        if (!test_crc2(s)) {
+            bits[a] ^= 1;
+            return 1;
+        }
+        for (int b = a + 1; b < 144; b++) {
+            s[b] ^= 1;
+            if (!test_crc2(s)) {
+                bits[a] ^= 1;
+                bits[b] ^= 1;
+                return 2;
+            }
+            s[b] ^= 1;
+        }
+        s[a] ^= 1;
+    }
+    return -1;
+}
+
+static int correct_frame(uint8_t *bits, int *length,
+                         int *bch1_fixed, int *bch2_fixed) {
+    *bch1_fixed = bch1_correct(bits, FGB_LONG_BITS);
+    char s[FGB_LONG_BITS + 1];
+    for (int i = 0; i < FGB_LONG_BITS; i++) s[i] = bits[i] ? '1' : '0';
+    s[FGB_LONG_BITS] = '\0';
+    if (test_crc1(s)) return 0;
+
+    *length = bits[24] ? FGB_LONG_BITS : FGB_SHORT_BITS;
+    *bch2_fixed = 0;
+    if (*length == FGB_LONG_BITS && !is_orbitography(bits)) {
+        *bch2_fixed = bch2_correct(bits);
+        if (*bch2_fixed < 0) return 0;
+    }
+    return is_orbitography(bits) ? sync_pattern_ok(bits) : frame_crc_ok(bits);
 }
 
 /* Manchester integrate-and-dump on complex IQ.
@@ -405,7 +459,10 @@ static int decimate_iq(const float complex *in, size_t n_in,
 }
 
 int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
-                  long burst_start, uint8_t out_bits[FGB_LONG_BITS]) {
+                  long burst_start, uint8_t out_bits[FGB_LONG_BITS],
+                  int *out_length) {
+    if (!out_length) return -1;
+    *out_length = 0;
     int diag = (getenv("FGB_IQ_DIAG") != NULL);
     static int burst_id = 0;
     burst_id++;
@@ -603,35 +660,32 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
             (double)(best_init_phase * 180.0f / (float)M_PI),
             need_flip ? "(flipped)" : "");
 
+    uint8_t sliced_bits[FGB_LONG_BITS];
+    memcpy(sliced_bits, out_bits, sizeof(sliced_bits));
+
+    int frame_length = 0;
+    int bch1_fixed = 0;
+    int bch2_fixed = 0;
     int final_rc = -2;
-    if (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS)) {
-        DIAG("[fgb_iq] burst=%d CRC OK\n", burst_id);
+    if (correct_frame(out_bits, &frame_length, &bch1_fixed, &bch2_fixed)) {
+        DIAG("[fgb_iq] burst=%d CRC OK (BCH1 corrected %d, BCH2 corrected %d)\n",
+             burst_id, bch1_fixed, bch2_fixed);
         dump_bits(burst_id, bit0 + w0, 1, out_bits, best_soft);
+        *out_length = frame_length;
         final_rc = 0;
     } else {
-        int fixed = bch1_correct(out_bits, FGB_LONG_BITS);
-        if (fixed > 0 && (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS))) {
-            DIAG("[fgb_iq] burst=%d CRC OK (BCH1 corrected %d bit%s)\n",
-                    burst_id, fixed, fixed > 1 ? "s" : "");
-            dump_bits(burst_id, bit0 + w0, 1, out_bits, best_soft);
+        memcpy(out_bits, sliced_bits, sizeof(sliced_bits));
+        for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
+        if (correct_frame(out_bits, &frame_length, &bch1_fixed, &bch2_fixed)) {
+            DIAG("[fgb_iq] burst=%d CRC OK (polarity, BCH1 corrected %d, BCH2 corrected %d)\n",
+                 burst_id, bch1_fixed, bch2_fixed);
+            dump_bits(burst_id, bit0 + w0, 2, out_bits, best_soft);
+            *out_length = frame_length;
             final_rc = 0;
         } else {
-            if (fixed > 0)
-                for (int i = 24; i < 106; i++) out_bits[i] = (best_soft[i] > 0.0f) ? 1 : 0;
-            for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-            fixed = bch1_correct(out_bits, FGB_LONG_BITS);
-            if ((fixed >= 0) && (crc_ok(out_bits, FGB_LONG_BITS) || crc_ok(out_bits, FGB_SHORT_BITS))) {
-                DIAG("[fgb_iq] burst=%d CRC OK (polarity%s)\n",
-                        burst_id, fixed > 0 ? " + BCH1 corrected" : " fallback");
-                dump_bits(burst_id, bit0 + w0, 2, out_bits, best_soft);
-                final_rc = 0;
-            } else {
-                for (int i = 0; i < FGB_LONG_BITS; i++) out_bits[i] ^= 1;
-                if (fixed > 0)
-                    for (int i = 24; i < 106; i++) out_bits[i] = (best_soft[i] > 0.0f) ? 1 : 0;
-                DIAG("[fgb_iq] burst=%d CRC FAIL\n", burst_id);
-                dump_bits(burst_id, bit0 + w0, 0, out_bits, best_soft);
-            }
+            memcpy(out_bits, sliced_bits, sizeof(sliced_bits));
+            DIAG("[fgb_iq] burst=%d CRC FAIL\n", burst_id);
+            dump_bits(burst_id, bit0 + w0, 0, out_bits, best_soft);
         }
     }
     free(wiq);

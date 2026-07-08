@@ -299,11 +299,12 @@ static void decode_fgb_window(scanner_t *s, scanner_decode_job_t *job) {
     wipeoff_window(job->samples, job->n_samples, s->samp_rate, job->offset_hz);
 
     uint8_t bits[FGB_LONG_BITS];
+    int frame_length = 0;
     int rc = fgb_iq_decode(job->samples, job->n_samples, s->samp_rate,
-                           job->head_samples, bits);
+                           job->head_samples, bits, &frame_length);
 
     if (rc == 0) {
-        char *body = capture_decode(decode_1g, bits, FGB_LONG_BITS);
+        char *body = capture_decode(decode_1g, bits, frame_length);
         double freq_mhz = (s->center_hz + job->offset_hz) / 1e6;
         int is_orb = (body && strstr(body, "Identification: Orbitography"));
         const char *hex_id = scan_alert_extract_hex_id(body);
@@ -313,7 +314,7 @@ static void decode_fgb_window(scanner_t *s, scanner_decode_job_t *job) {
         int is_test = is_fgb_test_message(body);
         if (body && !is_orb && !is_id_na && !is_bench && !is_test && is_repeat &&
             scan_alert_channel_allows(freq_mhz, body))
-            scan_alert_send("FGB", freq_mhz, job->snr_db, bits, FGB_LONG_BITS,
+            scan_alert_send("FGB", freq_mhz, job->snr_db, bits, frame_length,
                             body);
         free(body);
     } else if (rc == -2) {

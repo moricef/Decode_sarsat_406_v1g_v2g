@@ -25,6 +25,7 @@
  *                 Detector jitter ±few ms is tolerated by the CW-anchored
  *                 freq/phase acquisition.
  *   out_bits    — output 144-bit array (caller-allocated).
+ *   out_length  — receives 112 for a short frame or 144 for a long frame.
  *
  * Returns:
  *   0   on success (bits valid, CRC OK).
@@ -34,6 +35,7 @@
  * The caller may inspect out_bits on -2 (best-effort decode attempt).
  */
 int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
-                  long burst_start, uint8_t out_bits[FGB_LONG_BITS]);
+                  long burst_start, uint8_t out_bits[FGB_LONG_BITS],
+                  int *out_length);
 
 #endif /* FGB_IQ_DEMOD_H */

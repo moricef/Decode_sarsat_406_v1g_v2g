@@ -392,11 +392,13 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
   }
 
   uint8_t bits[FGB_LONG_BITS];
-  int rc = fgb_iq_decode(win, (size_t)ext_len, SAMP_RATE, (long)head, bits);
+  int frame_length = 0;
+  int rc = fgb_iq_decode(win, (size_t)ext_len, SAMP_RATE, (long)head,
+                         bits, &frame_length);
   free(win);
 
   if (rc == 0) {
-    char *body = capture_decode(decode_1g, bits, FGB_LONG_BITS);
+    char *body = capture_decode(decode_1g, bits, frame_length);
     double freq_mhz = (g_center_hz + offset_hz) / 1e6;
     /* Filter A — orbitography beacons (Cospas-Sarsat ground reference
      * stations, not distress). decode_1g prints "Identification:
@@ -420,7 +422,7 @@ static void decode_fgb(uint64_t start, uint64_t len, double offset_hz, double sn
     if (body && !is_orbitography && !is_id_not_avail && !is_bench_test &&
         !is_test_message && is_repeat &&
         scan_alert_channel_allows(freq_mhz, body)) {
-      scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
+      scan_alert_send("FGB", freq_mhz, snr_db, bits, frame_length, body);
     }
     free(body);
   } else if (rc == -2) {
