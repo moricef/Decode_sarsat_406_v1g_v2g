@@ -29,15 +29,18 @@ beacons at 406 MHz.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
-  slicer, BCH1 brute-force error correction (t=3), CRC.
+  slicer, BCH-1 correction (t=3), and BCH-2 correction for long
+  non-orbitography frames (t=2).
 
 ### Real-time scanner
 `dec406_scan` is a unified real-time scanner with automatic SDR backend
 selection for interactive use (Airspy Mini, RTL-SDR, PlutoSDR, HackRF).
 The RTL-SDR backend uses `rtlsdr_read_async()` with large buffers. The scanner
 runs a spectral burst detector over the 100 kHz band, classifies each burst as
-FGB or SGB by bandwidth, and decodes accordingly. For services, the backend can
-be forced explicitly with
+FGB or SGB by bandwidth, and queues decoding in a dedicated worker so capture
+and spectral detection continue during expensive decodes. Heartbeats report
+SDR ring overruns and decode queue drops separately. For services, the backend
+can be forced explicitly with
 `DEC406_BACKEND=rtl|airspy|pluto|hackrf` so there is no startup probing.
 
 ### Current validation status

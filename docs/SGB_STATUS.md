@@ -226,6 +226,14 @@ Décision après validation matérielle : conserver ces orbitographies à 144 bi
 et ne pas leur appliquer BCH-2. La correction BCH-2 reste limitée aux autres
 messages longs. Les messages courts sont transmis au décodeur avec 112 bits.
 
+Implémentation finale commitée dans `39429c1` : correction BCH-2 jusqu'à deux
+erreurs pour les trames longues hors orbitographie, exception orbitographie et
+propagation de la longueur réelle vers les trois scanners. Validation locale :
+121/121 vecteurs FGB historiques acceptés, 19 266 injections BCH-2 d'une ou
+deux erreurs corrigées, builds des scanners unifié/RTL/Airspy et régression SGB
+synthétique réussis. La correction BCH-2 reste à confirmer sur une vraie trame
+longue hors orbitographie comportant une ou deux erreurs.
+
 ## Alertes downlink 1544 MHz
 
 Le filtrage mail par code pays n'est pas adapté au downlink satellite : le MID

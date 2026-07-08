@@ -1,5 +1,38 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.11 - 2026-07-08 - Worker de décodage et BCH-2 FGB
+
+### Worker de décodage pour le scanner temps réel
+
+Les décodages FGB et SGB s'exécutent désormais dans un worker dédié alimenté
+par une file bornée. Le scanner copie immédiatement chaque rafale IQ détectée
+et reprend la détection spectrale pendant que le worker effectue l'élimination
+de porteuse et le décodage. Le heartbeat affiche séparément les débordements du
+ring SDR et les pertes dues à une file de décodage pleine.
+
+La validation terrain sur firmin a décodé 14 trames SGB self-test et 2 trames
+normales pendant des trains espacés parfois d'une seconde. Toutes ont validé le
+BCH et les deux compteurs sont restés à zéro. Un autre essai matériel a décodé
+quatre trames en cinq secondes sans perte.
+
+### Correction BCH-2 FGB
+
+Les trames FGB longues hors orbitographie bénéficient maintenant de la
+correction BCH(38,26) sur les bits 107 à 144, jusqu'à deux erreurs, après que
+BCH-1 a corrigé et établi le bit de format. Les trames courtes sont transmises
+au décodeur texte avec leur longueur réelle de 112 bits.
+
+Les trames d'orbitographie CNES restent longues de 144 bits mais sont exemptées
+de validation BCH-2. T.001 réserve ce protocole aux opérateurs LUT sans en
+décrire la charge utile, et le corpus local contient des orbitographies longues
+dont le champ final n'est pas un mot BCH-2 valide.
+
+La validation couvre les 121 vecteurs FGB locaux précédemment acceptés, dont
+120 orbitographies longues, ainsi que 19 266 injections d'une ou deux erreurs
+BCH-2. Les builds des scanners et la régression SGB synthétique obligatoire
+passent également. La récupération d'erreurs BCH-2 sur une vraie trame FGB
+hors orbitographie reste à observer.
+
 ## Version 10.2.10 - 2026-07-08 - Nettoyage de la documentation README
 
 ### Nettoyage des README anglais et français

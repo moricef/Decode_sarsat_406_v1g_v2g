@@ -34,8 +34,8 @@ Décodeur pour balises de détresse COSPAS-SARSAT de 1re génération (FGB) et
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c` : décodeur BPSK biphase-L en bande
   de base complexe, sans détour par démodulation FM puis audio. Détection de
   fin de porteuse CW sur double grille, recherche Costas multiphase
-  (4 phases initiales × 13 décalages), seuillage Manchester, correction
-  d'erreurs BCH1 par force brute (t=3), CRC.
+  (4 phases initiales × 13 décalages), seuillage Manchester, correction BCH-1
+  (t=3) et correction BCH-2 des trames longues hors orbitographie (t=2).
 
 ### Scanner en temps réel
 `dec406_scan` est un scanner unifié fonctionnant en temps réel, avec sélection
@@ -43,8 +43,10 @@ automatique du moteur SDR (Airspy Mini, RTL-SDR, PlutoSDR, HackRF) pour une
 utilisation interactive. Le moteur RTL-SDR utilise `rtlsdr_read_async()` avec
 de grands tampons. Le scanner applique un détecteur de rafales spectrales sur
 la bande de 100 kHz, classe chaque rafale comme FGB ou SGB en fonction de sa
-largeur de bande, puis procède au décodage correspondant. Pour les services, le
-moteur peut être imposé explicitement via
+largeur de bande, puis confie son décodage à un worker dédié afin que la capture
+et la détection spectrale continuent pendant les traitements coûteux. Le
+heartbeat distingue les débordements du ring SDR des pertes dues à une file de
+décodage pleine. Pour les services, le moteur peut être imposé explicitement via
 `DEC406_BACKEND=rtl|airspy|pluto|hackrf`, évitant ainsi la phase de détection
 au démarrage.
 

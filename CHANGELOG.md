@@ -1,5 +1,37 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.11 - 2026-07-08 - Scanner decode worker and FGB BCH-2
+
+### Decode worker for real-time scanning
+
+FGB and SGB decoding now runs in a dedicated worker fed by a bounded queue.
+The scanner copies each detected IQ burst immediately and resumes spectral
+detection while the worker performs carrier wipeoff and decoding. Heartbeat
+logs report both SDR ring overruns and decode queue drops.
+
+Field validation on firmin decoded 14 SGB self-test frames and 2 normal frames
+during trains spaced as closely as one second, with all frames passing BCH and
+both counters remaining at zero. A separate hardware test decoded four frames
+in five seconds without loss.
+
+### FGB BCH-2 correction
+
+Long non-orbitography FGB frames now receive BCH(38,26) correction over bits
+107-144, recovering up to two errors after BCH-1 has corrected and established
+the format bit. Short frames are passed to the text decoder as 112 bits instead
+of being reported as long frames.
+
+CNES orbitography frames remain 144-bit frames but are exempt from BCH-2
+validation. T.001 reserves this protocol for LUT operators without describing
+its payload, and the local corpus contains long orbitography frames whose
+trailing field is not a valid BCH-2 codeword.
+
+Validation covered all 121 previously accepted local FGB vectors, including
+120 long orbitography frames, plus 19,266 injected one- and two-bit BCH-2
+correction cases. Scanner builds and the mandatory synthetic SGB regression
+also passed. Recovery of BCH-2 errors on a live non-orbitography FGB frame
+remains to be observed.
+
 ## Version 10.2.10 - 2026-07-08 - README documentation cleanup
 
 ### English and French README cleanup
