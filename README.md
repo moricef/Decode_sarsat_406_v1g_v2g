@@ -16,15 +16,16 @@ beacons at 406 MHz.
   correction, all T.018 fields — `dec406_v2g.c`
 
 ### Demodulators
-- **DSSS OQPSK (2G)** — `dsss_demod.c` flat-chain (no sample-rate tracking
-  loop): DC blocker → FFT-correlation frequency acquisition → NCO wipeoff →
-  OQPSK delay → multi-offset boxcar decimation → despread with preamble
-  linear-fit frequency estimation + per-bit Costas PLL → BCH. Oracle tries
+- **DSSS OQPSK (2G)** — `dsss_demod.c` direct processing chain (no
+  sample-rate tracking loop): DC blocker → FFT-correlation frequency
+  acquisition → NCO wipeoff → OQPSK delay → multi-offset boxcar decimation →
+  despread with preamble linear-fit frequency estimation + per-bit Costas PLL
+  → BCH. Oracle tries
   4 boxcar offsets × 4 Costas phases (16 combos) before giving up. The
   acquisition lag search is capped to the burst pre-roll to avoid late
   noise/data peaks beating the true preamble. The FFT-correlation frequency
-  search spans ±16 kHz, which covers scanner centroid errors observed on
-  real CNES SGB bursts.
+  search spans ±16 kHz, which covers the frequency offsets observed on real
+  CNES SGB bursts.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
@@ -52,10 +53,11 @@ system beacons are active. Track three SGB buckets separately:
 | SGB end-to-end | `BCH OK / detected SGB bursts` |
 
 Recent field validation shows that SGB bursts reaching synchronization validate
-BCH cleanly. The acquisition search now spans ±16 kHz to cover centroid errors
-observed on real CNES SGB bursts. Firmin relay checks and local RTL/Yagi tests
-remain in a high-success range, with FGB staying in its usual class. Treat
-these as run-specific field checks, not fixed global rates.
+BCH cleanly. The acquisition search now spans ±16 kHz to cover the frequency
+offsets observed between spectral burst detection and the useful SGB signal on
+real CNES bursts. Firmin relay checks and local RTL/Yagi tests remain in a
+high-success range, with FGB staying in its usual class. Treat these as
+run-specific field checks, not fixed global rates.
 
 ---
 
