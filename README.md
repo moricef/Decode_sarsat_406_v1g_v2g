@@ -34,11 +34,10 @@ beacons at 406 MHz.
 ### Real-time scanner
 `dec406_scan` is a unified real-time scanner with automatic SDR backend
 selection for interactive use (Airspy Mini, RTL-SDR, PlutoSDR, HackRF).
-The RTL-SDR backend uses `rtlsdr_read_async()` with large buffers; the
-previous synchronous path could silently underfeed the scanner and corrupt
-long FGB/SGB bursts. The scanner runs a spectral burst detector over the
-100 kHz band, classifies each burst as FGB or SGB by bandwidth, and decodes
-accordingly. For services, the backend can be forced explicitly with
+The RTL-SDR backend uses `rtlsdr_read_async()` with large buffers. The scanner
+runs a spectral burst detector over the 100 kHz band, classifies each burst as
+FGB or SGB by bandwidth, and decodes accordingly. For services, the backend can
+be forced explicitly with
 `DEC406_BACKEND=rtl|airspy|pluto|hackrf` so there is no startup probing.
 
 ### Current validation status
@@ -53,11 +52,9 @@ system beacons are active. Track three SGB buckets separately:
 | SGB end-to-end | `BCH OK / detected SGB bursts` |
 
 Recent field validation shows that SGB bursts reaching synchronization validate
-BCH cleanly. Acquisition uses a ±8 kHz search first, then widens to ±16 kHz
-when needed to cover larger offsets between spectral burst detection and the
-useful SGB signal on real CNES bursts. Firmin relay checks and local RTL/Yagi
-tests remain in a high-success range, with FGB staying in its usual class.
-Treat these as run-specific field checks, not fixed global rates.
+BCH cleanly. Firmin relay checks and local RTL/Yagi tests remain in a
+high-success range, with FGB staying in its usual class. Treat these as
+run-specific field checks, not fixed global rates.
 
 ---
 

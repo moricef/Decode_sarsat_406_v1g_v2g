@@ -41,10 +41,8 @@ Décodeur pour balises de détresse COSPAS-SARSAT de 1re génération (FGB) et
 `dec406_scan` est un scanner unifié fonctionnant en temps réel, avec sélection
 automatique du moteur SDR (Airspy Mini, RTL-SDR, PlutoSDR, HackRF) pour une
 utilisation interactive. Le moteur RTL-SDR utilise `rtlsdr_read_async()` avec
-de grands tampons ; l'ancienne méthode synchrone pouvait fournir un débit
-insuffisant sans erreur explicite, avec un risque de discontinuités dans les
-longues rafales FGB/SGB. Le scanner applique un détecteur de rafales spectrales
-sur la bande de 100 kHz, classe chaque rafale comme FGB ou SGB en fonction de sa
+de grands tampons. Le scanner applique un détecteur de rafales spectrales sur
+la bande de 100 kHz, classe chaque rafale comme FGB ou SGB en fonction de sa
 largeur de bande, puis procède au décodage correspondant. Pour les services, le
 moteur peut être imposé explicitement via
 `DEC406_BACKEND=rtl|airspy|pluto|hackrf`, évitant ainsi la phase de détection
@@ -62,13 +60,10 @@ des balises système CNES actives. Suivre séparément trois catégories SGB :
 | SGB bout en bout | `BCH OK / rafales SGB détectées` |
 
 Sur les dernières validations terrain, les SGB qui se synchronisent valident
-proprement le BCH. L'acquisition essaie d'abord une recherche ±8 kHz, puis
-s'élargit à ±16 kHz si nécessaire pour couvrir les écarts plus importants entre
-la détection spectrale de la rafale et le signal SGB utile sur des rafales CNES
-réelles. Les essais du relais firmin et les validations locales RTL/Yagi
-donnent des taux élevés, avec FGB restant dans sa plage habituelle. Ces valeurs
-doivent être traitées comme des contrôles terrain propres à chaque passe, pas
-comme des taux globaux fixes.
+proprement le BCH. Les essais du relais firmin et les validations locales
+RTL/Yagi donnent des taux élevés, avec FGB restant dans sa plage habituelle.
+Ces valeurs doivent être traitées comme des contrôles terrain propres à chaque
+passe, pas comme des taux globaux fixes.
 
 ---
 
