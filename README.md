@@ -51,15 +51,11 @@ system beacons are active. Track three SGB buckets separately:
 | SGB decoder purity | `BCH OK / (BCH OK + FRAME REJECTED)` |
 | SGB end-to-end | `BCH OK / detected SGB bursts` |
 
-Recent validation after the async RTL fix, fredzo SGB corrections, and the
-±16 kHz acquisition search showed no "strong preamble sync then random data"
-failures: SGBs that synchronize validate BCH cleanly. On 2026-07-04 the firmin
-relay recovered calibration SGB bursts whose residual offsets were around
-+8.6 to +11.1 kHz, outside the previous ±8 kHz search window; the same run
-showed roughly 93 % SGB calibration-slot success on the 150 s grid. Local
-RTL/Yagi validation remained in the same range, and FGB stayed around its
-pre-existing 90 % class. Treat these as run-specific field checks, not fixed
-global rates.
+Recent field validation shows that SGB bursts reaching synchronization validate
+BCH cleanly. The acquisition search now spans ±16 kHz to cover centroid errors
+observed on real CNES SGB bursts. Firmin relay checks and local RTL/Yagi tests
+remain in a high-success range, with FGB staying in its usual class. Treat
+these as run-specific field checks, not fixed global rates.
 
 ---
 
