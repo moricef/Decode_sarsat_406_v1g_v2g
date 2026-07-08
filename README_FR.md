@@ -27,9 +27,10 @@ Décodeur pour balises de détresse COSPAS-SARSAT de 1re génération (FGB) et
   d'abandonner. La recherche du décalage temporel d'acquisition est limitée à
   la durée du préambule de la salve (pre-roll) afin d'éviter que des pics de
   bruit ou de données tardifs ne soient pris à tort pour le véritable
-  préambule. La recherche de fréquence par corrélation FFT couvre une plage de
-  ±16 kHz, ce qui englobe les écarts de fréquence observés sur des salves SGB
-  réelles du CNES.
+  préambule. La recherche de fréquence par corrélation FFT essaie d'abord
+  ±8 kHz, puis s'élargit à ±16 kHz seulement si nécessaire pour couvrir les
+  écarts de fréquence plus importants observés sur des salves SGB réelles du
+  CNES.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c` : décodeur BPSK biphase-L en bande
   de base complexe, sans détour par démodulation FM puis audio. Détection de
   fin de porteuse CW sur double grille, recherche Costas multiphase
@@ -61,12 +62,13 @@ des balises système CNES actives. Suivre séparément trois catégories SGB :
 | SGB bout en bout | `BCH OK / rafales SGB détectées` |
 
 Sur les dernières validations terrain, les SGB qui se synchronisent valident
-proprement le BCH. La recherche d'acquisition couvre désormais ±16 kHz afin de
-tenir compte des écarts de fréquence observés entre la détection spectrale de
-la rafale et le signal SGB utile sur des rafales CNES réelles. Les essais du
-relais firmin et les validations locales RTL/Yagi donnent des taux élevés, avec
-FGB restant dans sa plage habituelle. Ces valeurs doivent être traitées comme
-des contrôles terrain propres à chaque passe, pas comme des taux globaux fixes.
+proprement le BCH. L'acquisition essaie d'abord une recherche ±8 kHz, puis
+s'élargit à ±16 kHz si nécessaire pour couvrir les écarts plus importants entre
+la détection spectrale de la rafale et le signal SGB utile sur des rafales CNES
+réelles. Les essais du relais firmin et les validations locales RTL/Yagi
+donnent des taux élevés, avec FGB restant dans sa plage habituelle. Ces valeurs
+doivent être traitées comme des contrôles terrain propres à chaque passe, pas
+comme des taux globaux fixes.
 
 ---
 
@@ -254,7 +256,7 @@ canaux :
 IQ @ 2.4576 MHz
   → filtre de suppression de la composante continue (IIR α=0.001)
   → décimation par fenêtre rectangulaire au débit des chips (acquisition seulement)
-  → freq_acq_fft_corr (corrélation FFT au débit des chips, ±16 kHz, précision ~1 Hz)
+  → freq_acq_fft_corr (corrélation FFT au débit des chips, ±8 kHz puis repli ±16 kHz, précision ~1 Hz)
   → élimination de la porteuse par NCO au taux d'échantillonnage
   → délai OQPSK (Q avancé de SPS/2)
   → décimation par fenêtre rectangulaire avec décalages multiples (4 décalages sous-chip)

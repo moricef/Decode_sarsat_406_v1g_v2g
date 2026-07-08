@@ -24,8 +24,8 @@ beacons at 406 MHz.
   4 boxcar offsets × 4 Costas phases (16 combos) before giving up. The
   acquisition lag search is capped to the burst pre-roll to avoid late
   noise/data peaks beating the true preamble. The FFT-correlation frequency
-  search spans ±16 kHz, which covers the frequency offsets observed on real
-  CNES SGB bursts.
+  search tries ±8 kHz first, then widens to ±16 kHz only when needed to cover
+  larger frequency offsets observed on real CNES SGB bursts.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
@@ -53,11 +53,11 @@ system beacons are active. Track three SGB buckets separately:
 | SGB end-to-end | `BCH OK / detected SGB bursts` |
 
 Recent field validation shows that SGB bursts reaching synchronization validate
-BCH cleanly. The acquisition search now spans ±16 kHz to cover the frequency
-offsets observed between spectral burst detection and the useful SGB signal on
-real CNES bursts. Firmin relay checks and local RTL/Yagi tests remain in a
-high-success range, with FGB staying in its usual class. Treat these as
-run-specific field checks, not fixed global rates.
+BCH cleanly. Acquisition uses a ±8 kHz search first, then widens to ±16 kHz
+when needed to cover larger offsets between spectral burst detection and the
+useful SGB signal on real CNES bursts. Firmin relay checks and local RTL/Yagi
+tests remain in a high-success range, with FGB staying in its usual class.
+Treat these as run-specific field checks, not fixed global rates.
 
 ---
 
@@ -235,7 +235,7 @@ Additional silencing filters layered on the channel whitelist:
 IQ @ 2.4576 MHz
   → DC blocker (IIR α=0.001)
   → boxcar decimation to chip rate (acquisition only)
-  → freq_acq_fft_corr (chip-rate FFT-correlation, ±16 kHz, ~1 Hz precision)
+  → freq_acq_fft_corr (chip-rate FFT-correlation, ±8 kHz then ±16 kHz fallback, ~1 Hz precision)
   → NCO wipeoff at sample rate
   → OQPSK delay (Q advanced by SPS/2)
   → multi-offset boxcar decimation (4 sub-chip offsets)
