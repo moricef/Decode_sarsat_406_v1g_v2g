@@ -166,6 +166,7 @@ static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
         free(win);
         printf("  --- SGB frame decoded (z=%.1f, PRN=%s) ---\n",
                z, despread_prn_mode_name(prn_mode));
+        decode_2g_set_frame_mode(prn_mode == DESPREAD_PRN_SELF_TEST);
         char *body = capture_decode(decode_beacon, bits,
                                     DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
         double freq_mhz = (s->center_hz + offset_hz) / 1e6;

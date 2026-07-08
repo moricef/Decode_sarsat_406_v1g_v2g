@@ -201,11 +201,15 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
   memset(bits, 0, sizeof bits);
   float z = 0.0f;
   float fs = (float)samp_rate;
-  int rc = dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f, fs, 0, bits, &z);
+  despread_prn_mode_t prn_mode = DESPREAD_PRN_NORMAL;
+  int rc = dsss_receive_burst_ex(win, (size_t)ext_len, fs / 38400.0f, fs,
+                                 0, bits, &z, &prn_mode);
 
   if (rc == 0) {
     free(win);
-    printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
+    printf("  --- SGB frame decoded (z=%.1f, PRN=%s) ---\n",
+           z, despread_prn_mode_name(prn_mode));
+    decode_2g_set_frame_mode(prn_mode == DESPREAD_PRN_SELF_TEST);
     char *body = capture_decode(decode_beacon, bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     double freq_mhz = (g_center_hz + offset_hz) / 1e6;
     int is_real_distress = (body && strstr(body, "Test Protocol: Normal Operation") != NULL);

@@ -180,6 +180,7 @@ int main(int argc, char *argv[]) {
     size_t step = (size_t)(fs * 0.25);
     int found = 0;
     float best_z = 0.0f;
+    despread_prn_mode_t best_prn_mode = DESPREAD_PRN_NORMAL;
     uint8_t *best_out = calloc(DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, 1);
     if (!best_out) { fclose(fp); free(buf); return 1; }
 
@@ -201,9 +202,14 @@ int main(int argc, char *argv[]) {
 
         size_t trim = find_burst_start(buf, n, fs);
         float z = 0.0f;
-        if (dsss_receive_burst(buf + trim, n - trim, sps, fs, 0, out, &z) == 0) {
+        despread_prn_mode_t prn_mode = DESPREAD_PRN_NORMAL;
+        if (dsss_receive_burst_ex(buf + trim, n - trim, sps, fs, 0, out, &z, &prn_mode) == 0) {
             printf("\r  Sync at t=%.2fs (z=%.1f)\n", (double)(off + trim) / (double)fs, (double)z);
-            if (z > best_z) { best_z = z; memcpy(best_out, out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS); }
+            if (z > best_z) {
+                best_z = z;
+                best_prn_mode = prn_mode;
+                memcpy(best_out, out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+            }
             found++;
         }
     }
@@ -214,6 +220,7 @@ int main(int argc, char *argv[]) {
     printf("\n%d windows synced — decoding best (z=%.1f)\n", found, (double)best_z);
     print_hex(best_out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     printf("\n=== FRAME DECODING ===\n");
+    decode_2g_set_frame_mode(best_prn_mode == DESPREAD_PRN_SELF_TEST);
     decode_beacon(best_out, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
     printf("\n╔════════════════════════════════════════════════════════════════╗\n");
     printf("║                    DEMODULATION COMPLETE                      ║\n");

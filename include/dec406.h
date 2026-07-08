@@ -25,6 +25,10 @@
 
 void decode_1g(const uint8_t *bits, int length);
 void decode_2g(const uint8_t *bits);
+/* Set the self-test mode for the next decode_2g() call, derived from the DSSS
+ * PRN mode (self-test beacons use a distinct spreading code). Consumed and
+ * reset by decode_2g; paths without PRN info default to Normal. */
+void decode_2g_set_frame_mode(int is_self_test);
 void decode_beacon(const uint8_t *bits, int length);
 
 #endif

@@ -270,6 +270,7 @@ typedef struct {
     uint8_t homing;
     uint8_t rls;
     uint8_t test;
+    uint8_t frame_is_self_test;  // PRN self-test mode (distinct from T.018 test bit)
     double lat;
     double lon;
     uint8_t vessel_id_type;
@@ -745,11 +746,24 @@ static void validate_beacon_type(BeaconInfo *info) {
 
 static void print_beacon_info(const BeaconInfo *info);
 
+/* Self-test mode of the next 2G frame, derived from the DSSS PRN mode
+ * (self-test beacons use a distinct spreading code). Consumed and cleared by
+ * decode_2g so it never leaks to a following frame. Paths without PRN info
+ * (hex-direct, legacy scanners) leave it 0 = Normal. */
+static int g_frame_self_test = 0;
+void decode_2g_set_frame_mode(int is_self_test) {
+    g_frame_self_test = is_self_test ? 1 : 0;
+}
+
 void decode_2g(const uint8_t *rx_bits) {
     uint8_t corrected[BCH_K];  // Corrected information bits
     uint8_t cw250[250];        // Full corrected codeword (202 data + 48 BCH)
     BeaconInfo info;
     memset(&info, 0, sizeof(info));
+
+    int frame_self_test = g_frame_self_test;
+    g_frame_self_test = 0;  /* consume: never leak to the next frame */
+    info.frame_is_self_test = (uint8_t)frame_self_test;
 
     /* Diagnostic (DSSS_DIAG): emit a marker matching the despread_bits.c
      * burst counter so the post-hoc analyzer can match a BCH outcome
@@ -795,6 +809,8 @@ void decode_2g(const uint8_t *rx_bits) {
             int bit = (j >= 0 && j < 250) ? (cw250[j] & 1) : 0;
             nib |= bit << (3 - b);
         }
+        if (k == 0 && frame_self_test)
+            nib |= 0x8;  /* T.018 self-test flag: set the left-pad MSB (003.. -> 803..) */
         info.corrected_hex[k] = "0123456789ABCDEF"[nib];
     }
     info.corrected_hex[63] = '\0';
@@ -836,6 +852,7 @@ void print_beacon_info(const BeaconInfo *info) {
     
     printf("\n=== 406 MHz SECOND GENERATION BEACON (SGB) ===");
     printf("\n[IDENTIFICATION]");
+    printf("\n Frame Mode: %s", info->frame_is_self_test ? "Self-test" : "Normal");
     printf("\n 23 Hex ID: %s", info->hex_id);
     printf("\n Corrected 250 bits: %s", info->corrected_hex);
     printf("\n TAC Number: %u (0x%04X)", info->tac, info->tac);
