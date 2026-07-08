@@ -1,14 +1,35 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.10 - 2026-07-08 - README documentation cleanup
+
+### English and French README cleanup
+
+Added `README_FR.md` as the maintained French README and removed the obsolete
+`README.fr.md` to avoid serving stale translated content.
+
+Both README files were edited to keep README content focused on current
+behavior rather than commit-history details:
+
+- validation status now summarizes current field checks without naming internal
+  fix branches or one-off short-window percentages;
+- historical explanations about the former synchronous RTL-SDR path remain in
+  this changelog instead of the README;
+- SGB acquisition documentation now describes the actual staged search:
+  ±8 kHz first, then ±16 kHz fallback only when needed;
+- internal shorthand such as `flat-chain` / `chaîne plate` was replaced by
+  clearer README wording.
+
 ## Version 10.2.9 - 2026-07-04 - Wider SGB acquisition search
 
-### SGB acquisition search widened to ±16 kHz (`src/dsss_demod.c`)
+### SGB acquisition search widened with ±16 kHz fallback (`src/dsss_demod.c`)
 
-`freq_acq_fft_corr()` is now called with a ±16 kHz residual-frequency search
-window instead of ±8 kHz. Field dumps from firmin showed valid CNES SGB
-calibration bursts with correlation peaks at roughly +8.6 to +11.1 kHz from
-the scanner burst centroid; the previous search range rejected those bursts
-before despreading even though the signal was usable.
+`freq_acq_fft_corr()` is now tried first with the normal ±8 kHz
+residual-frequency search window, then retried with a wider ±16 kHz fallback
+when the first pass does not meet the acquisition confidence threshold. Field
+dumps from firmin showed valid CNES SGB calibration bursts with correlation
+peaks at roughly +8.6 to +11.1 kHz from the scanner burst centroid; a strict
+±8 kHz-only search rejected those bursts before despreading even though the
+signal was usable.
 
 This is an acquisition-only change. The post-sync SGB path remains unchanged:
 NCO wipeoff, OQPSK delay, despread, per-bit Costas, and BCH validation are the
