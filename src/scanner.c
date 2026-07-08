@@ -8,6 +8,7 @@
 #include <complex.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,17 @@
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t data_avail = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t output_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void output_printf(const char *fmt, ...) {
+    va_list ap;
+    pthread_mutex_lock(&output_lock);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    fflush(stdout);
+    pthread_mutex_unlock(&output_lock);
+}
 
 static const char *timestr(time_t t) {
     static char b[16];
@@ -80,11 +92,21 @@ static void fft(float complex *x, int n) {
 
 typedef void (*decode_print_fn)(const uint8_t *, int);
 static char *capture_decode(decode_print_fn fn, const uint8_t *bits, int n) {
+    pthread_mutex_lock(&output_lock);
     fflush(stdout);
     FILE *tmp = tmpfile();
-    if (!tmp) { fn(bits, n); return NULL; }
+    if (!tmp) {
+        fn(bits, n);
+        pthread_mutex_unlock(&output_lock);
+        return NULL;
+    }
     int saved = dup(STDOUT_FILENO);
-    if (saved < 0) { fclose(tmp); fn(bits, n); return NULL; }
+    if (saved < 0) {
+        fclose(tmp);
+        fn(bits, n);
+        pthread_mutex_unlock(&output_lock);
+        return NULL;
+    }
     dup2(fileno(tmp), STDOUT_FILENO);
     fn(bits, n);
     fflush(stdout);
@@ -100,6 +122,8 @@ static char *capture_decode(decode_print_fn fn, const uint8_t *bits, int n) {
         fputs(buf, stdout);
     }
     fclose(tmp);
+    fflush(stdout);
+    pthread_mutex_unlock(&output_lock);
     return buf;
 }
 
@@ -113,8 +137,36 @@ static int is_fgb_test_message(const char *body) {
     return body && strstr(body, "Test Protocol: Active");
 }
 
-static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
-                       double offset_hz, double snr_db) {
+static void wipeoff_window(float complex *samples, size_t n, uint32_t samp_rate,
+                           double offset_hz) {
+    double w = 2.0 * M_PI * offset_hz / (double)samp_rate;
+    for (size_t i = 0; i < n; i++) {
+        double ph = w * (double)i;
+        float complex lo = cosf(ph) - sinf(ph) * I;
+        samples[i] *= lo;
+    }
+}
+
+static int decode_enqueue(scanner_t *s, scanner_decode_job_t *job) {
+    pthread_mutex_lock(&s->decode_lock);
+    if (s->decode_count >= SCANNER_DECODE_QUEUE_CAP) {
+        s->decode_drops++;
+        pthread_mutex_unlock(&s->decode_lock);
+        DWARN("WARNING: decode queue full, dropping %s (%lu)\n",
+              job->type == SCANNER_DECODE_SGB ? "SGB" : "FGB",
+              s->decode_drops);
+        return -1;
+    }
+    s->decode_q[s->decode_tail] = *job;
+    s->decode_tail = (s->decode_tail + 1u) % SCANNER_DECODE_QUEUE_CAP;
+    s->decode_count++;
+    pthread_cond_signal(&s->decode_avail);
+    pthread_mutex_unlock(&s->decode_lock);
+    return 0;
+}
+
+static void queue_sgb(scanner_t *s, uint64_t start, uint64_t len,
+                      double offset_hz, double snr_db) {
     uint64_t head = (uint64_t)(0.20 * s->samp_rate);
     uint64_t tail = (uint64_t)(0.20 * s->samp_rate);
     if (head > start) head = start;
@@ -133,74 +185,83 @@ static void decode_sgb(scanner_t *s, uint64_t start, uint64_t len,
     float complex *win = malloc((size_t)ext_len * sizeof(float complex));
     if (!win) { DWARN("WARNING: SGB alloc failed\n"); return; }
 
-    double w = 2.0 * M_PI * offset_hz / (double)s->samp_rate;
-    for (uint64_t i = 0; i < ext_len; i++) {
-        float complex sam = s->ring[(ext_start + i) & SCANNER_RING_MASK];
-        double ph = w * (double)i;
-        float complex lo = cosf(ph) - sinf(ph) * I;
-        win[i] = sam * lo;
-    }
+    for (uint64_t i = 0; i < ext_len; i++)
+        win[i] = s->ring[(ext_start + i) & SCANNER_RING_MASK];
+
+    scanner_decode_job_t job = {
+        .type = SCANNER_DECODE_SGB,
+        .samples = win,
+        .n_samples = (size_t)ext_len,
+        .head_samples = 0,
+        .offset_hz = offset_hz,
+        .snr_db = snr_db,
+    };
+    if (decode_enqueue(s, &job) < 0)
+        free(win);
+}
+
+static void decode_sgb_window(scanner_t *s, scanner_decode_job_t *job) {
+    wipeoff_window(job->samples, job->n_samples, s->samp_rate, job->offset_hz);
 
     uint8_t bits[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
     memset(bits, 0, sizeof bits);
     float z = 0.0f;
     float fs = (float)s->samp_rate;
     despread_prn_mode_t prn_mode = DESPREAD_PRN_NORMAL;
-    int rc = dsss_receive_burst_ex(win, (size_t)ext_len, fs / 38400.0f, fs,
+    int rc = dsss_receive_burst_ex(job->samples, job->n_samples, fs / 38400.0f, fs,
                                    0, bits, &z, &prn_mode);
 
     if (rc == 0) {
         if (getenv("DUMP_OK")) {
             time_t now = time(NULL);
-            struct tm *tm = localtime(&now);
+            struct tm tmv;
+            localtime_r(&now, &tmv);
             char path[128];
             snprintf(path, sizeof path, "sgb_ok_%02d%02d%02d_%.0fHz.cf32",
-                     tm->tm_hour, tm->tm_min, tm->tm_sec, offset_hz);
+                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec, job->offset_hz);
             FILE *fp = fopen(path, "wb");
             if (fp) {
-                fwrite(win, sizeof(float complex), (size_t)ext_len, fp);
+                fwrite(job->samples, sizeof(float complex), job->n_samples, fp);
                 fclose(fp);
-                printf("  dumped %s\n", path);
+                output_printf("  dumped %s\n", path);
             }
         }
-        free(win);
-        printf("  --- SGB frame decoded (z=%.1f, PRN=%s) ---\n",
-               z, despread_prn_mode_name(prn_mode));
+        output_printf("  --- SGB frame decoded (z=%.1f, PRN=%s) ---\n",
+                      z, despread_prn_mode_name(prn_mode));
         decode_2g_set_frame_mode(prn_mode == DESPREAD_PRN_SELF_TEST);
         char *body = capture_decode(decode_beacon, bits,
                                     DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
-        double freq_mhz = (s->center_hz + offset_hz) / 1e6;
+        double freq_mhz = (s->center_hz + job->offset_hz) / 1e6;
         int is_real = (prn_mode == DESPREAD_PRN_NORMAL &&
                        body && strstr(body, "Test Protocol: Normal Operation"));
         const char *hex_id = scan_alert_extract_hex_id(body);
         int is_repeat = scan_alert_is_repeat(hex_id);
         if (is_real && is_repeat && scan_alert_channel_allows(freq_mhz, body))
-            scan_alert_send("SGB", freq_mhz, snr_db, bits,
+            scan_alert_send("SGB", freq_mhz, job->snr_db, bits,
                             DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, body);
         free(body);
     } else {
-        printf("  SGB burst — decode failed (z=%.1f)\n", z);
+        output_printf("  SGB burst — decode failed (z=%.1f)\n", z);
         if (getenv("DUMP_FAIL")) {
             time_t now = time(NULL);
-            struct tm *tm = localtime(&now);
+            struct tm tmv;
+            localtime_r(&now, &tmv);
             char path[128];
             snprintf(path, sizeof path, "burst_sgb_%02d%02d%02d_%.0fHz.cf32",
-                     tm->tm_hour, tm->tm_min, tm->tm_sec, offset_hz);
+                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec, job->offset_hz);
             FILE *fp = fopen(path, "wb");
             if (fp) {
-                fwrite(win, sizeof(float complex), (size_t)ext_len, fp);
+                fwrite(job->samples, sizeof(float complex), job->n_samples, fp);
                 fclose(fp);
-                printf("  dumped %s\n", path);
+                output_printf("  dumped %s\n", path);
             }
         }
-        free(win);
     }
-    printf("\n");
-    fflush(stdout);
+    output_printf("\n");
 }
 
-static void decode_fgb(scanner_t *s, uint64_t start, uint64_t len,
-                       double offset_hz, double snr_db) {
+static void queue_fgb(scanner_t *s, uint64_t start, uint64_t len,
+                      double offset_hz, double snr_db) {
     uint64_t head = (uint64_t)(0.05 * s->samp_rate);
     uint64_t tail = (uint64_t)(0.10 * s->samp_rate);
     if (head > start) head = start;
@@ -219,21 +280,31 @@ static void decode_fgb(scanner_t *s, uint64_t start, uint64_t len,
     float complex *win = malloc((size_t)ext_len * sizeof(float complex));
     if (!win) { DWARN("WARNING: FGB alloc failed\n"); return; }
 
-    double w = 2.0 * M_PI * offset_hz / (double)s->samp_rate;
-    for (uint64_t i = 0; i < ext_len; i++) {
-        float complex sam = s->ring[(ext_start + i) & SCANNER_RING_MASK];
-        double ph = w * (double)i;
-        float complex lo = cosf(ph) - sinf(ph) * I;
-        win[i] = sam * lo;
-    }
+    for (uint64_t i = 0; i < ext_len; i++)
+        win[i] = s->ring[(ext_start + i) & SCANNER_RING_MASK];
+
+    scanner_decode_job_t job = {
+        .type = SCANNER_DECODE_FGB,
+        .samples = win,
+        .n_samples = (size_t)ext_len,
+        .head_samples = (long)head,
+        .offset_hz = offset_hz,
+        .snr_db = snr_db,
+    };
+    if (decode_enqueue(s, &job) < 0)
+        free(win);
+}
+
+static void decode_fgb_window(scanner_t *s, scanner_decode_job_t *job) {
+    wipeoff_window(job->samples, job->n_samples, s->samp_rate, job->offset_hz);
 
     uint8_t bits[FGB_LONG_BITS];
-    int rc = fgb_iq_decode(win, (size_t)ext_len, s->samp_rate, (long)head, bits);
-    free(win);
+    int rc = fgb_iq_decode(job->samples, job->n_samples, s->samp_rate,
+                           job->head_samples, bits);
 
     if (rc == 0) {
         char *body = capture_decode(decode_1g, bits, FGB_LONG_BITS);
-        double freq_mhz = (s->center_hz + offset_hz) / 1e6;
+        double freq_mhz = (s->center_hz + job->offset_hz) / 1e6;
         int is_orb = (body && strstr(body, "Identification: Orbitography"));
         const char *hex_id = scan_alert_extract_hex_id(body);
         int is_repeat = scan_alert_is_repeat(hex_id);
@@ -242,15 +313,41 @@ static void decode_fgb(scanner_t *s, uint64_t start, uint64_t len,
         int is_test = is_fgb_test_message(body);
         if (body && !is_orb && !is_id_na && !is_bench && !is_test && is_repeat &&
             scan_alert_channel_allows(freq_mhz, body))
-            scan_alert_send("FGB", freq_mhz, snr_db, bits, FGB_LONG_BITS, body);
+            scan_alert_send("FGB", freq_mhz, job->snr_db, bits, FGB_LONG_BITS,
+                            body);
         free(body);
     } else if (rc == -2) {
-        printf("  FGB burst — CRC FAIL\n");
+        output_printf("  FGB burst — CRC FAIL\n");
     } else {
-        printf("  FGB burst — no frame decoded (no sync/burst)\n");
+        output_printf("  FGB burst — no frame decoded (no sync/burst)\n");
     }
-    printf("\n");
-    fflush(stdout);
+    output_printf("\n");
+}
+
+static void *decode_worker_main(void *arg) {
+    scanner_t *s = (scanner_t *)arg;
+
+    for (;;) {
+        pthread_mutex_lock(&s->decode_lock);
+        while (s->running && s->decode_count == 0)
+            pthread_cond_wait(&s->decode_avail, &s->decode_lock);
+        if (!s->running && s->decode_count == 0) {
+            pthread_mutex_unlock(&s->decode_lock);
+            break;
+        }
+        scanner_decode_job_t job = s->decode_q[s->decode_head];
+        s->decode_head = (s->decode_head + 1u) % SCANNER_DECODE_QUEUE_CAP;
+        s->decode_count--;
+        pthread_mutex_unlock(&s->decode_lock);
+
+        if (job.type == SCANNER_DECODE_SGB)
+            decode_sgb_window(s, &job);
+        else
+            decode_fgb_window(s, &job);
+        free(job.samples);
+    }
+
+    return NULL;
 }
 
 static int measure_burst(scanner_t *s, uint64_t start, uint64_t len,
@@ -333,6 +430,26 @@ int scanner_init(scanner_t *s, uint32_t samp_rate, double center_hz,
     if (!s->ring) return -1;
     memset(s->ring, 0, (size_t)SCANNER_RING_SAMPLES * sizeof(float complex));
 
+    if (pthread_mutex_init(&s->decode_lock, NULL) != 0) {
+        free(s->ring);
+        s->ring = NULL;
+        return -1;
+    }
+    if (pthread_cond_init(&s->decode_avail, NULL) != 0) {
+        pthread_mutex_destroy(&s->decode_lock);
+        free(s->ring);
+        s->ring = NULL;
+        return -1;
+    }
+    if (pthread_create(&s->decode_thread, NULL, decode_worker_main, s) != 0) {
+        pthread_cond_destroy(&s->decode_avail);
+        pthread_mutex_destroy(&s->decode_lock);
+        free(s->ring);
+        s->ring = NULL;
+        return -1;
+    }
+    s->decode_thread_started = 1;
+
     for (int k = 0; k < SCANNER_FFT_N; k++)
         s->hann[k] = 0.5 - 0.5 * cos(2.0 * M_PI * k / (SCANNER_FFT_N - 1));
 
@@ -340,6 +457,22 @@ int scanner_init(scanner_t *s, uint32_t samp_rate, double center_hz,
 }
 
 void scanner_free(scanner_t *s) {
+    scanner_stop(s);
+    if (s->decode_thread_started) {
+        pthread_join(s->decode_thread, NULL);
+        s->decode_thread_started = 0;
+    }
+    pthread_mutex_lock(&s->decode_lock);
+    while (s->decode_count > 0) {
+        scanner_decode_job_t *job = &s->decode_q[s->decode_head];
+        free(job->samples);
+        memset(job, 0, sizeof(*job));
+        s->decode_head = (s->decode_head + 1u) % SCANNER_DECODE_QUEUE_CAP;
+        s->decode_count--;
+    }
+    pthread_mutex_unlock(&s->decode_lock);
+    pthread_cond_destroy(&s->decode_avail);
+    pthread_mutex_destroy(&s->decode_lock);
     if (s->ring) { free(s->ring); s->ring = NULL; }
 }
 
@@ -358,6 +491,9 @@ void scanner_stop(scanner_t *s) {
     pthread_mutex_lock(&lock);
     pthread_cond_broadcast(&data_avail);
     pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&s->decode_lock);
+    pthread_cond_broadcast(&s->decode_avail);
+    pthread_mutex_unlock(&s->decode_lock);
 }
 
 void scanner_process(scanner_t *s) {
@@ -521,15 +657,14 @@ void scanner_process(scanner_t *s) {
                              timestr_ms(), (s->center_hz + fmeas) / 1e6,
                              bwmeas / 1e3, type, dur_s);
                     } else {
-                        printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
-                               "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
-                               timestr_ms(), (s->center_hz + fmeas) / 1e6,
-                               bwmeas / 1e3, type, bsnr, dur_s, dt);
-                        fflush(stdout);
+                        output_printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
+                                      "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
+                                      timestr_ms(), (s->center_hz + fmeas) / 1e6,
+                                      bwmeas / 1e3, type, bsnr, dur_s, dt);
                         if (is_sgb)
-                            decode_sgb(s, burst_start, blen, fmeas, bsnr);
+                            queue_sgb(s, burst_start, blen, fmeas, bsnr);
                         else
-                            decode_fgb(s, burst_start, blen, fmeas, bsnr);
+                            queue_fgb(s, burst_start, blen, fmeas, bsnr);
                     }
                 }
                 state = 0; above = 0;
@@ -543,8 +678,10 @@ void scanner_process(scanner_t *s) {
             last_beat = now;
             double fl = 0.0;
             for (int k = 0; k < SCANNER_FFT_N; k++) fl += s->floor_bin[k];
-            DIAG("[%s] monitoring — mean noise floor %.2e, overruns %lu\n",
-                 timestr(now), fl / SCANNER_FFT_N, s->overruns);
+            DIAG("[%s] monitoring — mean noise floor %.2e, overruns %lu, "
+                 "decode drops %lu\n",
+                 timestr(now), fl / SCANNER_FFT_N, s->overruns,
+                 s->decode_drops);
         }
     }
 }

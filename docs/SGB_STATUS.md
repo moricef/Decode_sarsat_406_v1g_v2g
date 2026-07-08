@@ -159,6 +159,36 @@ reste inchangé. Objectif : revenir au coût normal pour les bursts dont le
 résiduel fréquence est déjà dans +/-8 kHz, tout en conservant le secours
 +/-16 kHz pour les cas de centroïde décalé observés le soir.
 
+## Investigation — découplage décodage scanner
+
+Logs firmin du 8 juillet 2026 : les SGB self-test décodent proprement, mais
+des `ring overrun` apparaissent pendant les trains de bursts rapprochés. Le
+débit RTL reste nominal à 2.4576 MS/s ; le problème observé n'est donc pas une
+perte USB, mais le fait que `scanner_process()` exécute encore le décodage
+FGB/SGB complet dans le même fil que la détection spectrale.
+
+Hypothèse retenue : copier immédiatement la fenêtre IQ de la salve détectée
+puis pousser ce travail dans une file bornée traitée par un worker unique. Le
+fil scanner doit ainsi reprendre la FFT de détection sans attendre
+`dsss_receive_burst_ex()` ni le décodage BCH/texte.
+
+Critères de validation : build scanner OK, régression SGB synthétique OK, puis
+test firmin sur trains de bursts. Les `ring overrun` doivent diminuer ou
+disparaître ; si la charge dépasse encore la capacité de décodage, le symptôme
+attendu devient une file de décodage pleine explicitement loggée plutôt qu'un
+débordement silencieux du ring d'échantillons.
+
+Correctif local préparé sur `feature/scanner-decode-worker` : file bornée de
+16 décodages, worker unique, copie immédiate de la fenêtre IQ brute dans le fil
+scanner, wipeoff NCO et décodage dans le worker. `capture_decode()` est protégé
+par un verrou stdout pour éviter qu'une ligne `BURST` concurrente soit capturée
+dans le corps texte du décodage.
+
+Validation locale : `make -B build/dec406_scan`, `make -B build/dec406_iq`,
+`make -B build/dec406_scan_rtlsdr build/dec406_scan_airspy` et régression
+synthétique SGB OK. Validation terrain firmin encore à faire avant commit de
+fix confirmé.
+
 ## Alertes downlink 1544 MHz
 
 Le filtrage mail par code pays n'est pas adapté au downlink satellite : le MID
