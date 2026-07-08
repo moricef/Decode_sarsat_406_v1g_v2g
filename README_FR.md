@@ -41,10 +41,10 @@ Décodeur pour balises de détresse COSPAS-SARSAT de 1re génération (FGB) et
 `dec406_scan` est un scanner unifié fonctionnant en temps réel, avec sélection
 automatique du moteur SDR (Airspy Mini, RTL-SDR, PlutoSDR, HackRF) pour une
 utilisation interactive. Le moteur RTL-SDR utilise `rtlsdr_read_async()` avec
-de grands tampons ; l'ancienne méthode synchrone risquait d'alimenter le
-scanner de manière insuffisante et silencieuse, corrompant ainsi les longues
-rafales FGB/SGB. Le scanner applique un détecteur de rafales spectrales sur la
-bande de 100 kHz, classe chaque rafale comme FGB ou SGB en fonction de sa
+de grands tampons ; l'ancienne méthode synchrone pouvait fournir un débit
+insuffisant sans erreur explicite, avec un risque de discontinuités dans les
+longues rafales FGB/SGB. Le scanner applique un détecteur de rafales spectrales
+sur la bande de 100 kHz, classe chaque rafale comme FGB ou SGB en fonction de sa
 largeur de bande, puis procède au décodage correspondant. Pour les services, le
 moteur peut être imposé explicitement via
 `DEC406_BACKEND=rtl|airspy|pluto|hackrf`, évitant ainsi la phase de détection
