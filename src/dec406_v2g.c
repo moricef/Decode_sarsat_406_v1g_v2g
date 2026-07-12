@@ -315,8 +315,10 @@ typedef struct {
                 uint8_t twc_provider;
                 uint8_t version_id;
                 uint8_t twc_ack_received;
+                uint8_t answer_format;
                 uint8_t questionA;
                 uint8_t answerA;
+                uint16_t long_answersA;
                 uint8_t questionB;
                 uint8_t answerB;
                 uint8_t questionC;
@@ -493,13 +495,20 @@ static void decode_rot_field(const uint8_t *rot_bits, BeaconInfo *info) {
             info->rot.twc.twc_provider = get_bits(rot_bits, 4, 3);
             info->rot.twc.version_id = get_bits(rot_bits, 7, 5);
             info->rot.twc.twc_ack_received = rot_bits[12];
-            // Spare bits 13-14 (2 bits)
-            info->rot.twc.questionA = get_bits(rot_bits, 15, 7);  // bits 16-22 in message
-            info->rot.twc.answerA = get_bits(rot_bits, 22, 4);    // bits 23-26 in message
-            info->rot.twc.questionB = get_bits(rot_bits, 26, 7);  // bits 27-33 in message
-            info->rot.twc.answerB = get_bits(rot_bits, 33, 4);    // bits 34-37 in message
-            info->rot.twc.questionC = get_bits(rot_bits, 37, 7);  // bits 38-44 in message
-            info->rot.twc.answerC = get_bits(rot_bits, 44, 4);    // bits 45-48 in message
+            info->rot.twc.answer_format = rot_bits[13];
+            // Bit 14 is the answer format flag; bit 15 is spare.
+            info->rot.twc.questionA = get_bits(rot_bits, 15, 7);  // bits 16-22 in field
+            if (info->rot.twc.answer_format == 0) {
+                info->rot.twc.answerA = get_bits(rot_bits, 22, 4);    // bits 23-26
+                info->rot.twc.questionB = get_bits(rot_bits, 26, 7);  // bits 27-33
+                info->rot.twc.answerB = get_bits(rot_bits, 33, 4);    // bits 34-37
+                info->rot.twc.questionC = get_bits(rot_bits, 37, 7);  // bits 38-44
+                info->rot.twc.answerC = get_bits(rot_bits, 44, 4);    // bits 45-48
+            } else {
+                info->rot.twc.long_answersA = get_bits(rot_bits, 22, 15); // bits 23-37
+                info->rot.twc.questionB = get_bits(rot_bits, 37, 7);      // bits 38-44
+                info->rot.twc.answerB = get_bits(rot_bits, 44, 4);        // bits 45-48
+            }
             break;
         
         case 15:  // Cancellation Message
@@ -1013,14 +1022,25 @@ void print_beacon_info(const BeaconInfo *info) {
             }
             printf("\n Database Version: %d", info->rot.twc.version_id);
             printf("\n TWC ACK Received: %s", info->rot.twc.twc_ack_received ? "Yes" : "No");
-            if (info->rot.twc.questionA != 0 || info->rot.twc.answerA != 0) {
-                printf("\n Question A: %d, Answer A: %d", info->rot.twc.questionA, info->rot.twc.answerA);
-            }
-            if (info->rot.twc.questionB != 0 || info->rot.twc.answerB != 0) {
-                printf("\n Question B: %d, Answer B: %d", info->rot.twc.questionB, info->rot.twc.answerB);
-            }
-            if (info->rot.twc.questionC != 0 || info->rot.twc.answerC != 0) {
-                printf("\n Question C: %d, Answer C: %d", info->rot.twc.questionC, info->rot.twc.answerC);
+            if (info->rot.twc.answer_format == 0) {
+                if (info->rot.twc.questionA != 0 || info->rot.twc.answerA != 0) {
+                    printf("\n Question A: %d, Answer A: %d", info->rot.twc.questionA, info->rot.twc.answerA);
+                }
+                if (info->rot.twc.questionB != 0 || info->rot.twc.answerB != 0) {
+                    printf("\n Question B: %d, Answer B: %d", info->rot.twc.questionB, info->rot.twc.answerB);
+                }
+                if (info->rot.twc.questionC != 0 || info->rot.twc.answerC != 0) {
+                    printf("\n Question C: %d, Answer C: %d", info->rot.twc.questionC, info->rot.twc.answerC);
+                }
+            } else {
+                printf("\n Answer Format: Long");
+                if (info->rot.twc.questionA != 0 || info->rot.twc.long_answersA != 0) {
+                    printf("\n Question A: %d, Answers A bitmap: 0x%04X",
+                           info->rot.twc.questionA, info->rot.twc.long_answersA);
+                }
+                if (info->rot.twc.questionB != 0 || info->rot.twc.answerB != 0) {
+                    printf("\n Question B: %d, Answer B: %d", info->rot.twc.questionB, info->rot.twc.answerB);
+                }
             }
             break;
         
@@ -1028,8 +1048,8 @@ void print_beacon_info(const BeaconInfo *info) {
             printf("\n Type: Cancellation Message");
             printf("\n Method: ");
             switch(info->rot.cancellation.deactivation_method) {
-                case 1: printf("Manual deactivation"); break;
-                case 2: printf("Automatic deactivation"); break;
+                case 1: printf("Automatic deactivation by external means"); break;
+                case 2: printf("Manual deactivation by user"); break;
                 default: printf("Unknown (%d)", info->rot.cancellation.deactivation_method);
             }
             break;

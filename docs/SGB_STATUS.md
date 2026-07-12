@@ -195,6 +195,28 @@ d'une seconde. Les compteurs sont restés à `overruns 0, decode drops 0`.
 Un second essai matériel a décodé 4 trames en 5 secondes sans perte. Le
 découplage du worker est donc confirmé.
 
+### Validation longue firmin du 9 juillet 2026
+
+Log : `logs/scan406_20260709_0000.log`
+
+Validation longue après découplage du décodage scanner par worker, de
+00:00 à 08:59 :
+
+- SGB : **450/450 décodées = 100,0 %**.
+- Répartition SGB : **252 self-test**, **198 normales**.
+- PRN sélectionnés : **252 SELF-TEST**, **198 NORMAL**.
+- Acquisition SGB : **419** bursts acceptés en fenêtre **+/-8 kHz**,
+  **31** via fallback **+/-16 kHz**.
+- SGB `FRAME REJECTED` : **0**.
+- `decode drops` : **0**.
+- Overruns réels : **0**. Les lignes horaires `stopped — 0 ring overrun(s)`
+  confirment l'arrêt propre du cycle scanner.
+- FGB : **1449/1506 = 96,2 %**.
+
+Conclusion : le worker de décodage tient la charge sur un cycle long firmin.
+Les SGB détectées sont toutes décodées, y compris les self-test, sans perte de
+file ni overrun réel.
+
 ## Investigation — correction BCH-2 FGB
 
 T.001, section 3.2 et annexe B, définit BCH-2 comme un BCH(38,26) raccourci
@@ -262,3 +284,50 @@ interactifs, mais les services doivent pouvoir fixer leur SDR sans ambiguïté.
 La sélection explicite du backend se fait via `DEC406_BACKEND=rtl|airspy|pluto|hackrf`
 et permet de couper l'autoprobing au démarrage du service. HackRF est
 désormais supporté dans l'arbre courant.
+
+## Investigation — champ tournant SGB TWC RF#4
+
+La comparaison du parseur `decode_rot_field()` avec C/S T.018 Issue 1
+Revision 13, Table 3.7, confirme un bug latent dans le décodage du champ
+tournant #4 Two-Way Communication. Le code lit correctement l'identifiant du
+fournisseur RLS, la version du dataset et l'acquittement RLM Type 3, mais il
+traite actuellement les 33 bits de messages TWC comme trois slots courts
+`7 bits question + 4 bits réponse` dans tous les cas.
+
+Le bit 14 du champ tournant est en réalité l'`Answer Format Flag`; seul le
+bit 15 est réservé. Lorsque ce flag vaut 1, T.018 impose un slot long
+`7 bits question + 15 bits réponses`, suivi d'un slot court `7 + 4`. Une
+trame TWC au format long serait donc affichée comme trois fausses réponses
+courtes. Aucune balise TWC opérationnelle n'a encore été observée : il
+s'agit d'une correction anticipée de conformité, à valider par vecteurs
+synthétiques.
+
+Correctif validé pour implémentation : conserver le chemin court à
+l'identique lorsque le flag vaut 0, ajouter le stockage et l'affichage du
+format long lorsque le flag vaut 1, puis tester les deux formats avec des
+trames SGB dont le BCH est valide. La régression SGB synthétique habituelle
+reste obligatoire.
+
+Implémentation locale validée : le format court restitue les trois couples
+de test `15/2`, `22/1`, `8/4` sans changement ; le format long restitue la
+question 42, le bitmap de réponses `0x4215`, puis le couple court `9/3`. Les
+deux vecteurs possèdent un BCH(250,202) valide et passent également par
+`dec406_hex`. Les builds `dec406_hex`, `dec406_iq` et `dec406_scan` réussissent.
+La régression `test_sgb_halfsine.sigmf-data` reste BCH valide avec `nerr=0`.
+
+Validation de bout en bout avec le modulateur
+`ADALM-PLUTO/SARSAT_SGB` : deux nouveaux modes `twc-short` et `twc-long`
+construisent le RF#4, calculent son BCH et génèrent le signal DSSS/OQPSK.
+Les fichiers SigMF produits sont acquis par `dec406_iq` avec `nerr=0`. Le
+format court restitue `15/2`, `22/1`, `8/4`; le format long restitue la
+question 42, le bitmap `0x4215`, puis `9/3`. Cette validation traverse donc
+la chaîne complète constructeur de trame, BCH, modulation IQ, acquisition,
+désétalement et décodage RF#4, sans émission matérielle.
+
+La lecture concomitante de T.018 Table 3.9 a identifié un sujet distinct :
+pour RF#15, `10` signifie désactivation manuelle et `01` désactivation
+automatique. L'affichage actuel de `dec406_v2g.c` associe ces deux valeurs
+dans l'ordre inverse. Correction validée et appliquée : `01` affiche
+`Automatic deactivation by external means` et `10` affiche
+`Manual deactivation by user`. Les deux valeurs sont vérifiées avec des
+trames SGB synthétiques dont le BCH est valide.

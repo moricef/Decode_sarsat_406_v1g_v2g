@@ -1,5 +1,22 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.12 - 2026-07-12 - Décodage des réponses longues SGB TWC
+
+Le décodeur du champ tournant SGB #4 tient maintenant compte de
+l'`Answer Format Flag` défini par T.018. Le format TWC court conserve ses
+trois slots question 7 bits + réponse 4 bits. Le format long est décodé comme
+une question de 7 bits avec un bitmap de réponses de 15 bits, suivie d'un slot
+court 7+4 bits, conformément à C/S T.018 Issue 1 Revision 13, Table 3.7.
+
+La validation utilise des trames RF#4 synthétiques courte et longue avec BCH
+valide via `dec406_hex`. Les builds du décodeur et du scanner passent, ainsi
+que la régression SGB synthétique obligatoire avec zéro erreur BCH.
+
+Le décodage du champ tournant d'annulation #15 est également aligné sur
+T.018 Table 3.9 : la valeur `01` indique maintenant une désactivation
+automatique par un moyen externe et `10` une désactivation manuelle par
+l'utilisateur.
+
 ## Version 10.2.11 - 2026-07-08 - Worker de décodage et BCH-2 FGB
 
 ### Worker de décodage pour le scanner temps réel
@@ -14,6 +31,10 @@ La validation terrain sur firmin a décodé 14 trames SGB self-test et 2 trames
 normales pendant des trains espacés parfois d'une seconde. Toutes ont validé le
 BCH et les deux compteurs sont restés à zéro. Un autre essai matériel a décodé
 quatre trames en cinq secondes sans perte.
+
+Une validation longue firmin du 9 juillet 2026 a décodé les 450 rafales SGB
+détectées (252 self-test, 198 normales), sans rejet de trame, sans perte de
+file de décodage et sans overrun réel.
 
 ### Correction BCH-2 FGB
 

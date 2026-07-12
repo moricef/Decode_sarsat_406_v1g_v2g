@@ -1,5 +1,21 @@
 # Changelog - dec406_v10.2
 
+## Version 10.2.12 - 2026-07-12 - SGB TWC long-answer decoding
+
+The SGB rotating-field #4 decoder now honors the T.018 Answer Format Flag.
+Short-format TWC messages retain their three 7-bit question plus 4-bit answer
+slots. Long-format messages are decoded as one 7-bit question with a 15-bit
+answer bitmap followed by one short 7+4-bit slot, as specified by C/S T.018
+Issue 1 Revision 13, Table 3.7.
+
+Validation used BCH-valid synthetic short and long RF#4 frames through
+`dec406_hex`. The main decoder and scanner builds passed, as did the mandatory
+synthetic SGB regression with zero BCH errors.
+
+Cancellation rotating-field #15 decoding was also aligned with T.018 Table
+3.9: value `01` now reports automatic deactivation by external means and
+value `10` reports manual deactivation by the user.
+
 ## Version 10.2.11 - 2026-07-08 - Scanner decode worker and FGB BCH-2
 
 ### Decode worker for real-time scanning
@@ -13,6 +29,10 @@ Field validation on firmin decoded 14 SGB self-test frames and 2 normal frames
 during trains spaced as closely as one second, with all frames passing BCH and
 both counters remaining at zero. A separate hardware test decoded four frames
 in five seconds without loss.
+
+A longer firmin run on 2026-07-09 decoded all 450 detected SGB bursts
+(252 self-test, 198 normal), with zero frame rejects, zero decode drops and
+zero real ring overruns.
 
 ### FGB BCH-2 correction
 
