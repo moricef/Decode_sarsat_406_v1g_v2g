@@ -331,3 +331,82 @@ dans l'ordre inverse. Correction validée et appliquée : `01` affiche
 `Automatic deactivation by external means` et `10` affiche
 `Manual deactivation by user`. Les deux valeurs sont vérifiées avec des
 trames SGB synthétiques dont le BCH est valide.
+
+### Investigation matérielle — seule la première trame Pluto est décodée
+
+Premier essai RF TWC court à 431,975 MHz : la première rafale est acquise et
+décodée avec BCH `nerr=0`, et restitue correctement `15/2`, `22/1`, `8/4`.
+Les trames suivantes n'ont toutefois pas été décodées.
+
+Le constructeur de trame alterne volontairement RF#4 et RF#0 ; cela ne peut
+pas expliquer une absence totale de décodage, car les deux champs sont valides
+et la troisième transmission doit de nouveau porter RF#4. L'hypothèse à
+tester est donc un problème de répétition de l'émission one-shot Pluto ou de
+détection des rafales suivantes, pas le contenu TWC.
+
+Test minimal : comparer, pour les transmissions #2 et #3, les messages
+`TX enabled`, `TX buffer push`, `Burst complete` côté modulateur avec la
+présence ou l'absence de lignes `BURST` côté scanner. Aucun correctif ne doit
+être appliqué avant d'avoir isolé si la perte se situe à l'émission ou à la
+détection.
+
+Résultat intermédiaire : les transmissions #23 à #28 sont toutes construites
+avec BCH valide et `iio_buffer_push()` se termine par `Burst complete`. Les
+champs alternent correctement RF#4/RF#0. La boucle applicative et le contenu
+des trames sont donc hors de cause. Ce log ne prouve toutefois pas que le
+Pluto rayonne après la première salve : les retours des commandes d'activation
+et de désactivation TX sont actuellement ignorés. Le prochain test minimal est
+l'observation directe des salves suivantes sur une cascade SDR, afin de
+séparer une absence RF d'un défaut de détection scanner.
+
+Le log scanner tranche ce point : une salve ultérieure est bien observée à
+431,9743 MHz avec une largeur SGB de 64 kHz, mais rejetée avec
+`dur 0.55 s (out of range)`. Dans ce message, `out of range` qualifie la
+durée, pas la fréquence : le gate SGB impose 0,80 à 1,25 s. Le Pluto rayonne
+donc après la première transmission ; le scanner perd le cluster spectral en
+cours de salve et mesure une durée trop courte. Le prochain test minimal est
+de refaire l'essai avec un intervalle de 30 s. Si les rafales redeviennent
+complètes, la cause est un temps de récupération entre salves identiques
+(plancher spectral/chaîne de réception). Si elles restent tronquées, il faudra
+instrumenter la continuité du cluster pendant une salve avant tout correctif.
+
+Observation SDRangel : les salves sont régulières et conformes. La cause est
+donc confirmée dans le suivi spectral du scanner. Relecture de
+`scanner_process()` : lorsque le cluster principal n'est momentanément pas
+`near`, un fallback d'énergie centrée peut maintenir la rafale active. Le
+chemin commun met ensuite malgré tout à jour `bcenter_sum` avec `off`, qui vaut
+zéro si aucun cluster n'a été trouvé ou peut appartenir à un autre cluster.
+La référence de suivi peut ainsi dériver jusqu'à provoquer une fin de rafale
+artificielle. Dans le cas `have == false`, le calcul SNR parcourt en outre
+`best_lo == best_hi == -1`, ce qui constitue un accès hors limites.
+
+Hypothèse à valider avant correction : les rafales tronquées utilisent le
+fallback pendant leur seconde moitié, puis le centroïde corrompu produit 16
+frames `below`. Test minimal proposé : loguer uniquement les transitions vers
+le fallback avec `have`, `off`, `burst_center` et le compteur `below` sur une
+rafale Pluto. Aucun changement des seuils ni du gate de durée à ce stade.
+
+Le log complet apporte une seconde hypothèse, à tester en premier car elle ne
+demande aucune modification : le backend RTL fonctionne en gain automatique.
+Les salves RF#4 et RF#0 sont parfois décodées avec `nerr=0`, mais d'autres sont
+tronquées à des durées variables de 0,55 à 0,69 s alors que SDRangel les
+montre identiques. Une réduction du gain RTL en cours de rafale forte peut
+faire repasser le spectre sous le seuil du détecteur et produire exactement ce
+symptôme. Test A/B prioritaire : relancer le scanner avec un gain RTL fixe de
+30 dB (`431.9M 432.0M 30 0`). Si les durées se stabilisent, l'AGC est la cause;
+sinon, reprendre le log ciblé du fallback/centroïde.
+
+Résultat affiné : le gain RTL manuel améliore nettement la détection et permet
+de décoder successivement RF#0 et RF#4 avec `nerr=0`, ce qui confirme la
+validation matérielle RF#4 court. Il ne supprime toutefois pas tous les rejets :
+avec un gain fixe de 30 dB, certaines salves restent mesurées à 0,47-0,68 s,
+sur RF#0 comme sur RF#4. L'AGC était donc un facteur aggravant, pas la cause
+unique. L'hypothèse du fallback/centroïde reste à tester par le log ciblé
+proposé ci-dessus ; le seuil `SGB_DUR_MIN` ne doit toujours pas être abaissé.
+
+Résultat final de l'essai de gain : à 20 dB fixe, aucune trame n'est rejetée.
+Le gain automatique tronquait fortement les salves, et 30 dB fixe restait trop
+élevé pour cette liaison locale forte ; 20 dB maintient toute la rafale dans
+la dynamique exploitable du RTL. Aucun log supplémentaire ni correctif du
+détecteur n'est retenu. Pour les essais locaux Pluto à 431,975 MHz, utiliser
+`./build/dec406_scan 431.9M 432.0M 20 0`.
