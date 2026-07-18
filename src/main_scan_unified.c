@@ -130,14 +130,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    printf("  using   : %s\n", ops->name);
-
     uint32_t samp_rate;
     backend_t *backend = ops->open((uint32_t)center_hz, &samp_rate, gain, extra);
     if (!backend) {
         fprintf(stderr, "ERROR: failed to open %s\n", ops->name);
         return 1;
     }
+
+    const char *using_name = ops->model ? ops->model(backend) : NULL;
+    printf("  using   : %s\n", using_name ? using_name : ops->name);
 
     printf("  rate    : %.4f MSPS   (SPS=%.1f for SGB)\n",
            samp_rate / 1e6, (double)samp_rate / 38400.0);

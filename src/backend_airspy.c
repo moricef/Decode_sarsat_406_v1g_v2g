@@ -12,8 +12,17 @@ struct backend {
     struct airspy_device *dev;
     scanner_t *scanner;
     uint32_t samp_rate;
+    const char *model_name;
     int running;
 };
+
+/* R2 and Mini report the same libairspy board_id; the reliable discriminator
+ * is the maximum supported sample rate (R2: 10 MSPS, Mini: 6 MSPS). */
+static const char *airspy_model_from_max_rate(uint32_t max_rate) {
+    if (max_rate >= 10000000) return "Airspy R2";
+    if (max_rate >= 6000000)  return "Airspy Mini";
+    return "Airspy";
+}
 
 static int airspy_probe_dev(void) {
     struct airspy_device *dev = NULL;
@@ -53,11 +62,15 @@ static backend_t *airspy_open_dev(uint32_t freq_hz, uint32_t *samp_rate,
     airspy_get_samplerates(b->dev, rates, n_rates);
 
     b->samp_rate = rates[0];
+    uint32_t max_rate = rates[0];
     for (uint32_t i = 0; i < n_rates; i++) {
         if (rates[i] >= 2400000 && rates[i] < b->samp_rate)
             b->samp_rate = rates[i];
+        if (rates[i] > max_rate)
+            max_rate = rates[i];
     }
     free(rates);
+    b->model_name = airspy_model_from_max_rate(max_rate);
 
     airspy_set_samplerate(b->dev, b->samp_rate);
     airspy_set_freq(b->dev, freq_hz);
@@ -87,6 +100,10 @@ static void airspy_close_dev(backend_t *b) {
     free(b);
 }
 
+static const char *airspy_model_dev(backend_t *b) {
+    return b->model_name;
+}
+
 const backend_ops_t backend_airspy = {
     .name = "Airspy Mini",
     .probe = airspy_probe_dev,
@@ -94,5 +111,6 @@ const backend_ops_t backend_airspy = {
     .start = airspy_start_dev,
     .stop = airspy_stop_dev,
     .close = airspy_close_dev,
+    .model = airspy_model_dev,
     .dc_guard_bins = 4
 };

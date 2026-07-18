@@ -285,6 +285,14 @@ La sélection explicite du backend se fait via `DEC406_BACKEND=rtl|airspy|pluto|
 et permet de couper l'autoprobing au démarrage du service. HackRF est
 désormais supporté dans l'arbre courant.
 
+### Identification du modèle Airspy
+
+La bannière annonçait toujours `Airspy Mini`, y compris avec l'Airspy R2 de la
+station F4KLO. Les deux modèles partageant le même `board_id` libairspy, le
+test minimal utilise le débit maximal annoncé : 10 MS/s pour le R2 et 6 MS/s
+pour le Mini. Le backend mémorise désormais le modèle après ouverture et la
+bannière l'affiche sans modifier la sélection ni l'acquisition SDR.
+
 ## Investigation — champ tournant SGB TWC RF#4
 
 La comparaison du parseur `decode_rot_field()` avec C/S T.018 Issue 1

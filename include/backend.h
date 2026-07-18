@@ -13,6 +13,9 @@ typedef struct {
     int (*start)(backend_t *b, scanner_t *s);
     void (*stop)(backend_t *b);
     void (*close)(backend_t *b);
+    /* Optional: real device model for the banner, once opened. NULL if the
+     * backend has nothing more specific than .name. */
+    const char *(*model)(backend_t *b);
     int dc_guard_bins;
 } backend_ops_t;
 
