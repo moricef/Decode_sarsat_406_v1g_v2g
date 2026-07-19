@@ -1,6 +1,7 @@
 /**
  * @file dsss_demod.c
- * @brief DSSS OQPSK receive chain — flat-chain rewrite (2026-05-22).
+ * @brief DSSS OQPSK receive chain — feedforward carrier acquisition, no
+ *        sample-rate tracking loop (rewrite of 2026-05-22).
  *
  * No sample-rate tracking loop. The chain relies on:
  *   - freq_acq_fft_corr for carrier acquisition to ~1 Hz precision,
