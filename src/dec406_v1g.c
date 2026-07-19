@@ -21,6 +21,7 @@
 #include "dec406.h"
 #include "display_utils.h"
 #include "diag_log.h"
+#include "country_codes.h"
 
 // ===================================================
 // Constants and structures
@@ -1191,7 +1192,7 @@ void decode_1g(const uint8_t *bits, int length) {
     }
     
     printf("\nProtocol: %d (%s)", info.protocol_bits, protocol_name);
-    printf("\nCountry: %u", info.country_code);
+    printf("\nCountry: %u (%s)", info.country_code, get_country_name(info.country_code));
     printf("\nHex ID: %s", info.hex_id);
     printf("\nIdentification: %s", info.vessel_id);
     if (info.is_test_message)
