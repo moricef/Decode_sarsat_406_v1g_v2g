@@ -16,6 +16,9 @@
 #ifndef COUNTRY_CODES_H
 #define COUNTRY_CODES_H
 
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
 // ITU-R M.585 Maritime Identification Digits (MID) for COSPAS-SARSAT beacons
 // Based on ITU database: www.itu.int/cgi-bin/htsh/glad/cga_mids.sh
 
@@ -138,7 +141,7 @@ static const CountryCode country_codes[] = {
     {0, NULL} // Sentinel
 };
 
-const char* get_country_name(int code) {
+static const char* get_country_name(int code) {
     for (int i = 0; country_codes[i].country != NULL; i++) {
         if (country_codes[i].code == code) {
             return country_codes[i].country;
