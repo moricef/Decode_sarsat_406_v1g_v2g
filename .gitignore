@@ -45,6 +45,7 @@ test_matlab_coder/*
 tests/*
 utils/*
 tools/*
+!tools/meosar_visible.py
 docs/*
 
 # Temporary files
