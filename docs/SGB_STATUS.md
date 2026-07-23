@@ -418,3 +418,32 @@ Le gain automatique tronquait fortement les salves, et 30 dB fixe restait trop
 la dynamique exploitable du RTL. Aucun log supplémentaire ni correctif du
 détecteur n'est retenu. Pour les essais locaux Pluto à 431,975 MHz, utiliser
 `./build/dec406_scan 431.9M 432.0M 20 0`.
+
+### MSG-4 1544,5 MHz — position sentinelle SGB mal reconnue
+
+Capture de Bernard F6BVP `Fichiers_IQ/capture_1544_45.iq`, enregistrée avec
+`airspy_rx -f 1544.5 -a 2500000 -t 2 -g 21 -n 100000000`. La lecture correcte
+est donc `./build/dec406_iq <file> -i -s 2500000`. Une lecture à 2,048 Msps est
+fausse et ne synchronise pas.
+
+Résultat confirmé sur un extrait 24-28 s : trame MSG-4 à t=24,75 s, PRN normal,
+offset +578 Hz, `conf=10.3`, `combined z=129.3`, BCH corrigé avec 1 erreur.
+Le 23 Hex ID `9C77FFFEEAAF00000000000` est cohérent avec le décodeur en ligne
+Cospas-Sarsat : TAC 65535, s/n 11946, pays 227 France, balise système de test.
+
+Bug observé : avant d'afficher correctement `No position data available`,
+`dec406` émet :
+
+`Validation: Invalid latitude -127.03027`
+`Validation: Invalid longitude -255.96970`
+
+Hypothèse validée : le champ position contient une valeur sentinelle "pas de
+position", mais `decode_position()` ne la reconnaît pas. Les bits décodés sont
+`ns=1 lat_deg=127 lat_frac=0x03E0 ew=1 lon_deg=255 lon_frac=0x7C1F`, ce qui
+donne mécaniquement une latitude/longitude impossibles. Le bug est local au
+décodage/validation GNSS SGB ; la démodulation, le BCH et l'identification sont
+corrects.
+
+Correction appliquée : faire retourner explicitement par `decode_position()`
+si une position est disponible, reconnaître la sentinelle observée, et éviter
+les warnings de validation sur une position absente.

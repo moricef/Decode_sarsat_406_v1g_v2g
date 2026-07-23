@@ -358,11 +358,13 @@ static uint32_t get_bits(const uint8_t *bits, int start, int len) {
  * @param bits Source bit array
  * @param lat Output: Latitude in degrees
  * @param lon Output: Longitude in degrees
+ * @return 1 if position data is present, 0 if the position field is a
+ *         T.018 unavailable-position sentinel.
  * 
  * Implements position decoding as specified in Section 3.2
  * with 3.4 meter resolution and default value handling.
  */
-static void decode_position(const uint8_t *bits, double *lat, double *lon) {
+static int decode_position(const uint8_t *bits, double *lat, double *lon) {
     // Position decoding according to T.018 Section 3.2 (bits are 0-indexed)
     // Latitude: bit 44 (N/S), bits 45-51 (degrees), bits 52-66 (decimal fraction)
     // Longitude: bit 67 (E/W), bits 68-75 (degrees), bits 76-90 (decimal fraction)
@@ -375,29 +377,22 @@ static void decode_position(const uint8_t *bits, double *lat, double *lon) {
     int lon_deg = get_bits(bits, 67, 8);   // bits 68-75 in T.018  
     int lon_frac = get_bits(bits, 75, 15); // bits 76-90 in T.018
     
-    // Check for default values (T.018 Section 3.2) indicating no position capability
-    // Latitude default: 0 1111111 000001111100000
-    // Longitude default: 1 11111111 111110000011111
-    if (ns_flag == 0 && lat_deg == 0x7F && lat_frac == 0x07C0 &&
-        ew_flag == 1 && lon_deg == 0xFF && lon_frac == 0x783F) {
+    // T.018 unavailable-position sentinel:
+    // Latitude fraction 000001111100000 = 0x03E0
+    // Longitude fraction 111110000011111 = 0x7C1F
+    // The sign bits are not position data when the degree/fraction fields use
+    // this sentinel; observed system beacons can carry ns=1 and ew=1.
+    if (lat_deg == 0x7F && lat_frac == 0x03E0 &&
+        lon_deg == 0xFF && lon_frac == 0x7C1F) {
         *lat = 0.0;
         *lon = 0.0;
-        return;
-    }
-    
-    // Check for alternate default values (no position available at this time)
-    // Latitude alternate: 1 1111111 000001111100000  
-    // Longitude alternate: 0 11111111 111110000011111
-    if (ns_flag == 1 && lat_deg == 0x7F && lat_frac == 0x07C0 &&
-        ew_flag == 0 && lon_deg == 0xFF && lon_frac == 0x783F) {
-        *lat = 0.0;
-        *lon = 0.0;
-        return;
+        return 0;
     }
     
     // Calculate actual position
     *lat = (lat_deg + lat_frac / 32768.0) * (ns_flag ? -1.0 : 1.0);
     *lon = (lon_deg + lon_frac / 32768.0) * (ew_flag ? -1.0 : 1.0);
+    return 1;
 }
 
 // ===================================================
@@ -421,9 +416,7 @@ static void decode_main(const uint8_t *bits, BeaconInfo *info) {
     info->test = bits[42];                  // bit 43 in T.018
     
     // Decode position
-    decode_position(bits, &info->lat, &info->lon);
-    
-    info->has_position = (info->lat != 0.0 || info->lon != 0.0) ? 1 : 0;
+    info->has_position = (uint8_t)decode_position(bits, &info->lat, &info->lon);
     
     // Vessel ID type (bits 91-93 in T.018)
     info->vessel_id_type = get_bits(bits, 90, 3);
@@ -691,23 +684,24 @@ static void compute_hex_id(const uint8_t *bits, BeaconInfo *info) {
  * indicating unavailable position.
  */
 static void validate_gnss(BeaconInfo *info) {
+    if (!info->has_position) {
+        info->lat = 0.0;
+        info->lon = 0.0;
+        return;
+    }
+
     // Check latitude range
     if (info->lat < -90.0 || info->lat > 90.0) {
         DWARN("Validation: Invalid latitude %.5f\n", info->lat);
         info->lat = 0.0;
+        info->has_position = 0;
     }
     
     // Check longitude range
     if (info->lon < -180.0 || info->lon > 180.0) {
         DWARN("Validation: Invalid longitude %.5f\n", info->lon);
         info->lon = 0.0;
-    }
-    
-    // Check default values (no position available)
-    if (get_bits(info->raw_data, 43, 1) == 1 && 
-        get_bits(info->raw_data, 67, 1) == 1) {
-        info->lat = 0.0;
-        info->lon = 0.0;
+        info->has_position = 0;
     }
 }
 
@@ -885,7 +879,7 @@ void print_beacon_info(const BeaconInfo *info) {
     
     
     printf("\n\n[ENCODED GNSS LOCATION]");
-    if (info->has_position && (info->lat != 0.0 || info->lon != 0.0)) {
+    if (info->has_position) {
         format_coordinates(info->lat, info->lon, coord_buf, sizeof(coord_buf));
         printf("\n Position: %s", coord_buf);
         printf("\n Coordinates: %.5f°N, %.5f°E", info->lat, info->lon);
