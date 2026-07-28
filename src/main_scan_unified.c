@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
 
     printf("  rate    : %.4f MSPS   (SPS=%.1f for SGB)\n",
            samp_rate / 1e6, (double)samp_rate / 38400.0);
-    if (gain < 0)
+    if (gain <= 0)
         printf("  gain    : auto\n");
     else
         printf("  gain    : %d\n", gain);
