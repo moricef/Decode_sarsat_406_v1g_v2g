@@ -419,6 +419,93 @@ la dynamique exploitable du RTL. Aucun log supplémentaire ni correctif du
 détecteur n'est retenu. Pour les essais locaux Pluto à 431,975 MHz, utiliser
 `./build/dec406_scan 431.9M 432.0M 20 0`.
 
+## Investigation — downlink 1544 MHz et SGB
+
+Analyse de `logs/Down-link_1544_Pluto_20260706_2200.log` : le chemin direct
+1544 MHz détecte neuf rafales FGB, dont trois valident le CRC, ce qui confirme
+qu'une partie du downlink MEOSAR est exploitable par la chaîne actuelle. Le log
+contient aussi quatre événements larges classés SGB : environ 105 kHz/0,42 s,
+100 kHz/0,26 s, 64 kHz/0,43 s et 64 kHz/0,43 s.
+
+Tous sont rejetés par le gate de durée SGB (minimum 0,80 s) avant l'appel à
+`freq_acq_fft_corr()`. Le log ne contient donc aucune mesure de corrélation
+PRN, de synchronisation ou de BCH permettant de conclure si une SGB descendante
+est décodable. Ces événements sont des candidats, pas encore des SGB confirmées.
+
+Test minimal retenu avant toute adaptation du décodeur : enregistrer une
+capture IQ continue du downlink autour d'un de ces événements larges, puis
+rechercher offline les PRN normal et self-test sur une fenêtre fixe d'environ
+une seconde. Abaisser simplement `SGB_DUR_MIN` ne serait pas probant, car les
+fenêtres actuellement délimitées à 0,26-0,43 s ne contiennent pas une trame
+SGB complète.
+
+Les essais de gain Pluto de 40 à 71 dB montrent que 50 dB fournit le meilleur
+compromis pour les captures : 40 dB manque des événements et 71 dB augmente
+les fausses détections. Les événements larges ne doivent toutefois pas être
+appelés SGB avant qu'une corrélation PRN et un BCH valides les confirment.
+
+Capture de référence actuelle :
+`logs/1544_20260713_1807_dec4.sigmf-data`, format `ci32_le`, centre
+1544,200 MHz, 625 kS/s, 164 806 656 échantillons, soit 263,691 s. Elle couvre
+la zone MEOSAR étudiée et contient des émissions transitoires autour de
+1544,05 à 1544,12 MHz, cohérentes avec les fréquences déjà observées par
+`dec406_scan`. Toute composante extérieure à cette zone est hors périmètre de
+cette investigation et doit être ignorée.
+
+Étape suivante : détecter les événements uniquement dans 1544,0-1544,15 MHz,
+mesurer leur durée et leur largeur de bande, puis extraire des fenêtres IQ
+individuelles. Les fenêtres étroites seront présentées à la chaîne FGB ; une
+fenêtre large ne sera présentée à la chaîne SGB que si elle contient environ
+une seconde continue et produit un pic PRN normal ou self-test non ambigu.
+
+### Corrélation différentielle multi-span — validation de principe
+
+Référence étudiée : Akhlaq et al., "Statistical characterisation and analysis
+of differential correlation-based frame detector", IET Communications 2019.
+Le papier porte sur l'acquisition de trame DSSS/OQPSK SGB par corrélation
+différentielle multi-retard. L'idée exploitable pour `dec406` n'est pas de
+remplacer le récepteur complet, mais de produire des candidats de timing de
+préambule avant acquisition fréquence/NCO/despread/BCH, dans les cas à gros
+offset.
+
+Test de diagnostic local : `scripts/diag_diffcorr.py`, sorties
+`diag_synth.csv` et `diag_terr.csv`. Le test compare, sur les mêmes chips
+portant volontairement un offset non corrigé, la corrélation directe de
+préambule et le métrique différentiel :
+
+`S_K = sum_k |sum_l r[l]^* c[l] r[l-k] c[l-k]^*|^2`
+
+Le critère de validation est double : la corrélation directe doit réellement
+s'effondrer quand l'offset augmente, et `S_K` doit conserver le bon timing
+dans ce même régime. Tester `S_K` sur les chips normaux après NCO serait non
+probant, car l'offset y est déjà retiré.
+
+Résultat synthétique : la corrélation directe est correcte à 0 Hz
+(`pk/2nd=145,15`), puis décroche dès +1 kHz et perd la position. Les métriques
+`S_8`, `S_16`, `S_32` et `S_64` restent toutes au lag attendu de 0 à +16 kHz.
+À +16 kHz, `S_16` conserve encore `pk/2nd=610,76`.
+
+Résultat sur signal réel terrestre `sgb_ok_194013` self-test : après retrait
+de la baseline +1700 Hz, la vérité est au lag 7666. La corrélation directe
+localise correctement à 0 Hz, mais part hors vérité dès +1 kHz et devient non
+discriminante à +2 kHz (`pk/2nd=1,00`). Les métriques différentielles restent
+toutes verrouillées sur 7666 de 0 à +16 kHz. `S_16` donne `pk/2nd=113,84` à
+0 Hz et encore `85,44` à +16 kHz.
+
+Conclusion validée : le principe Akhlaq fonctionne sur les échantillons
+`dec406`. `S_K` peut détecter le timing de préambule en un seul passage sur
+une plage d'offset où la corrélation directe non corrigée s'effondre. Ce n'est
+pas une preuve que le downlink SGB 1544 décodera : il faut encore tester des
+captures où l'énergie est visible mais où l'acquisition actuelle reste faible
+ou hors fenêtre. Les cas tronqués, hors lobe ou sans énergie sont hors scope :
+aucun détecteur de trame ne peut les récupérer.
+
+Décision d'intégration : ouvrir une branche expérimentale seulement après
+sélection de captures 1544 avec énergie présente. Si le gain se confirme,
+`S_K` doit servir de générateur de timings candidats en amont de la chaîne
+existante, avec des valeurs initiales `K=8,16,32,64`. Le script de diagnostic
+n'est pas à committer en l'état comme correctif.
+
 ### MSG-4 1544,5 MHz — position sentinelle SGB mal reconnue
 
 Capture de Bernard F6BVP `Fichiers_IQ/capture_1544_45.iq`, enregistrée avec

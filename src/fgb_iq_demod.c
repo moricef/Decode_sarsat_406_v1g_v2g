@@ -552,7 +552,18 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
                                      cw_search_start, cw_search_end, diag,
                                      &cw_mag, &cw_expected, &cw_thresh);
     long cw_min = (burst_start - w0) + cw_samp * 3 / 5;
+    /* An early CW end means the carrier-to-data transition was not reliably
+     * located: the sync is then placed at cw_min by the retry below, i.e. at a
+     * fixed guess, and the bits that follow are noise the BCH can still force
+     * into a valid codeword. On strong signals (firmin: 0 of 1449 CRC OK) this
+     * never happens; on the weak 1544 downlink every phantom decode shows it.
+     * We keep the retry but flag the burst so its output is rejected even if
+     * the CRC passes — the preamble count is a poor discriminator (46 genuine
+     * firmin decodes pass with a low preamble, 13 of them at 0/15 via the
+     * polarity path), whereas this flag separates real from phantom cleanly. */
+    int cw_unreliable = 0;
     if (cw_end >= 0 && cw_end < cw_min) {
+        cw_unreliable = 1;
         DIAG("[fgb_iq] burst=%d CW end too early %ld < %ld, retrying\n",
                 burst_id, cw_end, cw_min);
         cw_end = find_cw_end_cmplx(wiq, wlen, half_bit, bit_prd,
@@ -687,6 +698,13 @@ int fgb_iq_decode(const float complex *iq, size_t n, int samp_rate,
             DIAG("[fgb_iq] burst=%d CRC FAIL\n", burst_id);
             dump_bits(burst_id, bit0 + w0, 0, out_bits, best_soft);
         }
+    }
+    /* Reject a CRC-valid frame whose CW end was unreliable: on the weak 1544
+     * downlink this is a phantom the BCH forced into shape. -2 = "no usable
+     * frame" (same as CRC FAIL to the caller). */
+    if (final_rc == 0 && cw_unreliable) {
+        DIAG("[fgb_iq] burst=%d rejected: CRC OK but CW end unreliable\n", burst_id);
+        final_rc = -2;
     }
     free(wiq);
     if (owned_iq) free(iq_dec);

@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
+import math
 import os
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import URLError
 
 EarthSatellite = None
 load = None
@@ -48,6 +52,37 @@ class SarSatellite:
     constellation: str
     label: str
     status: str = "SAR"
+
+
+@dataclass
+class VisibleSatellite:
+    info: SarSatellite
+    tle_name: str
+    az_deg: float
+    el_deg: float
+    range_km: float
+    set_seconds: int | None = None
+    set_utc: dt.datetime | None = None
+    trend: str = "level"
+
+
+@dataclass(frozen=True)
+class DopSummary:
+    gdop: float
+    pdop: float
+    hdop: float
+    vdop: float
+    tdop: float
+
+
+@dataclass(frozen=True)
+class GeometrySummary:
+    grade: str
+    count: int
+    az_span_deg: float
+    largest_gap_deg: float
+    avg_el_deg: float
+    dop: DopSummary | None = None
 
 
 SAR_SATELLITES = [
@@ -169,6 +204,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--watch", type=int, metavar="SECONDS", help="refresh display interval")
     parser.add_argument("--utc", default=None, help="UTC timestamp, e.g. 2026-07-20T08:15:00Z")
     parser.add_argument(
+        "--sort",
+        choices=("elevation", "constellation", "azimuth", "range", "id"),
+        default="elevation",
+        help="visible satellite sort order",
+    )
+    parser.add_argument("--compact", action="store_true", help="compact terminal output")
+    parser.add_argument("--pointing", action="store_true", help="operator pointing table")
+    parser.add_argument("--target", default=None, help="single satellite: C/S ID, NORAD ID, or name")
+    parser.add_argument("--clear", action="store_true", help="clear terminal before each watch update")
+    parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument("--no-set-time", action="store_true", help="skip time-to-set calculation")
+    parser.add_argument(
+        "--geom-min-el",
+        type=float,
+        default=15.0,
+        help="minimum elevation for geometry summary candidates",
+    )
+    parser.add_argument(
         "--constellation",
         choices=("all", "gps", "galileo", "glonass"),
         default="all",
@@ -198,34 +251,63 @@ def cache_dir(value: str | None) -> Path:
     return Path.home() / ".cache" / "dec406-meosar"
 
 
-def download(url: str) -> str:
+def download(url: str, attempts: int = 3) -> str:
+    last_error: Exception | None = None
     req = urllib.request.Request(url, headers={"User-Agent": "dec406-meosar-visible/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return response.read().decode("utf-8")
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return response.read().decode("utf-8")
+        except (OSError, URLError) as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(0.5 * attempt)
+    raise RuntimeError(f"download failed after {attempts} attempts: {url}") from last_error
+
+
+def load_tle_text(group: str, url: str, cache: Path, refresh: bool) -> tuple[str, str]:
+    path = cache / f"{group}.tle"
+    if refresh or not path.exists():
+        try:
+            text = download(url)
+        except RuntimeError as exc:
+            if not path.exists():
+                raise
+            print(f"warning: {exc}; using cached {path}", file=sys.stderr)
+            return group, path.read_text(encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
+        return group, text
+
+    return group, path.read_text(encoding="utf-8")
+
+
+def parse_tle_text(text: str) -> dict[int, tuple[str, str, str]]:
+    by_norad: dict[int, tuple[str, str, str]] = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for i in range(0, len(lines) - 2, 3):
+        name, line1, line2 = lines[i], lines[i + 1], lines[i + 2]
+        if not line1.startswith("1 ") or not line2.startswith("2 "):
+            continue
+        try:
+            norad = int(line1[2:7])
+        except ValueError:
+            continue
+        by_norad[norad] = (name, line1, line2)
+    return by_norad
 
 
 def load_tle_groups(cache: Path, refresh: bool) -> dict[int, tuple[str, str, str]]:
     cache.mkdir(parents=True, exist_ok=True)
     by_norad: dict[int, tuple[str, str, str]] = {}
 
-    for group, url in CELESTRAK_GROUPS.items():
-        path = cache / f"{group}.tle"
-        if refresh or not path.exists():
-            text = download(url)
-            path.write_text(text, encoding="utf-8")
-        else:
-            text = path.read_text(encoding="utf-8")
-
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        for i in range(0, len(lines) - 2, 3):
-            name, line1, line2 = lines[i], lines[i + 1], lines[i + 2]
-            if not line1.startswith("1 ") or not line2.startswith("2 "):
-                continue
-            try:
-                norad = int(line1[2:7])
-            except ValueError:
-                continue
-            by_norad[norad] = (name, line1, line2)
+    with ThreadPoolExecutor(max_workers=len(CELESTRAK_GROUPS)) as executor:
+        futures = [
+            executor.submit(load_tle_text, group, url, cache, refresh)
+            for group, url in CELESTRAK_GROUPS.items()
+        ]
+        for future in as_completed(futures):
+            _group, text = future.result()
+            by_norad.update(parse_tle_text(text))
 
     return by_norad
 
@@ -246,6 +328,333 @@ def parse_utc(value: str | None) -> dt.datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "--"
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return "<1m"
+    minutes = (seconds + 30) // 60
+    hours, mins = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h{mins:02d}"
+    return f"{mins:d}m"
+
+
+def next_set_event(
+    satellite,
+    observer,
+    ts,
+    start: dt.datetime,
+    min_el: float,
+) -> tuple[int | None, dt.datetime | None]:
+    t0 = ts.from_datetime(start)
+    t1 = ts.from_datetime(start + dt.timedelta(hours=18.0))
+    event_times, events = satellite.find_events(observer, t0, t1, altitude_degrees=min_el)
+
+    for event_time, event in zip(event_times, events):
+        if int(event) != 2:
+            continue
+        event_dt = event_time.utc_datetime().replace(tzinfo=dt.timezone.utc)
+        return max(0, int((event_dt - start).total_seconds())), event_dt
+    return None, None
+
+
+def trend_at(satellite, observer, ts, start: dt.datetime) -> str:
+    now = ts.from_datetime(start)
+    later = ts.from_datetime(start + dt.timedelta(seconds=60))
+    alt_now, _az_now, _distance_now = (satellite - observer).at(now).altaz()
+    alt_later, _az_later, _distance_later = (satellite - observer).at(later).altaz()
+    delta = alt_later.degrees - alt_now.degrees
+    if delta > 0.02:
+        return "up"
+    if delta < -0.02:
+        return "down"
+    return "level"
+
+
+def sort_visible(rows: list[VisibleSatellite], sort_mode: str) -> None:
+    if sort_mode == "constellation":
+        rows.sort(key=lambda row: (row.info.constellation, -row.el_deg, row.info.cs_id))
+    elif sort_mode == "azimuth":
+        rows.sort(key=lambda row: (row.az_deg, -row.el_deg))
+    elif sort_mode == "range":
+        rows.sort(key=lambda row: (row.range_km, -row.el_deg))
+    elif sort_mode == "id":
+        rows.sort(key=lambda row: (row.info.cs_id, -row.el_deg))
+    else:
+        rows.sort(key=lambda row: (-row.el_deg, row.info.constellation, row.info.cs_id))
+
+
+def target_matches(info: SarSatellite, target: str | None) -> bool:
+    if not target:
+        return False
+    needle = target.strip().lower()
+    return (
+        needle == str(info.cs_id)
+        or needle == str(info.norad)
+        or needle in info.label.lower()
+        or needle in info.constellation.lower()
+    )
+
+
+def safe_sqrt(value: float) -> float:
+    return math.sqrt(max(0.0, value))
+
+
+def calculate_dop(rows: list[VisibleSatellite], min_el: float) -> DopSummary | None:
+    candidates = [row for row in rows if row.el_deg >= min_el]
+    if len(candidates) < 4:
+        return None
+
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    matrix = []
+    for row in candidates:
+        az = math.radians(row.az_deg)
+        el = math.radians(row.el_deg)
+        cos_el = math.cos(el)
+        east = cos_el * math.sin(az)
+        north = cos_el * math.cos(az)
+        up = math.sin(el)
+        matrix.append([east, north, up, 1.0])
+
+    h = np.array(matrix, dtype=float)
+    normal = h.T @ h
+    try:
+        if np.linalg.cond(normal) > 1e12:
+            return None
+        q = np.linalg.inv(normal)
+    except np.linalg.LinAlgError:
+        return None
+
+    return DopSummary(
+        gdop=safe_sqrt(float(q[0, 0] + q[1, 1] + q[2, 2] + q[3, 3])),
+        pdop=safe_sqrt(float(q[0, 0] + q[1, 1] + q[2, 2])),
+        hdop=safe_sqrt(float(q[0, 0] + q[1, 1])),
+        vdop=safe_sqrt(float(q[2, 2])),
+        tdop=safe_sqrt(float(q[3, 3])),
+    )
+
+
+def format_dop(dop: DopSummary | None) -> str:
+    if dop is None:
+        return "DOP unavailable"
+    return (
+        f"DOP pdop={dop.pdop:.1f} hdop={dop.hdop:.1f} vdop={dop.vdop:.1f} "
+        f"gdop={dop.gdop:.1f} tdop={dop.tdop:.1f}"
+    )
+
+
+def summarize_geometry(rows: list[VisibleSatellite], min_el: float) -> GeometrySummary:
+    candidates = [row for row in rows if row.el_deg >= min_el]
+    dop = calculate_dop(rows, min_el)
+    if not candidates:
+        return GeometrySummary("weak", 0, 0.0, 360.0, 0.0, dop)
+
+    azimuths = sorted(row.az_deg % 360.0 for row in candidates)
+    if len(azimuths) == 1:
+        largest_gap = 360.0
+    else:
+        gaps = [azimuths[i + 1] - azimuths[i] for i in range(len(azimuths) - 1)]
+        gaps.append(azimuths[0] + 360.0 - azimuths[-1])
+        largest_gap = max(gaps)
+    az_span = 360.0 - largest_gap
+    avg_el = sum(row.el_deg for row in candidates) / len(candidates)
+
+    if len(candidates) >= 4 and az_span >= 240.0 and largest_gap <= 160.0:
+        grade = "good"
+    elif len(candidates) >= 3 and az_span >= 180.0:
+        grade = "fair"
+    else:
+        grade = "weak"
+
+    return GeometrySummary(grade, len(candidates), az_span, largest_gap, avg_el, dop)
+
+
+def visible_to_dict(row: VisibleSatellite) -> dict[str, object]:
+    return {
+        "cs_id": row.info.cs_id,
+        "norad": row.info.norad,
+        "constellation": row.info.constellation,
+        "label": row.info.label,
+        "status": row.info.status,
+        "tle_name": row.tle_name,
+        "az_deg": round(row.az_deg, 3),
+        "el_deg": round(row.el_deg, 3),
+        "range_km": round(row.range_km, 1),
+        "set_seconds": row.set_seconds,
+        "set_utc": row.set_utc.isoformat().replace("+00:00", "Z") if row.set_utc else None,
+        "trend": row.trend,
+    }
+
+
+def dop_to_dict(dop: DopSummary | None) -> dict[str, float] | None:
+    if dop is None:
+        return None
+    return {
+        "gdop": round(dop.gdop, 3),
+        "pdop": round(dop.pdop, 3),
+        "hdop": round(dop.hdop, 3),
+        "vdop": round(dop.vdop, 3),
+        "tdop": round(dop.tdop, 3),
+    }
+
+
+def constellation_abbrev(name: str) -> str:
+    return {
+        "GPS": "GPS",
+        "Galileo": "GAL",
+        "GLONASS": "GLO",
+    }.get(name, name[:3].upper())
+
+
+def format_set_utc(value: dt.datetime | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:%H:%M}Z"
+
+
+def trend_symbol(trend: str) -> str:
+    return {
+        "up": "↑",
+        "down": "↓",
+        "level": "→",
+    }.get(trend, "?")
+
+
+def render_text(
+    tstamp: dt.datetime,
+    qth_name: str,
+    lat: float,
+    lon: float,
+    rows: list[VisibleSatellite],
+    geometry: GeometrySummary,
+    args: argparse.Namespace,
+) -> None:
+    print(f"{tstamp:%Y-%m-%d %H:%M:%S} UTC  {qth_name}  lat={lat:.6f} lon={lon:.6f}")
+    print()
+    for row in rows:
+        status = "" if row.info.status == "SAR" else f" {row.info.status}"
+        geo_mark = "*" if row.el_deg >= args.geom_min_el else " "
+        print(
+            f"{geo_mark} {row.info.constellation:<8} {row.info.cs_id:>3}{status:<3} "
+            f"{row.info.label:<15} Az {row.az_deg:6.1f}  El {row.el_deg:5.1f}  "
+            f"Set {format_duration(row.set_seconds):>5}  Range {row.range_km:8.0f} km"
+        )
+
+    print()
+    print(f"MEOSAR visible >= {args.min_el:.1f} deg: {len(rows)}")
+    print(
+        f"Geometry >= {args.geom_min_el:.1f} deg: {geometry.grade}  "
+        f"count={geometry.count}  az_span={geometry.az_span_deg:.0f} deg  "
+        f"largest_gap={geometry.largest_gap_deg:.0f} deg  avg_el={geometry.avg_el_deg:.1f} deg"
+    )
+    print(f"{format_dop(geometry.dop)}")
+
+
+def render_pointing(
+    tstamp: dt.datetime,
+    qth_name: str,
+    rows: list[VisibleSatellite],
+    args: argparse.Namespace,
+) -> None:
+    print(f"MEOSAR POINTING - {qth_name}")
+    print(f"{tstamp:%Y-%m-%d %H:%M:%S} UTC")
+    print(f"Antenna mask: {args.min_el:.1f} deg")
+    print()
+    print(f"{'Satellite':<15} {'C/S':>5} {'Const':<8} {'Az':>7} {'El':>7} {'Trend':>5} {'Visible':>8}")
+    for row in rows:
+        visible = format_duration(row.set_seconds) if row.el_deg >= args.min_el else "below"
+        print(
+            f"{row.info.label:<15} {row.info.cs_id:>5} {constellation_abbrev(row.info.constellation):<8} "
+            f"{row.az_deg:6.1f} {row.el_deg:6.1f} {trend_symbol(row.trend):>5} {visible:>8}"
+        )
+
+
+def render_target(
+    tstamp: dt.datetime,
+    qth_name: str,
+    rows: list[VisibleSatellite],
+    args: argparse.Namespace,
+) -> None:
+    if not rows:
+        print(f"Target not found: {args.target}", file=sys.stderr)
+        return
+    row = rows[0]
+    visible = row.el_deg >= args.min_el
+    print(f"MEOSAR TARGET - {qth_name}")
+    print(f"{tstamp:%Y-%m-%d %H:%M:%S} UTC")
+    print()
+    print(f"{row.info.label} - {row.info.constellation} C/S {row.info.cs_id}")
+    print()
+    print(f"Azimuth:     {row.az_deg:7.1f} deg")
+    print(f"Elevation:   {row.el_deg:7.1f} deg  {trend_symbol(row.trend)}")
+    print(f"Range:       {row.range_km:7.0f} km")
+    print(f"Set:         {format_set_utc(row.set_utc):>7}  ({format_duration(row.set_seconds)})")
+    print(f"Mask:        {args.min_el:7.1f} deg")
+    print(f"Status:      {'visible' if visible else 'below mask'}")
+
+
+def render_compact(
+    tstamp: dt.datetime,
+    qth_name: str,
+    rows: list[VisibleSatellite],
+    geometry: GeometrySummary,
+    args: argparse.Namespace,
+) -> None:
+    pdop_field = f"{geometry.dop.pdop:.1f}" if geometry.dop else "--"
+    header = (
+        f"{tstamp:%H:%M:%S}Z {qth_name}  "
+        f"vis={len(rows)} geom={geometry.grade}/{geometry.count} "
+        f"gap={geometry.largest_gap_deg:.0f} pdop={pdop_field}"
+    )
+    print(header)
+    for row in rows:
+        if row.el_deg < args.geom_min_el and args.sort == "elevation" and len(rows) > 12:
+            continue
+        set_field = "" if args.no_set_time else f" set={format_duration(row.set_seconds):>5}"
+        print(
+            f"{constellation_abbrev(row.info.constellation)}{row.info.cs_id:03d} "
+            f"az={row.az_deg:03.0f} el={row.el_deg:02.0f}"
+            f" {trend_symbol(row.trend)}{set_field} {row.info.label}"
+        )
+
+
+def render_json(
+    tstamp: dt.datetime,
+    qth_name: str,
+    lat: float,
+    lon: float,
+    rows: list[VisibleSatellite],
+    geometry: GeometrySummary,
+    args: argparse.Namespace,
+) -> None:
+    payload = {
+        "utc": tstamp.isoformat().replace("+00:00", "Z"),
+        "qth": qth_name,
+        "lat": lat,
+        "lon": lon,
+        "min_el_deg": args.min_el,
+        "geometry_min_el_deg": args.geom_min_el,
+        "geometry": {
+            "grade": geometry.grade,
+            "count": geometry.count,
+            "az_span_deg": round(geometry.az_span_deg, 3),
+            "largest_gap_deg": round(geometry.largest_gap_deg, 3),
+            "avg_el_deg": round(geometry.avg_el_deg, 3),
+            "dop": dop_to_dict(geometry.dop),
+        },
+        "visible_count": len(rows),
+        "satellites": [visible_to_dict(row) for row in rows],
+    }
+    print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
 
 
 def render_once(args: argparse.Namespace) -> None:
@@ -270,9 +679,12 @@ def render_once(args: argparse.Namespace) -> None:
     t = ts.from_datetime(tstamp)
     observer = wgs84.latlon(lat, lon)
 
-    rows = []
+    rows: list[VisibleSatellite] = []
     missing = []
     for info in selected_sar_satellites(args.constellation):
+        is_target = target_matches(info, args.target)
+        if args.target and not is_target:
+            continue
         tle_entry = tle.get(info.norad)
         if not tle_entry:
             missing.append(info)
@@ -282,22 +694,38 @@ def render_once(args: argparse.Namespace) -> None:
         difference = satellite - observer
         topocentric = difference.at(t)
         alt, az, distance = topocentric.altaz()
-        if alt.degrees >= args.min_el:
-            rows.append((alt.degrees, az.degrees, distance.km, info, tle_name))
+        if alt.degrees >= args.min_el or is_target:
+            set_seconds = None
+            set_utc = None
+            if not args.no_set_time and alt.degrees >= args.min_el:
+                set_seconds, set_utc = next_set_event(satellite, observer, ts, tstamp, args.min_el)
+            rows.append(
+                VisibleSatellite(
+                    info=info,
+                    tle_name=tle_name,
+                    az_deg=az.degrees,
+                    el_deg=alt.degrees,
+                    range_km=distance.km,
+                    set_seconds=set_seconds,
+                    set_utc=set_utc,
+                    trend=trend_at(satellite, observer, ts, tstamp),
+                )
+            )
 
-    rows.sort(reverse=True, key=lambda row: row[0])
+    sort_visible(rows, args.sort)
+    geometry = summarize_geometry(rows, args.geom_min_el)
 
-    print(f"{tstamp:%Y-%m-%d %H:%M:%S} UTC  {qth_name}  lat={lat:.6f} lon={lon:.6f}")
-    print()
-    for el, az, distance_km, info, tle_name in rows:
-        status = "" if info.status == "SAR" else f" {info.status}"
-        print(
-            f"{info.constellation:<8} {info.cs_id:>3}{status:<3} "
-            f"{info.label:<15} Az {az:6.1f}  El {el:5.1f}  Range {distance_km:8.0f} km"
-        )
+    if args.json:
+        render_json(tstamp, qth_name, lat, lon, rows, geometry, args)
+    elif args.target:
+        render_target(tstamp, qth_name, rows, args)
+    elif args.pointing:
+        render_pointing(tstamp, qth_name, rows, args)
+    elif args.compact:
+        render_compact(tstamp, qth_name, rows, geometry, args)
+    else:
+        render_text(tstamp, qth_name, lat, lon, rows, geometry, args)
 
-    print()
-    print(f"MEOSAR visible >= {args.min_el:.1f} deg: {len(rows)}")
     if missing:
         print(f"TLE missing for {len(missing)} SAR IDs in selected CelesTrak groups", file=sys.stderr)
 
@@ -305,12 +733,15 @@ def render_once(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     while True:
+        if args.clear:
+            print("\033[2J\033[H", end="")
         render_once(args)
         if not args.watch:
             return 0
         time.sleep(args.watch)
         args.utc = None
-        print()
+        if not args.clear:
+            print()
 
 
 if __name__ == "__main__":

@@ -497,6 +497,15 @@ void scanner_stop(scanner_t *s) {
     pthread_mutex_unlock(&s->decode_lock);
 }
 
+uint64_t scanner_wait_samples(scanner_t *s, uint64_t rd, uint64_t need) {
+    pthread_mutex_lock(&lock);
+    while (s->running && (s->wr - rd) < need)
+        pthread_cond_wait(&data_avail, &lock);
+    uint64_t wr = s->wr;
+    pthread_mutex_unlock(&lock);
+    return wr;
+}
+
 void scanner_process(scanner_t *s) {
     static float complex win[SCANNER_FFT_N];
     static double P[SCANNER_FFT_N];

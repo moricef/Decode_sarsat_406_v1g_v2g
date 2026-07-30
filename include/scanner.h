@@ -59,4 +59,10 @@ void scanner_process(scanner_t *s);
 
 void scanner_stop(scanner_t *s);
 
+/* Block until at least `need` samples are available past `rd`, then return the
+ * current write pointer. Lets an external consumer (e.g. the ring recorder)
+ * read s->ring without duplicating the internal sync. Returns wr, which may be
+ * < rd+need if the scanner was stopped. */
+uint64_t scanner_wait_samples(scanner_t *s, uint64_t rd, uint64_t need);
+
 #endif

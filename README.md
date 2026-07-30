@@ -3,6 +3,9 @@
 Decoder for 1st (FGB) and 2nd (SGB) generation COSPAS-SARSAT emergency
 beacons at 406 MHz.
 
+Supports COSPAS-SARSAT 406 MHz FGB/1G and SGB/2G beacon decoding from IQ
+recordings and SDR receivers.
+
 **Branch**: `main`
 
 ---

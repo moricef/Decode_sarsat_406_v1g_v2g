@@ -34,6 +34,7 @@ TARGETS = \
 	$(BUILD_DIR)/dec406_hex \
 	$(BUILD_DIR)/dec406_audio \
 	$(BUILD_DIR)/dec406_iq \
+	$(BUILD_DIR)/dec406_fgb_iq \
 	$(BUILD_DIR)/dec406_dsss_test \
 	$(BUILD_DIR)/dec406_scan \
 	$(BUILD_DIR)/reset_usb
@@ -86,6 +87,12 @@ DSSS_SRCS = \
 $(BUILD_DIR)/dec406_iq: $(SRC_DIR)/main_iq.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(DSSS_SRCS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built: $@"
+
+# dec406_fgb_iq - Decode 1G from IQ file (offline counterpart of the scanner)
+$(BUILD_DIR)/dec406_fgb_iq: $(SRC_DIR)/main_fgb_iq.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lfftw3f
 	@echo "Built: $@"
 
 # dec406_dsss_test - Test DSSS demodulator
@@ -198,3 +205,9 @@ help:
 	@echo "  ./build/dec406_iq file.iq               # Decode SGB from IQ"
 	@echo "  ./build/generate_2g_hex                 # Generate 2G frame"
 	@echo ""
+
+# dec406_ring - Triggered downlink recorder (SDR-agnostic, no decoding)
+$(BUILD_DIR)/dec406_ring: $(SRC_DIR)/main_ring.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(HACKRF_SRCS) $(SCANNER_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DHAVE_RTLSDR -DHAVE_AIRSPY -DHAVE_PLUTO $(HACKRF_DEFS) -o $@ $(SRC_DIR)/main_ring.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(HACKRF_SRCS) $(SCANNER_SRCS) $(LDFLAGS) -lpthread -lrtlsdr -lairspy -liio $(HACKRF_LIBS)
+	@echo "Built: $@ (SDR-agnostic recorder)"
