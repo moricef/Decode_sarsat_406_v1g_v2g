@@ -8,6 +8,13 @@ recordings and SDR receivers.
 
 **Branch**: `main`
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Language: C](https://img.shields.io/badge/Language-C-blue.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-green.svg)](#)
+[![GitHub release](https://img.shields.io/github/v/release/moricef/Decode_sarsat_406_v1g_v2g)](https://github.com/moricef/Decode_sarsat_406_v1g_v2g/releases)
+[![GitHub last commit](https://img.shields.io/github/last-commit/moricef/Decode_sarsat_406_v1g_v2g)](https://github.com/moricef/Decode_sarsat_406_v1g_v2g/commits/main)
+[![GitHub stars](https://img.shields.io/github/stars/moricef/Decode_sarsat_406_v1g_v2g?style=social)](https://github.com/moricef/Decode_sarsat_406_v1g_v2g/stargazers)
+
 ---
 
 ## What works
