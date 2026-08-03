@@ -1,5 +1,6 @@
 #include "fgb_iq_demod.h"
 #include "diag_log.h"
+#include "country_codes.h"
 
 #include <complex.h>
 #include <math.h>
@@ -118,7 +119,23 @@ static int correct_frame(uint8_t *bits, int *length,
         *bch2_fixed = bch2_correct(bits);
         if (*bch2_fixed < 0) return 0;
     }
-    return is_orbitography(bits) ? sync_pattern_ok(bits) : frame_crc_ok(bits);
+    if (!(is_orbitography(bits) ? sync_pattern_ok(bits) : frame_crc_ok(bits)))
+        return 0;
+
+    /* Country code sanity check. BCH1 corrects up to 3 errors and CRC1 is only
+     * 24 bits wide, so a burst decoded from noise can still produce a
+     * structurally valid frame — with a country code that does not exist.
+     * Genuine traffic always carries an assigned MID (locally 227/228 for
+     * France); every phantom observed on the 1544 downlink and on local runs
+     * showed a one-off unassigned code (995, 908, 867, 830, 796, ...).
+     * This is the same rejection the official Cospas-Sarsat decoder applies
+     * ("Unknown Country Code"). */
+    int country = 0;
+    for (int i = 0; i < 10; i++) country = (country << 1) | (bits[26 + i] & 1);
+    if (strcmp(get_country_name(country), "Unknown") == 0)
+        return 0;
+
+    return 1;
 }
 
 /* Manchester integrate-and-dump on complex IQ.
