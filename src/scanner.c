@@ -236,7 +236,9 @@ static void decode_sgb_window(scanner_t *s, scanner_decode_job_t *job) {
                        body && strstr(body, "Test Protocol: Normal Operation"));
         const char *hex_id = scan_alert_extract_hex_id(body);
         int is_repeat = scan_alert_is_repeat(hex_id);
-        if (is_real && is_repeat && scan_alert_channel_allows(freq_mhz, body))
+        if (body && (scan_alert_test_mode() ||
+                     (is_real && is_repeat &&
+                      scan_alert_channel_allows(freq_mhz, body))))
             scan_alert_send("SGB", freq_mhz, job->snr_db, bits,
                             DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS, body);
         free(body);
@@ -312,8 +314,9 @@ static void decode_fgb_window(scanner_t *s, scanner_decode_job_t *job) {
         int is_id_na = (body && strstr(body, "ID-NOT-AVAIL"));
         int is_bench = is_fgb_bench_test(body);
         int is_test = is_fgb_test_message(body);
-        if (body && !is_orb && !is_id_na && !is_bench && !is_test && is_repeat &&
-            scan_alert_channel_allows(freq_mhz, body))
+        if (body && (scan_alert_test_mode() ||
+                     (!is_orb && !is_id_na && !is_bench && !is_test &&
+                      is_repeat && scan_alert_channel_allows(freq_mhz, body))))
             scan_alert_send("FGB", freq_mhz, job->snr_db, bits, frame_length,
                             body);
         free(body);

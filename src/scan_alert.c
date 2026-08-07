@@ -169,6 +169,11 @@ int scan_alert_freq_authorised(double freq_mhz) {
     return 0;
 }
 
+int scan_alert_test_mode(void) {
+    const char *e = getenv("DEC406_ALERT_TEST");
+    return (e && *e) ? 1 : 0;
+}
+
 static int alert_mode_downlink(void) {
     const char *mode = getenv("DEC406_ALERT_MODE");
     return mode && strcmp(mode, "downlink") == 0;
@@ -344,6 +349,11 @@ int scan_alert_send(const char *type, double freq_mhz, double snr_db,
     char hex[256];
     bits_to_hex(bits, n_bits, hex);
 
+    if (scan_alert_test_mode())
+        fprintf(fp,
+                "*** DEC406_ALERT_TEST — alert filters bypassed.\n"
+                "*** This is NOT a distress alert.\n\n");
+
     fprintf(fp,
             "Date     : %s\n"
             "Type     : %s\n"
@@ -360,7 +370,8 @@ int scan_alert_send(const char *type, double freq_mhz, double snr_db,
      * The shell takes care of removing the body file after sending. */
     char subject[128];
     snprintf(subject, sizeof subject,
-             "Alerte_Balise_406 [%s] f=%.4f MHz", type, freq_mhz);
+             "%sAlerte_Balise_406 [%s] f=%.4f MHz",
+             scan_alert_test_mode() ? "[TEST] " : "", type, freq_mhz);
 
     char cmd[2048];
     snprintf(cmd, sizeof cmd,

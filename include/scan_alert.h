@@ -49,6 +49,14 @@ int scan_alert_send(const char *type, double freq_mhz, double snr_db,
                     const uint8_t *bits, size_t n_bits,
                     const char *body_text);
 
+/* 1 when DEC406_ALERT_TEST is set in the environment. Callers then skip
+ * their own filters (real-distress flag, repetition, channel whitelist)
+ * so that any decoded beacon fires a mail. Meant to exercise the alert
+ * path end to end: test beacons can never trigger it otherwise. Alerts
+ * sent in this mode carry a [TEST] subject prefix and a banner in the
+ * body, so they can never be mistaken for a genuine distress alert. */
+int scan_alert_test_mode(void);
+
 /* Extract the Hex ID from a decode block (matches the "Hex ID:" line
  * printed by dec406_v1g/dec406_v2g). Returns a pointer into a static
  * buffer (overwritten on next call), or NULL if no Hex ID line is
