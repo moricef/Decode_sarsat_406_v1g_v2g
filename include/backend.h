@@ -16,6 +16,9 @@ typedef struct {
     /* Optional: real device model for the banner, once opened. NULL if the
      * backend has nothing more specific than .name. */
     const char *(*model)(backend_t *b);
+    /* Set when a negative gain enables a real hardware AGC. Backends that
+     * merely substitute a fixed default value leave this at 0. */
+    int has_agc;
     int dc_guard_bins;
 } backend_ops_t;
 

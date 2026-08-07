@@ -156,5 +156,6 @@ const backend_ops_t backend_pluto = {
     .start = pluto_start_dev,
     .stop = pluto_stop_dev,
     .close = pluto_close_dev,
+    .has_agc = 1,
     .dc_guard_bins = 4
 };

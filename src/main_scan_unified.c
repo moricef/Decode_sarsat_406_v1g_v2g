@@ -142,10 +142,12 @@ int main(int argc, char **argv) {
 
     printf("  rate    : %.4f MSPS   (SPS=%.1f for SGB)\n",
            samp_rate / 1e6, (double)samp_rate / 38400.0);
-    if (gain < 0)
-        printf("  gain    : auto\n");
-    else
+    if (gain >= 0)
         printf("  gain    : %d\n", gain);
+    else if (ops->has_agc)
+        printf("  gain    : auto (hardware AGC)\n");
+    else
+        printf("  gain    : backend default\n");
     if (strcmp(ops->name, "RTL-SDR") == 0)
         printf("  %-8s: %d\n", "ppm", extra);
     else if (strcmp(ops->name, "HackRF One") == 0)

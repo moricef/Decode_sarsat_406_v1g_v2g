@@ -205,5 +205,6 @@ const backend_ops_t backend_rtlsdr = {
     .start = rtlsdr_start_dev,
     .stop = rtlsdr_stop_dev,
     .close = rtlsdr_close_dev,
+    .has_agc = 1,
     .dc_guard_bins = 10
 };
