@@ -120,8 +120,15 @@ Formats d'entrée : complexe float32 (par défaut), `-u` RTL-SDR uint8,
 
 ```bash
 ./build/dec406_scan 406.0M 406.1M             # AGC, ppm=0
-./build/dec406_scan 406.0M 406.1M 0 30        # ppm=0, gain fixe 30 dB
+./build/dec406_scan 406.0M 406.1M 30 0        # gain fixe 30 dB, ppm=0
+./build/dec406_scan 406.0M 406.1M -1 30       # AGC, ppm=30
 ```
+
+Les arguments sont positionnels : `<freq_start> <freq_end> [gain] [extra]`.
+Un gain négatif sélectionne le mode automatique, il faut donc passer `-1`
+explicitement pour atteindre le quatrième argument. `extra` vaut la
+correction en ppm sur RTL-SDR, le bias-tee sur Airspy et l'amplificateur
+sur HackRF ; la bannière de démarrage l'étiquette en conséquence.
 
 Le scanner lit les échantillons à 2,4576 Msps, détecte les rafales dans un
 spectrogramme de puissance, les classe par largeur de bande
@@ -201,7 +208,22 @@ journalctl -u scan406 -p debug     # flux de diagnostic complet
 Si un fichier `data/config_mail.txt` est présent, le scanner envoie par
 courriel la trame décodée dès qu'une balise est décodée sur un canal de
 détresse de la table H.2 T.012 (B/C/D/F/G/J/K/N/O/R/S, ±2 kHz). Le binaire
-`sendemail` doit être installé.
+`sendemail` doit être installé — c'est un client SMTP en Perl, sans rapport
+avec le `sendmail` du système.
+
+Une vraie alerte exige en plus que la trame soit un message de détresse réel
+et que la balise soit entendue deux fois. Les balises de test, l'orbitographie,
+les tests de banc et les émissions uniques n'en déclenchent jamais. Pour
+exercer malgré tout toute la chaîne d'alerte :
+
+```bash
+DEC406_ALERT_TEST=1 ./build/dec406_scan 406.0M 406.1M
+```
+
+Chaque balise décodée envoie alors un courriel, filtres court-circuités. Ces
+alertes portent le préfixe `[TEST]` dans le sujet et un bandeau dans le corps,
+elles ne peuvent donc pas être prises pour de vraies. Laisser la variable non
+définie en exploitation.
 
 Au démarrage, la bannière affiche les paramètres de courriel importants pour
 l'exploitation :

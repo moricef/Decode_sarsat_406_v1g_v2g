@@ -121,8 +121,15 @@ interleaved, `-I` int32 SDRangel ci32_le.
 
 ```bash
 ./build/dec406_scan 406.0M 406.1M             # AGC, ppm=0
-./build/dec406_scan 406.0M 406.1M 0 30        # ppm=0, fixed gain 30 dB
+./build/dec406_scan 406.0M 406.1M 30 0        # fixed gain 30 dB, ppm=0
+./build/dec406_scan 406.0M 406.1M -1 30       # AGC, ppm=30
 ```
+
+Arguments are positional: `<freq_start> <freq_end> [gain] [extra]`. A
+negative gain selects the automatic mode, so pass `-1` explicitly when
+you need to reach the fourth argument. `extra` means ppm correction on
+RTL-SDR, bias-tee on Airspy, and amplifier on HackRF; the startup banner
+labels it accordingly.
 
 The scanner reads samples at 2.4576 Msps, detects bursts on a power
 spectrogram, classifies them by bandwidth (`BW_SPLIT_HZ = 20 kHz`; wider
@@ -196,7 +203,21 @@ journalctl -u scan406 -p debug     # full diagnostic stream
 
 If a `data/config_mail.txt` is present, the scanner emails the decoded
 frame whenever a beacon decodes on a T.012 Table H.2 distress channel
-(B/C/D/F/G/J/K/N/O/R/S, ±2 kHz). The `sendemail` binary must be installed.
+(B/C/D/F/G/J/K/N/O/R/S, ±2 kHz). The `sendemail` binary must be installed
+— it is a Perl SMTP client, unrelated to the system `sendmail`.
+
+A genuine alert also requires the frame to be a real distress message and
+the beacon to be heard twice. Test beacons, orbitography, bench tests and
+one-shot transmissions never raise one. To exercise the whole alert path
+anyway:
+
+```bash
+DEC406_ALERT_TEST=1 ./build/dec406_scan 406.0M 406.1M
+```
+
+Every decoded beacon then mails, filters bypassed. Such alerts carry a
+`[TEST]` subject prefix and a banner in the body, so they cannot be
+mistaken for a real one. Leave the variable unset in production.
 
 At startup the banner prints the mail settings that matter for operation:
 
