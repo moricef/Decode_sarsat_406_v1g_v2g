@@ -158,6 +158,9 @@ void decode_hex_string(const char* hex_str) {
 // Main function
 // ===================================================
 int main(int argc, char *argv[]) {
+    /* Line-buffer stdout: it is block-buffered on a pipe while stderr never
+     * is, which reorders output under `2>&1 | tee`. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     FILE *input_file = NULL;
     int is_hex_input = 0;
     int is_wav_input = 0;

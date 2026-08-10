@@ -137,6 +137,9 @@ static size_t read_win(FILE *fp, int u8, int i16, int i32, size_t n, float compl
 }
 
 int main(int argc, char *argv[]) {
+    /* Line-buffer stdout: it is block-buffered on a pipe while stderr never
+     * is, which reorders output under `2>&1 | tee`. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     const char *fn = NULL;
     float fs = 2457600.0f, foff = 0.0f;
     int u8 = 0, i16 = 0, i32 = 0;

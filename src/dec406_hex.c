@@ -136,6 +136,9 @@ void hex_string_to_bits(const char* hex_str, uint8_t* bits, int bit_count) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Line-buffer stdout: it is block-buffered on a pipe while stderr never
+     * is, which reorders output under `2>&1 | tee`. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <chaîne_hexadécimale>\n", argv[0]);
         fprintf(stderr, "Formats supportés :\n");

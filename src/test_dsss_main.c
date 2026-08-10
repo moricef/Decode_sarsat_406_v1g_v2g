@@ -144,6 +144,9 @@ static const char* detect_format(const char *filename) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Line-buffer stdout: it is block-buffered on a pipe while stderr never
+     * is, which reorders output under `2>&1 | tee`. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("=== COSPAS-SARSAT DSSS OQPSK Demodulator Test ===\n\n");
 
     if (argc < 2) {

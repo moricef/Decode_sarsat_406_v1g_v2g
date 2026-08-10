@@ -169,6 +169,9 @@ static void print_usage(const char *p) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Line-buffer stdout: it is block-buffered on a pipe while stderr never
+     * is, which reorders output under `2>&1 | tee`. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     const char *fn = NULL;
     int samp_rate = 2457600;
     int u8 = 0, i16 = 0, i32 = 0;

@@ -76,6 +76,11 @@ const backend_ops_t *backend_find_by_name(const char *name) {
 }
 
 int main(int argc, char **argv) {
+    /* Line-buffer stdout: on a pipe it would otherwise be block-buffered
+     * while stderr never is, so `2>&1 | tee` interleaves decoder output
+     * (printf) with diagnostics (DIAG, stderr) in the wrong order. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     if (argc < 3) {
         fprintf(stderr,
                 "Usage: %s <freq_start> <freq_end> [gain] [extra]\n"

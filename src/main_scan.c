@@ -780,6 +780,9 @@ static void *process_thread(void *arg) {
 }
 
 int main(int argc, char **argv) {
+    /* Line-buffer stdout: it is block-buffered on a pipe while stderr never
+     * is, which reorders output under `2>&1 | tee`. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
   if (argc < 3) {
     fprintf(stderr,
             "Usage: %s <freq_start> <freq_end> [ppm] [gain_dB]\n"
