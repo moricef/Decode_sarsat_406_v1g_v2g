@@ -1295,12 +1295,12 @@ static int calculate_bit_value(const char *bits, int start, int end) {
 }
 
 // Helper function to print hex byte (adapted from dec406_V7)
-static void print_hex_byte(int x) {
-    int a, b;
-    a = x / 16;
-    b = x % 16;
-    fprintf(stderr, "%x", a);
-    fprintf(stderr, "%x", b);
+/* Callers mix stdout and stderr: orbitography reports through DIAG (stderr),
+ * the other decoders through printf. Writing to the wrong stream reorders the
+ * output under `2>&1 | tee`, since stdout is block-buffered on a pipe while
+ * stderr is not. */
+static void print_hex_byte(FILE *out, int x) {
+    fprintf(out, "%02x", x & 0xff);
 }
 
 // Orbitography/calibration beacon decoder (adapted from dec406_V7)
@@ -1313,7 +1313,7 @@ static void decode_orbitography_data(const char *bits, BeaconInfo1G *info) {
     for (j = 0; j < 5; j++) {
         i = 39 + j * 8;
         a = calculate_bit_value(bits, i, i + 7);
-        print_hex_byte(a);
+        print_hex_byte(stderr, a);
     }
 
     // Extract final 6-bit value (bits 79-84)
@@ -1385,10 +1385,10 @@ static void decode_standard_test_data(const char *bits, BeaconInfo1G *info) {
     for (int j = 0; j < 3; j++) {
         int i = 40 + j * 8;
         int a = calculate_bit_value(bits, i, i + 7);
-        print_hex_byte(a);
+        print_hex_byte(stdout, a);
     }
-    printf(")");
-    
+    printf(")\n");
+
     info->has_position = 0;
     strcpy(info->hex_id, "TEST-STD");
 }
@@ -1401,9 +1401,10 @@ static void decode_test_beacon_data(const char *bits, BeaconInfo1G *info) {
     for (int j = 0; j < 5; j++) {
         int i = 39 + j * 8;
         int a = calculate_bit_value(bits, i, i + 7);
-        print_hex_byte(a);
+        print_hex_byte(stdout, a);
     }
-    
+    printf("\n");
+
     info->has_position = 0;
     strcpy(info->hex_id, "TEST-USER");
 }
@@ -1416,14 +1417,14 @@ static void decode_national_use_data(const char *bits, BeaconInfo1G *info) {
     for (int j = 0; j < 5; j++) {
         int i = 39 + j * 8;
         int a = calculate_bit_value(bits, i, i + 7);
-        print_hex_byte(a);
+        print_hex_byte(stdout, a);
     }
     
     // Additional values at bits 79-84 and 106-111
     int a1 = calculate_bit_value(bits, 79, 84);
     int a2 = calculate_bit_value(bits, 106, 111);
-    printf("%02d%02d", a1, a2);
-    
+    printf("%02d%02d\n", a1, a2);
+
     strcpy(info->hex_id, "NAT-USE");
 }
 
