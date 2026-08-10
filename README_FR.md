@@ -82,9 +82,13 @@ Binaires produits dans `build/` :
 | Binaire | Rôle |
 |---------|------|
 | `dec406_iq` | Démodulateur SGB DSSS/OQPSK depuis fichier IQ |
+| `dec406_fgb_iq` | Démodulateur FGB depuis fichier IQ, pendant 1G de `dec406_iq` |
 | `dec406_hex` | Décodeur 1G/2G depuis chaîne hexadécimale |
 | `dec406_audio` | Décodeur 1G depuis fichier WAV (ancienne chaîne avec démodulation FM) |
-| `dec406_scan` | Scanner en temps réel bande FGB+SGB (Airspy/RTL-SDR/PlutoSDR) |
+| `dec406_scan` | Scanner en temps réel bande FGB+SGB (Airspy/RTL-SDR/PlutoSDR/HackRF) |
+| `dec406_ring` | Enregistreur IQ déclenché — détecte les rafales, écrit du SigMF, sans décodage |
+| `dec406_scan_rtlsdr` | Ancien scanner autonome, RTL-SDR uniquement |
+| `dec406_scan_airspy` | Ancien scanner autonome, Airspy uniquement |
 | `dec406_dsss_test` | Pilote de test unitaire du démodulateur DSSS |
 | `generate_2g_hex` | Générateur de trames de test 2G |
 | `reset_usb` | Utilitaire de réinitialisation de périphérique USB |

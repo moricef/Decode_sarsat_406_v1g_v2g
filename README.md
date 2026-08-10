@@ -83,9 +83,13 @@ Binaries produced in `build/`:
 | Binary | Purpose |
 |--------|---------|
 | `dec406_iq` | SGB DSSS/OQPSK demodulator from IQ file |
+| `dec406_fgb_iq` | FGB demodulator from IQ file, the 1G counterpart of `dec406_iq` |
 | `dec406_hex` | 1G/2G decoder from hex string |
 | `dec406_audio` | 1G decoder from WAV file (legacy FM-demod pipeline) |
-| `dec406_scan` | Real-time FGB+SGB band scanner (Airspy/RTL-SDR/PlutoSDR) |
+| `dec406_scan` | Real-time FGB+SGB band scanner (Airspy/RTL-SDR/PlutoSDR/HackRF) |
+| `dec406_ring` | Triggered IQ recorder — detects bursts, writes SigMF, no decoding |
+| `dec406_scan_rtlsdr` | Legacy standalone scanner, RTL-SDR only |
+| `dec406_scan_airspy` | Legacy standalone scanner, Airspy only |
 | `dec406_dsss_test` | DSSS demodulator unit test driver |
 | `generate_2g_hex` | 2G test frame generator |
 | `reset_usb` | USB device reset utility |
