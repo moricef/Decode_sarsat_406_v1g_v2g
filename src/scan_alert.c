@@ -170,8 +170,10 @@ int scan_alert_freq_authorised(double freq_mhz) {
 }
 
 int scan_alert_test_mode(void) {
+    /* 0=disabled, 1=all beacons, 2=SGB only */
     const char *e = getenv("DEC406_ALERT_TEST");
-    return (e && *e) ? 1 : 0;
+    if (!e || !*e) return 0;
+    return atoi(e);
 }
 
 static int alert_mode_downlink(void) {

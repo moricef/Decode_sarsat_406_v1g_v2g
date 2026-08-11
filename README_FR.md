@@ -221,13 +221,14 @@ les tests de banc et les émissions uniques n'en déclenchent jamais. Pour
 exercer malgré tout toute la chaîne d'alerte :
 
 ```bash
-DEC406_ALERT_TEST=1 ./build/dec406_scan 406.0M 406.1M
+DEC406_ALERT_TEST=1 ./build/dec406_scan 406.0M 406.1M   # toutes balises
+DEC406_ALERT_TEST=2 ./build/dec406_scan 406.0M 406.1M   # SGB seulement
 ```
 
-Chaque balise décodée envoie alors un courriel, filtres court-circuités. Ces
-alertes portent le préfixe `[TEST]` dans le sujet et un bandeau dans le corps,
-elles ne peuvent donc pas être prises pour de vraies. Laisser la variable non
-définie en exploitation.
+Avec la valeur 1, chaque balise décodée envoie un courriel ; la valeur 2 le
+restreint aux SGB. Toutes ces alertes portent le préfixe `[TEST]` dans le sujet
+et un bandeau dans le corps, elles ne peuvent donc pas être prises pour de
+vraies. Laisser la variable non définie en exploitation.
 
 Au démarrage, la bannière affiche les paramètres de courriel importants pour
 l'exploitation :

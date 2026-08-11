@@ -216,12 +216,14 @@ one-shot transmissions never raise one. To exercise the whole alert path
 anyway:
 
 ```bash
-DEC406_ALERT_TEST=1 ./build/dec406_scan 406.0M 406.1M
+DEC406_ALERT_TEST=1 ./build/dec406_scan 406.0M 406.1M   # all beacons
+DEC406_ALERT_TEST=2 ./build/dec406_scan 406.0M 406.1M   # SGB only
 ```
 
-Every decoded beacon then mails, filters bypassed. Such alerts carry a
-`[TEST]` subject prefix and a banner in the body, so they cannot be
-mistaken for a real one. Leave the variable unset in production.
+With value 1 every decoded beacon mails; value 2 restricts to SGB only. All
+alerts raised this way carry a `[TEST]` subject prefix and a banner in the
+body, so they cannot be mistaken for a real one. Leave the variable unset
+in production.
 
 At startup the banner prints the mail settings that matter for operation:
 

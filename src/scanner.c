@@ -314,7 +314,8 @@ static void decode_fgb_window(scanner_t *s, scanner_decode_job_t *job) {
         int is_id_na = (body && strstr(body, "ID-NOT-AVAIL"));
         int is_bench = is_fgb_bench_test(body);
         int is_test = is_fgb_test_message(body);
-        if (body && (scan_alert_test_mode() ||
+        const int test_mode = scan_alert_test_mode();
+        if (body && ((test_mode == 1) ||
                      (!is_orb && !is_id_na && !is_bench && !is_test &&
                       is_repeat && scan_alert_channel_allows(freq_mhz, body))))
             scan_alert_send("FGB", freq_mhz, job->snr_db, bits, frame_length,
