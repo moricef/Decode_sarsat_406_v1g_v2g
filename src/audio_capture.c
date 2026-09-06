@@ -2,7 +2,7 @@
 
 ## Licence
 
- Licence Creative Commons CC BY-NC-SA 
+ MIT — voir le fichier LICENSE a la racine du depot.
 
 ## Auteurs et contributions
 

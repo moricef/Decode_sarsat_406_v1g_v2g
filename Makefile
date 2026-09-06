@@ -1,6 +1,6 @@
 # Makefile for COSPAS-SARSAT 406 MHz Decoder
 # Support FGB (1G) BPSK et SGB (2G) DSSS/OQPSK
-# Licence Creative Commons CC BY-NC-SA
+# MIT - voir le fichier LICENSE a la racine du depot.
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -march=native -g -Iinclude
