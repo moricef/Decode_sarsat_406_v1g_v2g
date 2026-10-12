@@ -91,6 +91,7 @@ static void decode_user_identification(const char *frame, BeaconInfo1G *info);
 static void decode_aircraft_address(const char *s, BeaconInfo1G *info);
 static void decode_supplementary_data(const char *s, BeaconInfo1G *info);
 static void decode_orbitography_data(const char *bits, BeaconInfo1G *info);
+static void print_orbitography_details(const char *frame, int length, const char *hex_id);
 static void decode_standard_test_data(const char *bits, BeaconInfo1G *info);
 static void decode_test_beacon_data(const char *bits, BeaconInfo1G *info);
 static void decode_national_use_data(const char *bits, BeaconInfo1G *info);
@@ -1195,6 +1196,8 @@ void decode_1g(const uint8_t *bits, int length) {
     printf("\nCountry: %u (%s)", info.country_code, get_country_name(info.country_code));
     printf("\nHex ID: %s", info.hex_id);
     printf("\nIdentification: %s", info.vessel_id);
+    if (frame_str[25] == '1' && get_bits(frame_str, 36, 3) == 0)
+        print_orbitography_details(frame_str, length, info.hex_id);
     if (info.is_test_message)
       printf("\nTest Protocol: Active");
     
@@ -1324,6 +1327,36 @@ static void decode_orbitography_data(const char *bits, BeaconInfo1G *info) {
     // Mark as system beacon with no position data
     info->has_position = 0;
     strcpy(info->hex_id, "SYS-ORBIT");
+}
+
+/* C/S T.006: bits 40-81 carry a 7-character Baudot identifier, bits 107-144
+ * are unprotected national use. Only the Toulouse time calibration beacon
+ * (15 Hex ID from C/S A.003) is known to carry UTC in bits 113-144. */
+static void print_orbitography_details(const char *frame, int length, const char *hex_id) {
+    char id[8];
+    int valid = 1;
+    for (int j = 0; j < 7; j++) {
+        id[j] = decode_baudot_char((int)get_bits(frame, 39 + j * 6, 6));
+        if (id[j] == '_') valid = 0;
+    }
+    id[7] = '\0';
+    if (valid) printf("\nOrbitography ID: \"%s\"", id);
+    else       printf("\nOrbitography ID: unavailable");
+
+    if (length != LONG_FRAME_BITS) return;
+    printf("\nBits 107-144: %02X%08X",
+           (unsigned)get_bits(frame, 106, 6), (unsigned)get_bits(frame, 112, 32));
+
+    if (strcmp(hex_id, "9C6000000000001") != 0) return;
+    int d[8];
+    for (int j = 0; j < 8; j++) {
+        d[j] = (int)get_bits(frame, 112 + j * 4, 4);
+        if (d[j] > 9) return;
+    }
+    int day = d[0] * 100 + d[1] * 10 + d[2];
+    int hour = d[3] * 10 + d[4], min = d[5] * 10 + d[6];
+    if (day < 1 || day > 366 || hour > 23 || min > 59 || d[7] > 5) return;
+    printf("\nUTC time (unprotected): day %d %02d:%02d:%d0", day, hour, min, d[7]);
 }
 
 // Baudot character decoder (from dec406_V7)
